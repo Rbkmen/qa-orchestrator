@@ -33,6 +33,13 @@ QA_TASK_TOKEN_COUNTERS = {
     "source_mcp_response_tokens",
     "avoided_source_read_tokens",
 }
+ORCHESTRATION_COUNTERS = {
+    "luna_calls",
+    "terra_calls",
+    "sol_calls",
+    "orchestration_steps_completed",
+    "orchestration_retries",
+}
 DEEP_REASONING = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 EVENT_FIELDS = {
     "schema_version",
@@ -46,8 +53,10 @@ EVENT_FIELDS = {
     "deep_duration_ms",
     "deep_input_tokens",
     "deep_output_tokens",
+    "orchestration_used",
     *QA_TASK_COUNTERS,
     *QA_TASK_TOKEN_COUNTERS,
+    *ORCHESTRATION_COUNTERS,
 }
 
 
@@ -78,8 +87,10 @@ class JsonEventSink:
             "deep_duration_ms",
             "deep_input_tokens",
             "deep_output_tokens",
+            "orchestration_used",
             *QA_TASK_COUNTERS,
             *QA_TASK_TOKEN_COUNTERS,
+            *ORCHESTRATION_COUNTERS,
         }
         payload = {key: event[key] for key in fields if key in event}
         payload.update(
@@ -149,6 +160,9 @@ def valid_qa_task_metrics(event: dict[str, object]) -> bool:
     deep_used = event.get("deep_analysis_used")
     if type(deep_used) is not bool:
         return False
+    orchestration_used = event.get("orchestration_used", False)
+    if type(orchestration_used) is not bool:
+        return False
     if "deep_model" in event and (
         not deep_used
         or not isinstance(event["deep_model"], str)
@@ -176,6 +190,15 @@ def valid_qa_task_metrics(event: dict[str, object]) -> bool:
     if any(
         field in event and (type(event[field]) is not int or event[field] < 0)
         for field in QA_TASK_TOKEN_COUNTERS
+    ):
+        return False
+    if any(
+        field in event and (type(event[field]) is not int or event[field] < 0)
+        for field in ORCHESTRATION_COUNTERS
+    ):
+        return False
+    if not orchestration_used and any(
+        event.get(field, 0) > 0 for field in ORCHESTRATION_COUNTERS
     ):
         return False
     if event["codegraph_calls"] == 0 and any(

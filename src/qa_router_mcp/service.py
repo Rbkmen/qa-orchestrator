@@ -74,6 +74,12 @@ class RouterService:
         codegraph_response_tokens: int | None = None,
         source_mcp_response_tokens: int | None = None,
         avoided_source_read_tokens: int | None = None,
+        orchestration_used: bool = False,
+        luna_calls: int = 0,
+        terra_calls: int = 0,
+        sol_calls: int = 0,
+        orchestration_steps_completed: int = 0,
+        orchestration_retries: int = 0,
     ) -> QaTaskOutcomeReceipt:
         event: dict[str, object] = {
             "task_type": task_type,
@@ -85,6 +91,7 @@ class RouterService:
             "codegraph_calls": codegraph_calls,
             "source_mcp_calls": source_mcp_calls,
             "repeated_source_reads": repeated_source_reads,
+            "orchestration_used": orchestration_used,
         }
         for field, value in (
             ("deep_model", deep_model),
@@ -97,6 +104,15 @@ class RouterService:
             ("avoided_source_read_tokens", avoided_source_read_tokens),
         ):
             if value is not None:
+                event[field] = value
+        for field, value in (
+            ("luna_calls", luna_calls),
+            ("terra_calls", terra_calls),
+            ("sol_calls", sol_calls),
+            ("orchestration_steps_completed", orchestration_steps_completed),
+            ("orchestration_retries", orchestration_retries),
+        ):
+            if orchestration_used or value != 0:
                 event[field] = value
         if not valid_qa_task_metrics(event):
             raise ValueError("QA task metrics are inconsistent")

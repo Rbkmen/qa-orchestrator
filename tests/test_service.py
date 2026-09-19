@@ -79,3 +79,47 @@ def test_service_exposes_orchestration_state_machine(tmp_path):
 
     assert advanced.current_step is OrchestrationStep.TERRA_PRIMARY_REVIEW
     assert service.get_qa_orchestration(started.run_id).run_id == started.run_id
+
+
+def test_metrics_reject_negative_orchestration_counter(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+
+    with pytest.raises(ValueError, match="QA task metrics are inconsistent"):
+        service.record_qa_task_outcome(
+            task_type="ordinary_review",
+            outcome="completed",
+            codegraph_calls=0,
+            source_mcp_calls=0,
+            findings_identified=0,
+            findings_confirmed=0,
+            findings_rejected=0,
+            repeated_source_reads=0,
+            orchestration_used=True,
+            luna_calls=-1,
+        )
+
+
+def test_service_records_orchestration_counters(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+
+    receipt = service.record_qa_task_outcome(
+        task_type="ordinary_review",
+        outcome="completed",
+        codegraph_calls=0,
+        source_mcp_calls=0,
+        findings_identified=0,
+        findings_confirmed=0,
+        findings_rejected=0,
+        repeated_source_reads=0,
+        orchestration_used=True,
+        luna_calls=1,
+        terra_calls=2,
+        sol_calls=1,
+        orchestration_steps_completed=4,
+        orchestration_retries=0,
+    )
+
+    assert receipt.status == "recorded"
+    event = json.loads((tmp_path / "metrics.jsonl").read_text(encoding="utf-8"))
+    assert event["orchestration_used"] is True
+    assert event["terra_calls"] == 2

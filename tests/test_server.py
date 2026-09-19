@@ -87,6 +87,42 @@ async def test_orchestration_tools_advance_and_get_structured_state(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_server_records_orchestration_metrics(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+
+    async with Client(build_server(service)) as client:
+        await client.call_tool(
+            "record_qa_task_outcome",
+            {
+                "task_type": "ordinary_review",
+                "outcome": "completed",
+                "codegraph_calls": 0,
+                "source_mcp_calls": 0,
+                "findings_identified": 0,
+                "findings_confirmed": 0,
+                "findings_rejected": 0,
+                "repeated_source_reads": 0,
+                "orchestration_used": True,
+                "luna_calls": 1,
+                "terra_calls": 2,
+                "sol_calls": 0,
+                "orchestration_steps_completed": 3,
+                "orchestration_retries": 0,
+            },
+        )
+        report = await client.call_tool("get_metrics_report", {"days": 7})
+
+    assert report.structured_content["qa_tasks"]["orchestration"] == {
+        "tasks": 1,
+        "luna_calls": 1,
+        "terra_calls": 2,
+        "sol_calls": 0,
+        "steps_completed": 3,
+        "retries": 0,
+    }
+
+
+@pytest.mark.asyncio
 async def test_task_outcome_and_report_are_model_free(tmp_path):
     service = RouterService.from_settings(data_dir=tmp_path)
 

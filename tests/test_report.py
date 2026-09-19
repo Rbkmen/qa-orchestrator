@@ -76,3 +76,41 @@ def test_report_aggregates_only_model_free_task_outcomes():
     assert report["qa_tasks"]["findings_confirmed"] == 1
     assert report["qa_tasks"]["codegraph"]["calls"] == 1
     assert "by_model" not in report
+
+
+def test_report_aggregates_orchestration_counters():
+    line = json.dumps(
+        {
+            "schema_version": 1,
+            "event_type": "qa_task_outcome",
+            "timestamp": datetime.now(UTC).isoformat(),
+            "task_type": "ordinary_review",
+            "outcome": "completed",
+            "deep_analysis_used": True,
+            "deep_model": "gpt-5.6-sol",
+            "deep_reasoning": "high",
+            "codegraph_calls": 1,
+            "source_mcp_calls": 2,
+            "findings_identified": 1,
+            "findings_confirmed": 1,
+            "findings_rejected": 0,
+            "repeated_source_reads": 0,
+            "orchestration_used": True,
+            "luna_calls": 1,
+            "terra_calls": 2,
+            "sol_calls": 1,
+            "orchestration_steps_completed": 4,
+            "orchestration_retries": 0,
+        }
+    )
+
+    report = summarize_events([line])
+
+    assert report["qa_tasks"]["orchestration"] == {
+        "tasks": 1,
+        "luna_calls": 1,
+        "terra_calls": 2,
+        "sol_calls": 1,
+        "steps_completed": 4,
+        "retries": 0,
+    }

@@ -7,6 +7,7 @@ from os import environ
 from pathlib import Path
 
 from qa_router_mcp.events import (
+    ORCHESTRATION_COUNTERS,
     QA_TASK_TOKEN_COUNTERS,
     read_metrics_lines,
     valid_qa_task_metrics,
@@ -47,6 +48,8 @@ def summarize_events(lines: Iterable[str], days: int = 7) -> dict[str, object]:
         if event["deep_analysis_used"] is True:
             deep_models[str(event.get("deep_model", "unknown"))] += 1
             deep_reasoning[str(event.get("deep_reasoning", "unknown"))] += 1
+        if event.get("orchestration_used") is True:
+            totals["orchestration_tasks"] += 1
         for field in (
             "codegraph_calls",
             "source_mcp_calls",
@@ -60,6 +63,7 @@ def summarize_events(lines: Iterable[str], days: int = 7) -> dict[str, object]:
             "deep_duration_ms",
             "deep_input_tokens",
             "deep_output_tokens",
+            *ORCHESTRATION_COUNTERS,
         ):
             value = event.get(field, 0)
             if type(value) is int and value >= 0:
@@ -95,6 +99,14 @@ def summarize_events(lines: Iterable[str], days: int = 7) -> dict[str, object]:
             },
             "source_mcp_response_tokens": totals["source_mcp_response_tokens"],
             "complete_token_measurement_tasks": totals["complete_token_measurement_tasks"],
+            "orchestration": {
+                "tasks": totals["orchestration_tasks"],
+                "luna_calls": totals["luna_calls"],
+                "terra_calls": totals["terra_calls"],
+                "sol_calls": totals["sol_calls"],
+                "steps_completed": totals["orchestration_steps_completed"],
+                "retries": totals["orchestration_retries"],
+            },
         },
         "data_quality": {
             "task_events": totals["events"],

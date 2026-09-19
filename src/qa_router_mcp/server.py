@@ -77,6 +77,12 @@ def build_server(service: RouterService) -> FastMCP:
         codegraph_response_tokens: int | None = None,
         source_mcp_response_tokens: int | None = None,
         avoided_source_read_tokens: int | None = None,
+        orchestration_used: bool = False,
+        luna_calls: int = 0,
+        terra_calls: int = 0,
+        sol_calls: int = 0,
+        orchestration_steps_completed: int = 0,
+        orchestration_retries: int = 0,
     ) -> QaTaskOutcomeReceipt:
         """Record one content-free outcome owned by the host QA agent."""
         return service.record_qa_task_outcome(
@@ -97,6 +103,12 @@ def build_server(service: RouterService) -> FastMCP:
             codegraph_response_tokens=codegraph_response_tokens,
             source_mcp_response_tokens=source_mcp_response_tokens,
             avoided_source_read_tokens=avoided_source_read_tokens,
+            orchestration_used=orchestration_used,
+            luna_calls=luna_calls,
+            terra_calls=terra_calls,
+            sol_calls=sol_calls,
+            orchestration_steps_completed=orchestration_steps_completed,
+            orchestration_retries=orchestration_retries,
         )
 
     @mcp.tool
