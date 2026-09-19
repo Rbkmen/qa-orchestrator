@@ -22,6 +22,15 @@ class DraftFake:
         self.prompts.append(prompt)
         if "PRESERVE_TERMS" in prompt:
             return DraftEnvelope(draft="Перевод checkout", unverified=["Review locally"])
+        if "REVIEW_AGENT_PROFILE" in prompt:
+            return DraftEnvelope(
+                draft=(
+                    "Scope: changed behavior\nChecklist: inspect changed branches\n"
+                    "Candidate Coverage Gaps: error path\n"
+                    "Positive Observations: bounded input\nUnverified: runtime evidence"
+                ),
+                unverified=["Review locally"],
+            )
         return DraftEnvelope(
             draft=(
                 "Coverage ID: COV-GUEST-HAPPY\nTitle: Case\n"
@@ -88,6 +97,7 @@ async def test_server_exposes_drafting_and_metrics_tools(tmp_path):
         names = set(tools)
         assert names == {
             "draft_test_cases",
+            "draft_review_checklist",
             "summarize_logs",
             "draft_automation_skeleton",
             "translate_text",
@@ -167,6 +177,26 @@ async def test_server_exposes_drafting_and_metrics_tools(tmp_path):
         report = await client.call_tool("get_metrics_report", {"days": 7})
         assert report.structured_content["qa_tasks"]["events"] == 1
         assert report.structured_content["qa_tasks"]["qwen_tasks"] == 1
+
+
+@pytest.mark.asyncio
+async def test_review_checklist_tool_uses_selected_profile(tmp_path):
+    drafting = DraftFake()
+    service = RouterService(Settings(data_dir=tmp_path), drafting)
+
+    async with Client(build_server(service)) as client:
+        result = await client.call_tool(
+            "draft_review_checklist",
+            {
+                "agent_profile": "security_reviewer",
+                "evidence_packet": "Changed login validation; runtime evidence is unverified.",
+                "project_pattern": "Use existing WebdriverIO/Appium test conventions.",
+            },
+        )
+
+    assert result.structured_content["status"] == "ok"
+    assert "REVIEW_AGENT_PROFILE: security_reviewer" in drafting.prompts[0]
+    assert "WebdriverIO/Appium" in drafting.prompts[0]
 
 
 @pytest.mark.asyncio

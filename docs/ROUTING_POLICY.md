@@ -15,6 +15,11 @@ The host agent owns:
 
 Qwen3.5-9B produces bounded drafts only. Its output is never evidence, a final QA decision, or authorization for an external action.
 
+The ECC-inspired review profiles are checklist modes inside QA Router, not
+autonomous agents. They do not retrieve sources, call other agents, write
+files, change Git, or update Jira, GitLab, TestRail, Sentry, or any other
+external system.
+
 ## Automatic routing thresholds
 
 For every sanitized routine draft, first check this list. Call QA Router when one condition matches:
@@ -45,6 +50,7 @@ If the router returns `sensitive_data_detected`, use only its coarse `sensitive_
 ## Tool selection
 
 - `draft_test_cases`: expand an approved 1–12 item coverage map. Each item must contain a unique stable `coverage_id` in `COV-*` format, one purpose, confirmed source, state or branch, and expected invariant. The result must repeat every supplied ID exactly once.
+- `draft_review_checklist`: select one static profile — `pr_test_analyzer`, `code_reviewer`, `security_reviewer`, `silent_failure_hunter`, `code_explorer`, `typescript_reviewer`, or `react_reviewer` — and send only a bounded sanitized Evidence Packet plus an optional project pattern. The result is an unverified checklist with `Scope`, `Checklist`, `Candidate Coverage Gaps`, `Positive Observations`, and `Unverified`; it is not a finding, severity, root-cause, release/merge decision, or runtime proof.
 - `summarize_logs`: group only visible signatures. Do not accept an inferred root cause without separate evidence.
 - `draft_automation_skeleton`: draft structure from an explicit project pattern. The tool must not write files or external data; generated Python snippets are checked for file, process, and network mutations.
 - `translate_text`: translate sanitized text while preserving supplied terminology. Every supplied preserve term must appear verbatim in the returned draft.

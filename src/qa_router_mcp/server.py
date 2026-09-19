@@ -12,6 +12,7 @@ from qa_router_mcp.contracts import (
     QaTaskOutcome,
     QaTaskOutcomeReceipt,
     QaTaskType,
+    ReviewAgent,
 )
 from qa_router_mcp.events import JsonEventSink, read_metrics_lines
 from qa_router_mcp.report import summarize_events
@@ -67,6 +68,20 @@ def build_server(service: RouterService) -> FastMCP:
             DraftKind.TEST_CASES,
             content,
             expected_coverage_ids=tuple(coverage_ids),
+        )
+
+    @mcp.tool
+    async def draft_review_checklist(
+        agent_profile: ReviewAgent,
+        evidence_packet: str,
+        project_pattern: str = "",
+    ) -> DraftEnvelope:
+        """Draft a bounded read-only review checklist from a sanitized Evidence Packet."""
+        return await service.draft(
+            DraftKind.REVIEW_CHECKLIST,
+            evidence_packet,
+            project_pattern or None,
+            review_agent=agent_profile,
         )
 
     @mcp.tool
