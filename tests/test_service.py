@@ -44,8 +44,7 @@ def test_service_records_content_free_task_outcome(tmp_path):
     event = json.loads((tmp_path / "metrics.jsonl").read_text(encoding="utf-8"))
     assert event["event_type"] == "qa_task_outcome"
     assert event["deep_model"] == "gpt-5.6-sol"
-    assert "qwen_used" not in event
-    assert "model" not in event
+    assert "legacy_metric" not in event
 
 
 def test_service_rejects_inconsistent_task_outcome(tmp_path):

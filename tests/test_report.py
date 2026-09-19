@@ -54,7 +54,7 @@ def test_report_aggregates_only_model_free_task_outcomes():
                 "timestamp": timestamp,
                 "task_type": "ordinary_review",
                 "outcome": "completed",
-                "qwen_used": True,
+                "legacy_metric": True,
                 "deep_analysis_used": False,
                 "codegraph_calls": 0,
                 "source_mcp_calls": 0,
@@ -75,5 +75,4 @@ def test_report_aggregates_only_model_free_task_outcomes():
     assert report["qa_tasks"]["deep_by_model"] == {"gpt-5.6-sol": 1}
     assert report["qa_tasks"]["findings_confirmed"] == 1
     assert report["qa_tasks"]["codegraph"]["calls"] == 1
-    assert "qwen_tasks" not in report["qa_tasks"]
     assert "by_model" not in report

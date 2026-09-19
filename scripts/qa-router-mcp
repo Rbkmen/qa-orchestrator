@@ -2,22 +2,12 @@
 set -eu
 
 router_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-router_model=${QA_ROUTER_MODEL:-qwen/qwen3.5-9b}
 router_home=${HOME:?HOME must be set}
 router_data_dir=${QA_ROUTER_DATA_DIR:-"$router_home/.qa-router"}
 
 exec /usr/bin/env -i \
   HOME="$router_home" \
-  PATH="$router_home/.local/bin:$router_home/.lmstudio/bin:/opt/homebrew/bin:/usr/bin:/bin" \
-  QA_ROUTER_ENABLED=1 \
-  QA_ROUTER_MODEL="$router_model" \
-  QA_ROUTER_CONTEXT=16384 \
-  QA_ROUTER_MAX_OUTPUT=3072 \
-  QA_ROUTER_LMSTUDIO_URL=http://127.0.0.1:1234 \
-  QA_ROUTER_TIMEOUT=90 \
-  QA_ROUTER_TTL_SECONDS=300 \
-  QA_ROUTER_CONTEXT_RESERVE=512 \
-  QA_ROUTER_METRICS_SOURCE=interactive \
+  PATH="$router_home/.local/bin:/opt/homebrew/bin:/usr/bin:/bin" \
   QA_ROUTER_METRICS_RETENTION_DAYS="${QA_ROUTER_METRICS_RETENTION_DAYS:-30}" \
   QA_ROUTER_METRICS_MAX_EVENTS="${QA_ROUTER_METRICS_MAX_EVENTS:-10000}" \
   QA_ROUTER_DATA_DIR="$router_data_dir" \

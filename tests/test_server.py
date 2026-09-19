@@ -1,5 +1,3 @@
-import json
-
 import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
@@ -20,8 +18,6 @@ async def test_server_exposes_only_deterministic_route_and_metrics_tools(tmp_pat
         "record_qa_task_outcome",
         "get_metrics_report",
     }
-    assert "qwen_used" not in tools["record_qa_task_outcome"].inputSchema["properties"]
-    assert "qwen_edits" not in tools["record_qa_task_outcome"].inputSchema["properties"]
 
 
 @pytest.mark.asyncio
@@ -61,10 +57,7 @@ async def test_task_outcome_and_report_are_model_free(tmp_path):
 
     assert outcome.structured_content == {"status": "recorded"}
     assert report.structured_content["qa_tasks"]["events"] == 1
-    assert "qwen_tasks" not in report.structured_content["qa_tasks"]
     assert "generation_events" not in report.structured_content
-    assert "qwen" not in json.dumps(report.structured_content).lower()
-    assert "qwen" not in (tmp_path / "metrics.jsonl").read_text(encoding="utf-8").lower()
 
 
 @pytest.mark.asyncio

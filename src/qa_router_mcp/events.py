@@ -34,15 +34,20 @@ QA_TASK_TOKEN_COUNTERS = {
     "avoided_source_read_tokens",
 }
 DEEP_REASONING = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
-RETIRED_FIELDS = {
-    "qwen_used",
-    "qwen_edits",
-    "model",
-    "prompt_tokens",
-    "output_tokens",
-    "generation_ms",
-    "canary_feedback_required",
-    "shadow_evaluation_required",
+EVENT_FIELDS = {
+    "schema_version",
+    "event_type",
+    "timestamp",
+    "task_type",
+    "outcome",
+    "deep_analysis_used",
+    "deep_model",
+    "deep_reasoning",
+    "deep_duration_ms",
+    "deep_input_tokens",
+    "deep_output_tokens",
+    *QA_TASK_COUNTERS,
+    *QA_TASK_TOKEN_COUNTERS,
 }
 
 
@@ -139,7 +144,7 @@ def read_metrics_lines(path: Path) -> list[str]:
 def valid_qa_task_metrics(event: dict[str, object]) -> bool:
     if event.get("task_type") not in QA_TASK_TYPES or event.get("outcome") not in QA_TASK_OUTCOMES:
         return False
-    if RETIRED_FIELDS.intersection(event):
+    if set(event) - EVENT_FIELDS:
         return False
     deep_used = event.get("deep_analysis_used")
     if type(deep_used) is not bool:
