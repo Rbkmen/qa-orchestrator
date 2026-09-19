@@ -7,7 +7,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
-from qa_router_mcp.contracts import QaTaskOutcome, QaTaskType, ReviewAgent
+from qa_router_mcp.contracts import QaTaskOutcome, QaTaskType, ReviewAgent, ReviewBundle
+from qa_router_mcp.review_profiles import REVIEW_BUNDLES, bundle_profiles
 
 
 class OrchestrationStep(StrEnum):
@@ -74,7 +75,11 @@ class QaOrchestrationSession(BaseModel):
     task_type: QaTaskType
     status: OrchestrationStatus
     current_step: OrchestrationStep
+    allowed_profiles: list[ReviewAgent] = Field(default_factory=lambda: list(ReviewAgent))
+    allowed_bundles: list[ReviewBundle] = Field(default_factory=lambda: list(REVIEW_BUNDLES))
+    selected_bundle: ReviewBundle | None = None
     selected_profile: ReviewAgent | None = None
+    review_profiles: list[ReviewAgent] = Field(default_factory=list)
     model_policy: ModelPolicy | None = None
     next_action: str = Field(min_length=1)
     read_only: bool = True
@@ -88,6 +93,7 @@ class AdvanceQaOrchestrationRequest(BaseModel):
     run_id: str = Field(pattern=r"^qar-[0-9a-f]{32}$")
     completed_step: OrchestrationStep
     status: QaTaskOutcome
+    selected_bundle: ReviewBundle | None = None
     selected_profile: ReviewAgent | None = None
     needs_deep_analysis: bool = False
     reason_code: OrchestrationReason | None = None
@@ -97,9 +103,11 @@ class AdvanceQaOrchestrationRequest(BaseModel):
         if (
             self.completed_step is OrchestrationStep.LUNA_TRIAGE
             and self.status == "completed"
-            and self.selected_profile is None
         ):
-            raise ValueError("selected_profile is required after Luna triage")
+            if (self.selected_bundle is None) == (self.selected_profile is None):
+                raise ValueError("exactly one selection is required after Luna triage")
+        elif self.selected_bundle is not None or self.selected_profile is not None:
+            raise ValueError("selection may only be supplied after Luna")
 
         if self.needs_deep_analysis:
             if self.completed_step is not OrchestrationStep.TERRA_PRIMARY_REVIEW:
@@ -120,8 +128,8 @@ class OrchestrationError(ValueError):
 
 _NEXT_ACTIONS = MappingProxyType(
     {
-        OrchestrationStep.LUNA_TRIAGE: "Host runs Luna triage and submits the selected review profile.",
-        OrchestrationStep.TERRA_PRIMARY_REVIEW: "Host runs Terra primary review with the selected profile.",
+        OrchestrationStep.LUNA_TRIAGE: "Host runs Luna triage and submits the selected review bundle or profile.",
+        OrchestrationStep.TERRA_PRIMARY_REVIEW: "Host runs Terra primary review with the selected ordered profiles.",
         OrchestrationStep.SOL_DEEP_REVIEW: "Host runs Sol deep read-only analysis for the fixed escalation reason.",
         OrchestrationStep.TERRA_SYNTHESIS: "Host runs Terra synthesis and validates the final QA result.",
         OrchestrationStep.AWAITING_HOST_OUTCOME: "Host records the final QA outcome.",
@@ -169,6 +177,8 @@ class QaOrchestrator:
             task_type=validated_task_type,
             status=OrchestrationStatus.ACTIVE,
             current_step=OrchestrationStep.LUNA_TRIAGE,
+            allowed_profiles=list(ReviewAgent),
+            allowed_bundles=list(REVIEW_BUNDLES),
             model_policy=MODEL_POLICIES[OrchestrationStep.LUNA_TRIAGE],
             next_action=_NEXT_ACTIONS[OrchestrationStep.LUNA_TRIAGE],
             expires_at=now + timedelta(seconds=self._ttl_seconds),
@@ -182,6 +192,7 @@ class QaOrchestrator:
         run_id: str,
         completed_step: OrchestrationStep,
         status: QaTaskOutcome,
+        selected_bundle: ReviewBundle | None = None,
         selected_profile: ReviewAgent | None = None,
         needs_deep_analysis: bool = False,
         reason_code: OrchestrationReason | None = None,
@@ -191,6 +202,7 @@ class QaOrchestrator:
                 run_id=run_id,
                 completed_step=completed_step,
                 status=status,
+                selected_bundle=selected_bundle,
                 selected_profile=selected_profile,
                 needs_deep_analysis=needs_deep_analysis,
                 reason_code=reason_code,
@@ -239,12 +251,20 @@ class QaOrchestrator:
         request: AdvanceQaOrchestrationRequest,
     ) -> QaOrchestrationSession:
         if session.current_step is OrchestrationStep.LUNA_TRIAGE:
-            if request.selected_profile is None:
-                raise OrchestrationError("missing profile after Luna triage")
+            if request.selected_bundle is not None:
+                selected_profiles = bundle_profiles(request.selected_bundle)
+                selected_profile = selected_profiles[0]
+            elif request.selected_profile is not None:
+                selected_profiles = (request.selected_profile,)
+                selected_profile = request.selected_profile
+            else:
+                raise OrchestrationError("missing profile or bundle after Luna triage")
             return session.model_copy(
                 update={
                     "current_step": OrchestrationStep.TERRA_PRIMARY_REVIEW,
-                    "selected_profile": request.selected_profile,
+                    "selected_bundle": request.selected_bundle,
+                    "selected_profile": selected_profile,
+                    "review_profiles": list(selected_profiles),
                     "model_policy": MODEL_POLICIES[OrchestrationStep.TERRA_PRIMARY_REVIEW],
                     "next_action": _NEXT_ACTIONS[OrchestrationStep.TERRA_PRIMARY_REVIEW],
                 }

@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from qa_router_mcp.contracts import ReviewAgent
+from qa_router_mcp.contracts import ReviewAgent, ReviewBundle
 from qa_router_mcp.orchestration import (
     MODEL_POLICIES,
     AdvanceQaOrchestrationRequest,
@@ -62,4 +62,54 @@ def test_non_deep_request_rejects_reason_code():
             completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
             status="completed",
             reason_code=OrchestrationReason.ROOT_CAUSE,
+        )
+
+
+def test_completed_luna_requires_exactly_one_selection():
+    with pytest.raises(ValidationError, match="exactly one"):
+        AdvanceQaOrchestrationRequest(
+            run_id="qar-0123456789abcdef0123456789abcdef",
+            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            status="completed",
+        )
+
+    with pytest.raises(ValidationError, match="exactly one"):
+        AdvanceQaOrchestrationRequest(
+            run_id="qar-0123456789abcdef0123456789abcdef",
+            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            status="completed",
+            selected_profile=ReviewAgent.CODE_REVIEWER,
+            selected_bundle=ReviewBundle.ORDINARY_MR,
+        )
+
+
+def test_completed_luna_accepts_one_fixed_bundle():
+    request = AdvanceQaOrchestrationRequest(
+        run_id="qar-0123456789abcdef0123456789abcdef",
+        completed_step=OrchestrationStep.LUNA_TRIAGE,
+        status="completed",
+        selected_bundle=ReviewBundle.ORDINARY_MR,
+    )
+
+    assert request.selected_bundle is ReviewBundle.ORDINARY_MR
+
+
+def test_selection_is_rejected_after_luna():
+    with pytest.raises(ValidationError, match="only be supplied after Luna"):
+        AdvanceQaOrchestrationRequest(
+            run_id="qar-0123456789abcdef0123456789abcdef",
+            completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
+            status="completed",
+            selected_bundle=ReviewBundle.ORDINARY_MR,
+        )
+
+
+def test_arbitrary_profile_order_is_rejected():
+    with pytest.raises(ValidationError):
+        AdvanceQaOrchestrationRequest(
+            run_id="qar-0123456789abcdef0123456789abcdef",
+            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            status="completed",
+            selected_profile=ReviewAgent.CODE_REVIEWER,
+            review_profiles=[ReviewAgent.CODE_REVIEWER, ReviewAgent.CODE_EXPLORER],
         )
