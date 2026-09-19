@@ -33,6 +33,8 @@ tool_timeout_sec = 120
 
 Добавь правила из [`client-rules/generic/QA_ROUTER_INSTRUCTIONS.md`](../../client-rules/generic/QA_ROUTER_INSTRUCTIONS.md) в persistent project instructions или адаптируй их под свои Codex rules. Не устанавливай отдельный routing skill: достаточно MCP-сервера и этих инструкций.
 
-Primary Codex собирает evidence, вызывает `prepare_review_route`, выполняет ревью сам и после завершения записывает один content-free outcome. `qa_deep`, если он нужен, остаётся отдельной host-owned read-only эскалацией.
+Primary Codex остаётся host и владельцем evidence, решений и внешних действий. Для orchestration используй шесть tools: `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `prepare_review_route`, `record_qa_task_outcome` и `get_metrics_report`.
+
+Model policy host-owned: `gpt-5.6-luna/max` делает triage, `gpt-5.6-terra/medium` — primary review и synthesis, а optional `gpt-5.6-sol/high` — read-only deep analysis. Передавай Router только структурированные сигналы; prompts, evidence и model outputs остаются в Codex.
 
 Reference: [official Codex MCP documentation](https://developers.openai.com/codex/mcp).

@@ -20,7 +20,7 @@ The orchestration contract exposes model assignments and reasoning levels to the
 
 The normal flow is `Luna/max → Terra/medium → optional Sol/high → Terra/medium synthesis`. `max` is intentionally limited to the Luna triage stage; Sol is not raised automatically above `high`.
 
-No local model, provider process, model API credential, or hidden fallback is part of the server.
+No model runtime, provider process, model API credential, or hidden fallback is part of the server.
 
 ## Responsibility boundary
 

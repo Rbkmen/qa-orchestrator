@@ -17,7 +17,7 @@ Cursor подключает QA Router через `mcp.json`. Используй 
 }
 ```
 
-Перезапусти Cursor и проверь, что доступны ровно три инструмента QA Router.
+Перезапусти Cursor и проверь, что доступны ровно шесть инструментов QA Router.
 
 ## Инструкции host agent
 
@@ -27,6 +27,6 @@ cp /absolute/path/to/qa-router-mcp/client-rules/cursor/qa-router.mdc \
   /absolute/path/to/your-project/.cursor/rules/qa-router.mdc
 ```
 
-Правило заставляет Cursor Agent получать evidence и принимать QA-решения самостоятельно; `prepare_review_route` используется как детерминированный профиль, а не как отдельный агент.
+Правило заставляет Cursor Agent получать evidence, выполнять model stages и принимать QA-решения самостоятельно. Используй `start_qa_orchestration` → `advance_qa_orchestration` → `get_qa_orchestration`, а `prepare_review_route` — как детерминированный профиль, а не как отдельный агент. Policy: Luna/max для triage, Terra/medium для primary/synthesis и optional Sol/high для read-only escalation.
 
 References: [official Cursor MCP documentation](https://docs.cursor.com/context/model-context-protocol) и [Cursor Rules documentation](https://cursor.com/docs/rules).

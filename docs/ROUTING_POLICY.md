@@ -1,28 +1,47 @@
 # QA Router Policy
 
-Эта policy client-neutral. **Host agent** — Codex, Claude Code, Cursor или другой MCP-клиент — остаётся главным оркестратором и владельцем решений.
+Эта policy client-neutral. **Primary host** — Codex, Claude Code, Cursor или другой MCP-клиент — остаётся главным оркестратором и владельцем решений.
 
 ## Responsibility boundary
 
-Host agent owns:
+Primary host owns:
 
 - task classification и получение authoritative sources;
 - requirements, diff, code, contract, log и runtime analysis;
+- запуск model stages по фиксированной policy и валидацию ответов;
 - findings, severity, coverage, release/readiness judgment и финальный ответ;
 - CodeGraph и source-MCP calls;
-- code/file changes и все записи в Jira, GitLab, TestRail, Sentry или другие системы;
-- optional `qa_deep` и проверку его результата.
+- code/file changes и все записи во внешние системы.
 
-QA Router owns only deterministic profile routing and content-free metrics. Профили не являются autonomous agents: они не читают sources, не вызывают другие tools, не создают threads, не пишут файлы и не публикуют findings.
+QA Router owns only deterministic profile routing, content-free orchestration state and aggregate metrics. Router не принимает evidence, prompts или model outputs и не выполняет autonomous writes.
 
-## Review flow
+## Model policy
 
-1. Host классифицирует QA-задачу и собирает минимально необходимое evidence.
-2. Host вызывает `prepare_review_route(agent_profile)` с одним стабильным профилем.
-3. Router возвращает `focus`, `required_sections`, `constraints`, `escalation_signals`, `read_only=true` и `host_owns_decisions=true`.
-4. Host применяет этот focus к diff и evidence, затем сам формирует Findings, Changes, Manual Test Plan и Open Questions / Could Not Verify.
-5. При сложном cross-repository, debugging, security/payment/fraud-sensitive или high-blast-radius случае host может один раз запустить bounded read-only `qa_deep` в своей среде. Решение о запуске и интерпретация результата принадлежат host.
-6. После outcome `completed`, `partial` или `blocked` host один раз вызывает `record_qa_task_outcome`.
+| Стадия | Model | Reasoning | Ответственность |
+|---|---|---|---|
+| Triage | `gpt-5.6-luna` | `max` | Выбор review profile и выявление evidence gaps |
+| Primary review | `gpt-5.6-terra` | `medium` | Основное implementation-aware ревью |
+| Deep escalation | `gpt-5.6-sol` | `high` | Опциональная read-only проверка сложного или рискованного случая |
+| Synthesis | `gpt-5.6-terra` | `medium` | Сведение результата после проверки host |
+
+Router только возвращает следующую policy и transition constraints. Primary host запускает модели в своей среде, проверяет findings и сам принимает финальное решение.
+
+## Orchestration flow
+
+1. Host вызывает `start_qa_orchestration(task_type)` и получает `run_id`, Luna/max и next action.
+2. После triage host передаёт `advance_qa_orchestration` с одним из семи `ReviewAgent` profiles.
+3. После Terra primary host либо идёт напрямую в Terra synthesis, либо передаёт fixed `reason_code` и получает optional Sol/high.
+4. После Sol host возвращается к Terra synthesis.
+5. После synthesis состояние становится `awaiting_host_outcome`; host один раз вызывает `record_qa_task_outcome` со статусом `completed`, `partial` или `blocked`.
+
+Разрешённые переходы:
+
+```text
+Luna triage → Terra primary → Terra synthesis → awaiting host outcome
+                            ↘ Sol deep review ↗
+```
+
+Сессии content-free, in-memory, с TTL `1800` секунд и лимитом `100` по умолчанию. Unknown run, expired session, illegal/repeated transition и invalid signal отклоняются без изменения состояния. После рестарта host начинает новую сессию.
 
 ## Review profiles
 
@@ -36,7 +55,7 @@ QA Router owns only deterministic profile routing and content-free metrics. Пр
 - `typescript_reviewer` — TypeScript types, async boundaries, serialization and build safety;
 - `react_reviewer` — React state, effects, rendering, props and user-visible behavior.
 
-Каждое ревью должно отделять подтверждённые findings от hypotheses и unverified runtime/release evidence. Пустой или неизвестный profile отклоняется до формирования route.
+Каждое ревью должно отделять confirmed findings от hypotheses и unverified runtime/release facts. Пустой или неизвестный profile отклоняется до формирования route.
 
 ## Metrics contract
 
@@ -45,23 +64,24 @@ QA Router owns only deterministic profile routing and content-free metrics. Пр
 - `task_type`, `outcome`;
 - CodeGraph/source call counters;
 - identified/confirmed/rejected findings и repeated source reads;
-- optional `deep_analysis_used`, `deep_model`, `deep_reasoning`, duration/token measurements;
-- aggregate response-token counters, если они реально измерены.
+- optional `deep_*` measurements;
+- `orchestration_used`, `luna_calls`, `terra_calls`, `sol_calls`, `orchestration_steps_completed`, `orchestration_retries`.
 
-Не отправляй issue keys, titles, paths, source text, code, logs, prompts, screenshots или generated content. Неизмеренный counter нужно опустить; `0` означает измеренный нулевой результат. `avoided_source_read_tokens` — явно обозначенная оценка, а не доказанный counterfactual.
-
-Metrics JSONL ограничен retention и числом событий. `get_metrics_report(days)` возвращает только агрегаты и data-quality counters.
+Orchestration counters неотрицательны и не принимаются как положительные, если orchestration не использовался. Не отправляй issue keys, titles, paths, source text, code, logs, screenshots или generated content. `get_metrics_report(days)` возвращает только агрегаты и data-quality counters.
 
 ## MCP tools
 
 Router должен публиковать ровно:
 
 - `prepare_review_route`;
+- `start_qa_orchestration`;
+- `advance_qa_orchestration`;
+- `get_qa_orchestration`;
 - `record_qa_task_outcome`;
 - `get_metrics_report`.
 
-Не добавляй tool, который генерирует текст, принимает evidence, меняет внешний state, выбирает host model или скрыто вызывает другой агент.
+`read_only=true` и `host_owns_decisions=true` должны сохраняться во всех orchestration states. Не добавляй tool, который генерирует текст, принимает evidence, меняет внешний state, выбирает модель за host или скрыто вызывает другой агент.
 
 ## Persistence and safety
 
-Сервис не хранит task content, conversation history, source cache или persistent QA memory. При добавлении поля сначала проверь, что его можно агрегировать без раскрытия источника и что финальное решение по-прежнему принимает host agent.
+Сервис не хранит task content, conversation history, source cache или persistent QA memory. При добавлении поля сначала проверь, что его можно агрегировать без раскрытия источника и что финальное решение по-прежнему принимает primary host.

@@ -24,8 +24,8 @@ QA Router использует стандартный MCP STDIO transport. Со�
 
 ## Проверка
 
-1. Убедись, что сервер подключается и показывает `prepare_review_route`, `record_qa_task_outcome`, `get_metrics_report`.
-2. Вызови `prepare_review_route` для каждого нужного профиля и проверь read-only флаги.
-3. Выполни маленькое read-only QA-ревью в host agent.
-4. Заверши его одним вызовом `record_qa_task_outcome`.
-5. Проверь агрегаты через `get_metrics_report`.
+1. Убедись, что сервер подключается и показывает ровно шесть tools: `prepare_review_route`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `record_qa_task_outcome`, `get_metrics_report`.
+2. Запусти orchestration: Luna/max triage, Terra/medium primary review, optional Sol/high read-only analysis и Terra/medium synthesis.
+3. После каждой стадии передавай Router только structured signal; evidence и outputs храни в host agent.
+4. Проверь `read_only=true` и `host_owns_decisions=true`, затем заверши задачу одним вызовом `record_qa_task_outcome`.
+5. Проверь aggregate counters через `get_metrics_report`.

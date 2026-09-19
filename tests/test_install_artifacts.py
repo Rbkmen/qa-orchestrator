@@ -45,6 +45,52 @@ def test_operational_artifacts_describe_primary_agent_routing():
             assert forbidden not in text
 
 
+def test_operational_artifacts_describe_host_orchestration():
+    artifacts = [
+        ROOT / "README.md",
+        ROOT / "docs/ROUTING_POLICY.md",
+        ROOT / "client-rules/generic/QA_ROUTER_INSTRUCTIONS.md",
+    ]
+    required = (
+        "start_qa_orchestration",
+        "advance_qa_orchestration",
+        "get_qa_orchestration",
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol",
+        "host_owns_decisions",
+    )
+    forbidden = (
+        "qa router calls models",
+        "qa router invokes models",
+        "submit evidence to qa router",
+        "arbitrary prompt to qa router",
+    )
+
+    for artifact in artifacts:
+        text = artifact.read_text(encoding="utf-8").lower()
+        for phrase in required:
+            assert phrase in text
+        for phrase in forbidden:
+            assert phrase not in text
+
+
+def test_documentation_contains_no_retired_runtime_terms():
+    artifacts = [
+        ROOT / "README.md",
+        ROOT / "CONTRIBUTING.md",
+        *ROOT.glob("docs/**/*.md"),
+        *ROOT.glob("client-rules/**/*.md"),
+        *ROOT.glob("client-rules/**/*.mdc"),
+    ]
+    forbidden = ("qwen", "lmstudio", "lm studio", "llmster", "mlx", "local model", "local delegation")
+
+    for artifact in artifacts:
+        text = artifact.read_text(encoding="utf-8").lower()
+        for term in forbidden:
+            assert term not in text, f"{term} remains in {artifact}"
+
+
 @pytest.mark.asyncio
 async def test_launcher_exposes_six_tools():
     transport = StdioTransport(command=str(LAUNCHER), args=[])

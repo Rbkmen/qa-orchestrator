@@ -1,40 +1,59 @@
 # QA Router MCP
 
-QA Router MCP — небольшой детерминированный FastMCP-сервис для маршрутизации QA-ревью и обезличенных метрик. Он не собирает evidence, не пишет ревью, не принимает QA-решения, не создаёт агентов и не выполняет внешние действия. Всё это остаётся у primary host agent.
+QA Router MCP — небольшой детерминированный FastMCP-сервис для host-owned QA-ревью и обезличенных метрик. Router хранит только ограниченное состояние маршрута: evidence, исходный код, логи, prompts, ответы моделей и финальные решения остаются у primary host agent.
 
 ## Как работает
 
-1. Primary agent классифицирует задачу и получает evidence из Jira, GitLab, TestRail, Sentry, Grafana, OpenSearch, Slack, Confluence и локального кода.
-2. Для implementation-aware ревью он вызывает `prepare_review_route` с одним из семи профилей. Сервис возвращает неизменяемый маршрут: focus, обязательные секции, ограничения и сигналы для эскалации.
-3. Primary agent сам анализирует diff, контракты, callers, runtime-доказательства и результаты проверок. Профиль — это чеклист направления, а не автономный агент.
-4. Для сложного cross-repository или security-sensitive анализа host может использовать один bounded read-only `qa_deep` в своей собственной конфигурации. QA Router его не выбирает и не запускает.
-5. После завершения QA-задачи host один раз вызывает `record_qa_task_outcome`. Сохраняются только счётчики и технические поля без текста evidence.
+1. Primary host получает authoritative evidence из нужных систем и определяет тип QA-задачи.
+2. Host вызывает `start_qa_orchestration`. Router создаёт content-free сессию и возвращает первый шаг — Luna с `max` reasoning.
+3. Host выполняет стадии в своей model configuration и после каждой стадии передаёт Router только структурированный сигнал:
+   - `gpt-5.6-luna` + `max` — triage и выбор одного review profile;
+   - `gpt-5.6-terra` + `medium` — primary review;
+   - опционально `gpt-5.6-sol` + `high` — read-only deep analysis по фиксированной причине;
+   - `gpt-5.6-terra` + `medium` — synthesis.
+4. Host сам проверяет findings, runtime-доказательства и ограничения, затем один раз вызывает `record_qa_task_outcome`.
+
+Router не вызывает модели, не выбирает severity или release readiness и не выполняет внешние записи.
 
 ## MCP-интерфейс
 
-Сервис публикует ровно три инструмента:
+Сервис публикует ровно шесть инструментов:
 
 | Инструмент | Назначение |
 |---|---|
-| `prepare_review_route(agent_profile)` | Детерминированный маршрут для профиля ревью |
-| `record_qa_task_outcome(...)` | Обезличенная запись результата QA-задачи |
+| `prepare_review_route(agent_profile)` | Детерминированный checklist для одного из семи профилей |
+| `start_qa_orchestration(task_type)` | Создание host-owned orchestration-сессии |
+| `advance_qa_orchestration(...)` | Один структурированный переход между стадиями |
+| `get_qa_orchestration(run_id)` | Чтение текущего content-free состояния |
+| `record_qa_task_outcome(...)` | Одна обезличенная запись результата QA-задачи |
 | `get_metrics_report(days)` | Агрегированный отчёт за положительный период |
 
-Профили: `pr_test_analyzer`, `code_reviewer`, `security_reviewer`, `silent_failure_hunter`, `code_explorer`, `typescript_reviewer`, `react_reviewer`.
+Оркестрационный flow:
 
-Маршрут всегда помечен как `read_only=true` и `host_owns_decisions=true`. Общие секции: `Scope`, `Checklist`, `Candidate Coverage Gaps`, `Positive Observations`, `Unverified`.
+```text
+Luna/max → Terra/medium → Terra/medium synthesis → host outcome
+                         ↘ optional Sol/high ↗
+```
+
+Сессии хранятся только в памяти процесса. По умолчанию TTL — 1800 секунд, максимум — 100 активных сессий. После перезапуска host начинает новую сессию. `read_only=true` и `host_owns_decisions=true` являются частью каждого состояния.
+
+### Профили ревью
+
+`pr_test_analyzer`, `code_reviewer`, `security_reviewer`, `silent_failure_hunter`, `code_explorer`, `typescript_reviewer`, `react_reviewer`.
+
+Общие секции route: `Scope`, `Checklist`, `Candidate Coverage Gaps`, `Positive Observations`, `Unverified`.
 
 ## Границы ответственности
 
-Primary agent отвечает за:
+Primary host отвечает за:
 
-- получение и проверку authoritative evidence;
-- анализ требований, diff, кода, контрактов, логов и runtime-доказательств;
-- findings, severity, release/readiness judgment и финальный QA-ответ;
-- любые изменения файлов и записи во внешние системы;
-- запуск optional `qa_deep` и проверку его результата.
+- получение и проверку evidence;
+- вызовы Jira, GitLab, TestRail, Sentry, Grafana, OpenSearch, Slack, Confluence, CodeGraph и файловой системы;
+- запуск трёх model stages по policy и проверку их результатов;
+- confirmed findings, severity, release/readiness judgment и финальный QA-ответ;
+- изменения файлов и любые внешние записи.
 
-QA Router отвечает только за статический профиль маршрута и content-free task metrics. Он не хранит prompts, source text, логи, draft content или persistent QA memory.
+QA Router отвечает только за fixed routing, state transitions, read-only constraints и content-free metrics. В `advance_qa_orchestration` нельзя передавать Evidence Packet, prompt, model output, source text, logs, paths или произвольную причину.
 
 ## Требования
 
@@ -52,7 +71,7 @@ uv run pytest -q
 uv run ruff check .
 ```
 
-Подключи `scripts/qa-router-mcp` как STDIO MCP-сервер. Launcher использует `.venv`, передаёт только каталог метрик и параметры retention и не требует отдельного фонового сервиса.
+Подключи `scripts/qa-router-mcp` как STDIO MCP-сервер. Launcher передаёт каталог метрик и параметры retention/orchestration, не требует отдельного фонового процесса.
 
 Пример для Codex:
 
@@ -65,21 +84,25 @@ codex mcp add qa-router -- \
 
 ## Конфигурация
 
-По умолчанию метрики записываются в `$HOME/.qa-router/metrics.jsonl`. Допустимые переменные launcher:
+По умолчанию метрики записываются в `$HOME/.qa-router/metrics.jsonl`.
 
 | Переменная | Значение по умолчанию |
 |---|---:|
 | `QA_ROUTER_DATA_DIR` | `$HOME/.qa-router` |
 | `QA_ROUTER_METRICS_RETENTION_DAYS` | `30` |
 | `QA_ROUTER_METRICS_MAX_EVENTS` | `10000` |
-
-Все остальные решения о маршрутизации и QA остаются в host agent и не задаются через конфигурацию сервиса.
+| `QA_ROUTER_ORCHESTRATION_TTL_SECONDS` | `1800` |
+| `QA_ROUTER_ORCHESTRATION_MAX_SESSIONS` | `100` |
 
 ## Метрики
 
-`record_qa_task_outcome` принимает тип задачи, outcome, количество обращений к CodeGraph и source MCP, counters findings, repeated reads и optional `deep_*` measurements. Значения должны быть неотрицательными и согласованными.
+`record_qa_task_outcome` принимает task type, outcome, counters CodeGraph/source MCP, findings, repeated reads, optional deep-analysis measurements и content-free orchestration counters:
 
-JSONL хранит только aggregate counters: без issue keys, путей, исходного текста, кода, логов, prompts и ответов. Retention и лимит событий применяются при записи. Отчёт можно получить через MCP или локально:
+- `orchestration_used`;
+- `luna_calls`, `terra_calls`, `sol_calls`;
+- `orchestration_steps_completed`, `orchestration_retries`.
+
+Значения неотрицательные и согласованные. JSONL не содержит issue keys, путей, исходного текста, кода, логов, prompts или ответов моделей. Отчёт можно получить через MCP или локально:
 
 ```bash
 uv run qa-router-report
@@ -97,4 +120,4 @@ uv run qa-router-report --days 30
 
 ## Разработка
 
-См. [CONTRIBUTING.md](CONTRIBUTING.md). Любое изменение публичного MCP-контракта должно сопровождаться тестом точного tool surface и проверкой того, что evidence, решения и внешние записи остаются у host agent.
+См. [CONTRIBUTING.md](CONTRIBUTING.md). Любое изменение публичного MCP-контракта должно сопровождаться тестом точного tool surface и проверкой, что evidence, решения и внешние записи остаются у primary host.

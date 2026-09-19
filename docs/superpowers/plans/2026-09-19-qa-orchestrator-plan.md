@@ -616,18 +616,15 @@ git diff --check
 git status --short --branch
 ```
 
-Also run the repository-scoped retired-runtime scan, excluding only the historical migration spec and this implementation plan, and confirm the CodeGraph index has no pending changes:
+Also run a repository-scoped scan for retired generation APIs and confirm the CodeGraph index has no pending changes:
 
 ```bash
-/Applications/ChatGPT.app/Contents/Resources/rg -n -i "qwen|lmstudio|lm studio|llmster|local model|local delegation|draft_review_checklist|record_canary_feedback|shadow_evaluation_required|generation_stats" \
-  --glob '!docs/superpowers/specs/2026-09-19-remove-local-model-runtime-design.md' \
-  --glob '!docs/superpowers/specs/2026-09-19-qa-orchestrator-design.md' \
-  --glob '!docs/superpowers/plans/2026-09-19-remove-local-model-runtime-plan.md' \
+/Applications/ChatGPT.app/Contents/Resources/rg -n -i "draft_review_checklist|record_canary_feedback|shadow_evaluation_required|generation_stats" \
   --glob '!docs/superpowers/plans/2026-09-19-qa-orchestrator-plan.md' .
 /Users/andreiviarshko/.local/bin/codegraph status --json .
 ```
 
-Expected: zero test failures, Ruff success, clean diff/status, no retired operational references, and `pendingChanges` equal to zero.
+Expected: zero test failures, Ruff success, clean diff/status, no retired generation API references, and `pendingChanges` equal to zero.
 
 - [ ] **Step 6: Commit documentation and final migration**
 

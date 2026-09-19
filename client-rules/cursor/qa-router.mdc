@@ -7,10 +7,11 @@ alwaysApply: true
 
 Когда доступен MCP-сервер `qa-router`, используй его как read-only routing helper.
 
-- Получай sources, анализируй evidence, принимай QA-решение и выполняй code/file/external changes в Cursor Agent.
-- Для implementation-aware ревью вызови `prepare_review_route` с подходящим профилем: `pr_test_analyzer`, `code_reviewer`, `security_reviewer`, `silent_failure_hunter`, `code_explorer`, `typescript_reviewer` или `react_reviewer`.
+- Получай sources, запускай model stages, анализируй evidence, принимай QA-решение и выполняй code/file/external changes в Cursor Agent.
+- Для implementation-aware ревью начни с `start_qa_orchestration`, затем вызови `prepare_review_route` с подходящим профилем: `pr_test_analyzer`, `code_reviewer`, `security_reviewer`, `silent_failure_hunter`, `code_explorer`, `typescript_reviewer` или `react_reviewer`.
+- Policy: `gpt-5.6-luna/max` для triage, `gpt-5.6-terra/medium` для primary/synthesis и optional `gpt-5.6-sol/high` для read-only deep analysis. После стадий вызывай `advance_qa_orchestration` только со structured signals; `get_qa_orchestration` возвращает состояние.
 - Route задаёт focus и обязательные секции; он не является autonomous agent и не заменяет проверку diff, contracts или runtime evidence.
-- Для сложного read-only анализа можно один раз использовать host-owned `qa_deep`. Router не выбирает и не запускает его.
+- Router не принимает evidence, prompts или model outputs и не выполняет внешние записи.
 - После любой QA-задачи со статусом `completed`, `partial` или `blocked` вызови `record_qa_task_outcome` ровно один раз. Передавай только counters и optional deep measurements.
 - Никогда не передавай issue keys, paths, source text, code, logs или prompts в metrics.
 - `get_metrics_report` используй для агрегированного контроля метрик; не принимай его как evidence или readiness decision.
