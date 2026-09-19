@@ -37,6 +37,14 @@ class EvalDraftBackend:
                     requested_case_count(self.case["input"]) + 1,
                 )
             )
+        if self.case["kind"] == "review_checklist":
+            draft = (
+                "Scope: supplied changed surface\n"
+                "Checklist: inspect the selected review focus\n"
+                "Candidate Coverage Gaps: runtime and edge evidence\n"
+                "Positive Observations: bounded packet\n"
+                "Unverified: source and runtime confirmation"
+            )
         return DraftEnvelope(
             draft=draft,
             unverified=["Codex review required"],
@@ -50,7 +58,7 @@ def load_cases():
 def test_eval_set_contains_required_policy_and_fallback_categories():
     cases = load_cases()
 
-    assert len(cases) == 31
+    assert len(cases) == 35
     assert {case["expected"] for case in cases} == {"ok", "refused", "fallback"}
     ok_kinds = [case["kind"] for case in cases if case["expected"] == "ok"]
     assert {kind: ok_kinds.count(kind) for kind in set(ok_kinds)} == {
@@ -80,6 +88,7 @@ async def test_synthetic_eval_case(case, tmp_path):
         DraftKind(case["kind"]),
         case["input"],
         case.get("pattern"),
+        review_agent=case.get("review_agent"),
     )
 
     assert result.status == case["expected"]

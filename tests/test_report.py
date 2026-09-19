@@ -266,6 +266,7 @@ def test_weekly_report_separates_canary_feedback_from_generation_events():
                     "log_summary": 0,
                     "rewrite": 0,
                     "short_explanation": 0,
+                    "review_checklist": 0,
                     "test_cases": 1,
                     "text_summary": 0,
                     "translation": 1,

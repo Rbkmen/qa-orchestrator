@@ -304,6 +304,9 @@ git commit -m "feat: route review profiles through qa router"
 **Files:**
 - Modify: `src/qa_router_mcp/server.py`
 - Modify: `tests/test_server.py`
+- Modify: `tests/test_eval_cases.py`
+- Modify: `tests/eval_cases.json`
+- Modify: `tests/test_report.py`
 - Modify: `docs/ROUTING_POLICY.md`
 - Modify: `client-rules/generic/QA_ROUTER_INSTRUCTIONS.md`
 
@@ -382,7 +385,7 @@ After all task commits, run the complete suite and lint from the repository root
 ```bash
 pytest -q
 ruff check .
-git diff --check HEAD~4 HEAD
+git diff --check origin/main HEAD
 git status --short --branch
 ```
 
