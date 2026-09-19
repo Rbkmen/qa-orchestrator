@@ -138,6 +138,19 @@ def test_review_checklist_rejects_decision_claim():
     ]
 
 
+def test_review_checklist_accepts_markdown_headings_without_colons():
+    result = DraftEnvelope(
+        draft=(
+            "## Scope\nchanged behavior\n## Checklist\ninspect\n"
+            "## Candidate Coverage Gaps\nnone\n## Positive Observations\nbounded\n"
+            "## Unverified\nruntime evidence"
+        ),
+        unverified=[],
+    )
+
+    assert validate_generated_draft(DraftKind.REVIEW_CHECKLIST, "Evidence", result) == []
+
+
 def test_numbered_test_case_heading_counts_as_title():
     result = DraftEnvelope(
         draft=(

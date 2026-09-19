@@ -17,15 +17,15 @@ CASE_HEADING = re.compile(
     r"тест[- ]?кейс(?:\s+\d+)?)\s*\**\s*(?:[:—-]|$)"
 )
 REVIEW_SECTION_PATTERNS = {
-    "scope": re.compile(r"(?im)^\s*(?:#{1,6}\s*)?scope\s*[:—-]"),
-    "checklist": re.compile(r"(?im)^\s*(?:#{1,6}\s*)?checklist\s*[:—-]"),
+    "scope": re.compile(r"(?im)^\s*(?:#{1,6}\s*)?scope(?:\s*[:—-]|\s*$)"),
+    "checklist": re.compile(r"(?im)^\s*(?:#{1,6}\s*)?checklist(?:\s*[:—-]|\s*$)"),
     "candidate_coverage_gaps": re.compile(
-        r"(?im)^\s*(?:#{1,6}\s*)?candidate coverage gaps\s*[:—-]"
+        r"(?im)^\s*(?:#{1,6}\s*)?candidate coverage gaps(?:\s*[:—-]|\s*$)"
     ),
     "positive_observations": re.compile(
-        r"(?im)^\s*(?:#{1,6}\s*)?positive observations\s*[:—-]"
+        r"(?im)^\s*(?:#{1,6}\s*)?positive observations(?:\s*[:—-]|\s*$)"
     ),
-    "unverified": re.compile(r"(?im)^\s*(?:#{1,6}\s*)?unverified\s*[:—-]"),
+    "unverified": re.compile(r"(?im)^\s*(?:#{1,6}\s*)?unverified(?:\s*[:—-]|\s*$)"),
 }
 REVIEW_UNSUPPORTED_DECISION = re.compile(
     r"(?im)^\s*(?:[-*#]+\s*)?(?:severity|priority|root cause|release readiness|"
