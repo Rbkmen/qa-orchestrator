@@ -1,634 +1,279 @@
-# QA Router Host-Owned Orchestrator Implementation Plan
+# QA Review Bundles and Named Agents Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a deterministic host-owned QA orchestration state machine that coordinates Luna/max triage, Terra/medium review and optional Sol/high deep analysis without invoking models or external systems from QA Router.
+**Goal:** Extend the existing host-owned QA orchestration state machine with deterministic review bundles, user-facing specialist names, and explicit ordered profile execution while preserving the three-model policy and the six-tool MCP surface.
 
-**Architecture:** Add an in-memory `QaOrchestrator` with strict Pydantic contracts, fixed model policy metadata and explicit state transitions. Expose start/advance/get orchestration tools through the existing FastMCP server; the host client performs all model calls and submits only structured, content-free transition signals. Extend the existing metrics sink with aggregate orchestration counters and update client documentation.
+**Architecture:** Luna/max selects either one compatible profile or one fixed bundle. The host then invokes Terra/medium once per ordered profile, optionally asks Sol/high for a bounded read-only deep review, and uses Terra/medium for synthesis. QA Router remains a content-free contract and state service: it exposes the fixed catalog, validates transitions, returns status metadata, and never invokes models, reads evidence, or performs external writes.
 
-**Tech Stack:** Python 3.12, FastMCP, Pydantic, pytest/pytest-asyncio, Ruff, in-memory session state, JSONL metrics.
+**Tech Stack:** Python 3.12, FastMCP, Pydantic 2, pytest/pytest-asyncio, Ruff, in-memory TTL-bounded state, JSONL metrics.
 
 **Spec:** `docs/superpowers/specs/2026-09-19-qa-orchestrator-design.md`
 
 ## Global Constraints
 
-- `gpt-5.6-luna` with `max` reasoning is used only for host-owned triage.
-- `gpt-5.6-terra` with `medium` reasoning is used for primary review and synthesis.
-- `gpt-5.6-sol` with `high` reasoning is an optional host-owned read-only escalation.
-- QA Router must not invoke, configure, load, tokenize, or communicate with any model.
-- The router must not retrieve source-system data, accept Evidence Packets, store task content, or perform external writes.
-- Sessions are in-memory, content-free, bounded by TTL and maximum count, and are discarded on server restart.
-- The host calls `record_qa_task_outcome` once after `awaiting_host_outcome`, `partial`, or `blocked`.
-- Invalid profiles, signals, transitions, expired sessions, and unknown run IDs fail closed without mutating state.
-- No hidden fallback tier or automatic model retry is added.
+- Keep the exact model policy: `gpt-5.6-luna`/`max` for triage, `gpt-5.6-terra`/`medium` for every primary profile and synthesis, and `gpt-5.6-sol`/`high` for the optional deep read-only branch.
+- Do not add model SDKs, model endpoints, local-model configuration, external agent integrations, prompt storage, evidence fields, model-output fields, or autonomous writes.
+- Keep orchestration state in memory only, content-free, TTL-bounded, and limited by the existing maximum-session guard.
+- Keep all existing six MCP tools and do not add a seventh tool for bundles or named agents.
+- Preserve single-profile callers: a host may still select one `ReviewAgent`; bundle selection is the new deterministic path.
+- Use immutable tuples and fixed enums for the bundle catalog. Do not accept a caller-provided profile list or caller-provided execution order.
+- Keep `selected_profile` as a compatibility field; for a bundle it equals the first ordered profile, while `review_profiles` contains the complete ordered sequence.
+- Treat Faraday as the display name of the internal `code_explorer` profile, not as a provider, model, package, or network integration.
+- Existing user changes and unrelated artifacts must remain untouched.
 
 ## Review Focus
 
-- A repeated, skipped, or out-of-order step must not advance the session or alter its state — cover in Task 2 transition tests.
-- An expired or unknown `run_id` must return a typed error without leaking session data — cover in Task 2 expiry tests.
-- Free-form evidence, prompts, model outputs, and arbitrary reason text must be rejected by orchestration inputs — cover in Task 1 contract tests and Task 3 MCP tests.
-- A deep-analysis request without a fixed reason code, or a reason code when the Sol branch is not requested, must fail closed — cover in Task 2 signal-validation tests.
-- Negative, inconsistent, or content-bearing orchestration metrics must be rejected or omitted — cover in Task 4 event/report tests.
+- Every bundle must resolve to the exact profile order in the approved spec; reordered, duplicated, mixed, or caller-defined lists must fail closed.
+- A single profile must continue to produce the same route constraints and the same read-only/host-owned guarantees as before.
+- Invalid or out-of-order transitions must not mutate the stored session or expose session content.
+- An expired or unknown `run_id` must return a typed error without leaking session data.
+- Deep analysis requires one fixed reason code; a reason code without a deep-analysis request is invalid.
+- Structured responses and metrics must contain only metadata and fixed counters, never evidence, prompts, model outputs, or generated findings.
+- Documentation must describe the host status flow and must not imply that QA Router runs an agent or model itself.
 
 ---
 
-### Task 1: Orchestration Contracts and Model Policy
+### Task 1: Add named review profiles and the fixed bundle catalog
 
 **Files:**
-- Create: `src/qa_router_mcp/orchestration.py`
+
 - Modify: `src/qa_router_mcp/contracts.py`
+- Modify: `src/qa_router_mcp/review_profiles.py`
+- Test: `tests/test_review_profiles.py`
 - Test: `tests/test_orchestration_contracts.py`
 
 **Interfaces:**
-- Consumes: existing `QaTaskType`, `ReviewAgent`, and `QaTaskOutcome` aliases.
-- Produces: `OrchestrationStep`, `OrchestrationStatus`, `OrchestrationModel`, `OrchestrationReason`, `ModelPolicy`, `QaOrchestrationSession`, `AdvanceQaOrchestrationRequest`, and immutable `MODEL_POLICIES` for Tasks 2–5.
 
-- [ ] **Step 1: Write failing contract tests for the fixed model policy**
+- Add `ReviewBundle` with exactly `ordinary_mr`, `widget`, `security`, `autotest`, and `requirements` values.
+- Add `display_name: str` to `ReviewRoute` and `ReviewProfileDefinition`.
+- Add immutable `REVIEW_BUNDLES: Mapping[ReviewBundle, tuple[ReviewAgent, ...]]` and a helper that returns the ordered tuple for a known bundle.
+- Keep the seven existing `ReviewAgent` values and their required sections, constraints, escalation signals, and host-owned read-only flags unchanged.
 
-```python
-from pydantic import ValidationError
-import pytest
+- [ ] **Step 1: Write failing tests for the display names and bundle order.**
 
-from qa_router_mcp.contracts import ReviewAgent
-from qa_router_mcp.orchestration import (
-    AdvanceQaOrchestrationRequest,
-    MODEL_POLICIES,
-    OrchestrationModel,
-    OrchestrationReason,
-    OrchestrationStep,
-)
+  Assert the exact names:
 
+  - `code_explorer` → `Faraday — Evidence Investigator`
+  - `code_reviewer` → `Code Reviewer`
+  - `pr_test_analyzer` → `Test Analyzer`
+  - `security_reviewer` → `Security Reviewer`
+  - `silent_failure_hunter` → `Silent Failure Hunter`
+  - `typescript_reviewer` → `TypeScript Reviewer`
+  - `react_reviewer` → `React Reviewer`
 
-def test_model_policy_assigns_requested_models_and_reasoning():
-    assert MODEL_POLICIES[OrchestrationStep.LUNA_TRIAGE].model == OrchestrationModel.LUNA
-    assert MODEL_POLICIES[OrchestrationStep.LUNA_TRIAGE].reasoning == "max"
-    assert MODEL_POLICIES[OrchestrationStep.TERRA_PRIMARY_REVIEW].model == OrchestrationModel.TERRA
-    assert MODEL_POLICIES[OrchestrationStep.TERRA_PRIMARY_REVIEW].reasoning == "medium"
-    assert MODEL_POLICIES[OrchestrationStep.SOL_DEEP_REVIEW].model == OrchestrationModel.SOL
-    assert MODEL_POLICIES[OrchestrationStep.SOL_DEEP_REVIEW].reasoning == "high"
+  Assert the exact ordered bundles:
 
+  - `ordinary_mr`: `code_explorer`, `code_reviewer`, `pr_test_analyzer`
+  - `widget`: `code_explorer`, `react_reviewer`, `typescript_reviewer`, `pr_test_analyzer`
+  - `security`: `code_explorer`, `security_reviewer`, `silent_failure_hunter`
+  - `autotest`: `code_reviewer`, `pr_test_analyzer`, `typescript_reviewer`
+  - `requirements`: `code_explorer`, `code_reviewer`
 
-def test_advance_request_rejects_free_form_fields():
-    with pytest.raises(ValidationError):
-        AdvanceQaOrchestrationRequest(
-            run_id="qar-0123456789abcdef0123456789abcdef",
-            completed_step=OrchestrationStep.LUNA_TRIAGE,
-            status="completed",
-            selected_profile=ReviewAgent.CODE_REVIEWER,
-            evidence="raw source text",
-        )
+  Also assert that the returned bundle sequence is a tuple, an unknown bundle is rejected by Pydantic, and every route remains read-only with `host_owns_decisions=True`.
 
+- [ ] **Step 2: Run the focused tests and verify RED.**
 
-def test_deep_reason_requires_fixed_reason_code():
-    with pytest.raises(ValidationError):
-        AdvanceQaOrchestrationRequest(
-            run_id="qar-0123456789abcdef0123456789abcdef",
-            completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
-            status="completed",
-            needs_deep_analysis=True,
-        )
+  Run `uv run pytest -q tests/test_review_profiles.py tests/test_orchestration_contracts.py`.
 
-    request = AdvanceQaOrchestrationRequest(
-        run_id="qar-0123456789abcdef0123456789abcdef",
-        completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
-        status="completed",
-        needs_deep_analysis=True,
-        reason_code=OrchestrationReason.SECURITY_SENSITIVE,
-    )
-    assert request.reason_code is OrchestrationReason.SECURITY_SENSITIVE
-```
+  Expected result: failures identify the missing display-name field, bundle enum/catalog, and bundle assertions; unrelated existing tests must not be changed to make the failures disappear.
 
-- [ ] **Step 2: Run the contract tests and verify RED**
+- [ ] **Step 3: Implement the fixed catalog and route metadata.**
 
-Run: `.venv/bin/pytest -q tests/test_orchestration_contracts.py`
+  Add `ReviewBundle(StrEnum)` to `contracts.py`. Add `display_name` to the profile definitions and route model with a non-empty string constraint. Build `REVIEW_BUNDLES` from immutable tuples behind a read-only mapping and expose a small typed helper for lookup. Populate the exact names above in `REVIEW_PROFILES`, and make `build_review_route()` include the selected profile's display name.
 
-Expected: FAIL because the orchestration contracts and model policy do not exist.
+- [ ] **Step 4: Run focused tests and lint.**
 
-- [ ] **Step 3: Implement the strict contracts and immutable policy**
+  Run `uv run pytest -q tests/test_review_profiles.py tests/test_orchestration_contracts.py` and `uv run ruff check src/qa_router_mcp/contracts.py src/qa_router_mcp/review_profiles.py tests/test_review_profiles.py tests/test_orchestration_contracts.py`.
 
-Add to `src/qa_router_mcp/orchestration.py`:
+  Expected result: all focused tests pass and Ruff reports no errors.
 
-```python
-class OrchestrationStep(StrEnum):
-    LUNA_TRIAGE = "luna_triage"
-    TERRA_PRIMARY_REVIEW = "terra_primary_review"
-    SOL_DEEP_REVIEW = "sol_deep_review"
-    TERRA_SYNTHESIS = "terra_synthesis"
-    AWAITING_HOST_OUTCOME = "awaiting_host_outcome"
+- [ ] **Step 5: Commit the catalog change.**
 
+  Commit with `feat: add named qa review bundles` after checking `git diff --check`.
 
-class OrchestrationStatus(StrEnum):
-    ACTIVE = "active"
-    AWAITING_HOST_OUTCOME = "awaiting_host_outcome"
-    COMPLETED = "completed"
-    PARTIAL = "partial"
-    BLOCKED = "blocked"
-    EXPIRED = "expired"
-
-
-class OrchestrationModel(StrEnum):
-    LUNA = "gpt-5.6-luna"
-    TERRA = "gpt-5.6-terra"
-    SOL = "gpt-5.6-sol"
-
-
-class OrchestrationReason(StrEnum):
-    EVIDENCE_GAP = "evidence_gap"
-    CROSS_REPOSITORY = "cross_repository"
-    SECURITY_SENSITIVE = "security_sensitive"
-    PAYMENT_SENSITIVE = "payment_sensitive"
-    ROOT_CAUSE = "root_cause"
-    HIGH_BLAST_RADIUS = "high_blast_radius"
-```
-
-Use `ConfigDict(extra="forbid")` on input/session models, `Field` constraints for `run_id`, and `MappingProxyType` for `MODEL_POLICIES`. The model policy must contain exactly Luna/max, Terra/medium and Sol/high. Keep all user-visible next-action strings constant; do not accept arbitrary text.
-
-Define the models with these exact fields:
-
-```python
-class ModelPolicy(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    model: OrchestrationModel
-    reasoning: Literal["medium", "high", "max"]
-
-
-class QaOrchestrationSession(BaseModel):
-    run_id: str
-    task_type: QaTaskType
-    status: OrchestrationStatus
-    current_step: OrchestrationStep
-    selected_profile: ReviewAgent | None = None
-    model_policy: ModelPolicy | None = None
-    next_action: str
-    read_only: bool = True
-    host_owns_decisions: bool = True
-    expires_at: datetime
-
-
-class AdvanceQaOrchestrationRequest(BaseModel):
-    run_id: str
-    completed_step: OrchestrationStep
-    status: QaTaskOutcome
-    selected_profile: ReviewAgent | None = None
-    needs_deep_analysis: bool = False
-    reason_code: OrchestrationReason | None = None
-```
-
-Use an after-validator to require `selected_profile` after a completed Luna step, require both `needs_deep_analysis=true` and `reason_code` for a Sol request, and reject a reason code when the Sol branch is not requested.
-
-- [ ] **Step 4: Run the contract tests and verify GREEN**
-
-Run: `.venv/bin/pytest -q tests/test_orchestration_contracts.py && .venv/bin/ruff check src/qa_router_mcp/orchestration.py src/qa_router_mcp/contracts.py`
-
-Expected: all contract tests pass and Ruff reports no errors.
-
-- [ ] **Step 5: Commit the contracts**
-
-```bash
-git add src/qa_router_mcp/orchestration.py src/qa_router_mcp/contracts.py tests/test_orchestration_contracts.py
-git commit -m "feat: define qa orchestration contracts"
-```
-
-### Task 2: In-Memory Orchestration State Machine
+### Task 2: Make orchestration state bundle-aware
 
 **Files:**
+
 - Modify: `src/qa_router_mcp/orchestration.py`
-- Test: `tests/test_orchestration.py`
+- Modify: `tests/test_orchestration_contracts.py`
+- Modify: `tests/test_orchestration.py`
 
 **Interfaces:**
-- Consumes: Task 1 enums, `ModelPolicy`, `QaOrchestrationSession`, and `AdvanceQaOrchestrationRequest`.
-- Produces: `QaOrchestrator.start(task_type)`, `QaOrchestrator.advance(*, run_id, completed_step, status, selected_profile=None, needs_deep_analysis=False, reason_code=None)`, `QaOrchestrator.get(run_id)`, and `OrchestrationError` for Tasks 3–5.
 
-- [ ] **Step 1: Write failing state-machine tests for the normal path**
+- Extend `QaOrchestrationSession` with `allowed_profiles`, `allowed_bundles`, `selected_bundle`, and ordered `review_profiles`.
+- Extend `AdvanceQaOrchestrationRequest` with `selected_bundle` while retaining `selected_profile` compatibility.
+- Keep the existing orchestration steps, statuses, model policy, TTL, session limit, terminal outcomes, and typed `OrchestrationError` behavior.
 
-```python
-from qa_router_mcp.orchestration import (
-    OrchestrationStatus,
-    OrchestrationStep,
-    QaOrchestrator,
-)
+- [ ] **Step 1: Add failing contract tests for the selection invariant.**
 
+  Cover these exact cases:
 
-def test_normal_flow_skips_sol():
-    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
-    session = orchestrator.start("ordinary_review")
+  - completed Luna requires exactly one of `selected_bundle` or `selected_profile`;
+  - both fields together are rejected;
+  - neither field is rejected for a successful Luna completion;
+  - a bundle/profile selection attached to a non-Luna transition is rejected;
+  - arbitrary fields such as evidence, prompt, output, or a caller-supplied profile list are rejected by `extra="forbid"`;
+  - `needs_deep_analysis=True` requires one fixed `OrchestrationReason`, and a reason without deep analysis is rejected.
 
-    assert session.current_step is OrchestrationStep.LUNA_TRIAGE
-    assert session.model_policy.model.value == "gpt-5.6-luna"
-    assert session.model_policy.reasoning == "max"
+- [ ] **Step 2: Implement the bundle-aware Pydantic contracts.**
 
-    session = orchestrator.advance(
-        run_id=session.run_id,
-        completed_step=OrchestrationStep.LUNA_TRIAGE,
-        status="completed",
-        selected_profile="code_reviewer",
-    )
-    assert session.current_step is OrchestrationStep.TERRA_PRIMARY_REVIEW
-    assert session.model_policy.reasoning == "medium"
+  Import `ReviewBundle` and the immutable catalog. Add these session fields with safe defaults:
 
-    session = orchestrator.advance(
-        run_id=session.run_id,
-        completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
-        status="completed",
-        needs_deep_analysis=False,
-    )
-    assert session.current_step is OrchestrationStep.TERRA_SYNTHESIS
+  - `allowed_profiles: list[ReviewAgent]`
+  - `allowed_bundles: list[ReviewBundle]`
+  - `selected_bundle: ReviewBundle | None = None`
+  - `selected_profile: ReviewAgent | None = None`
+  - `review_profiles: list[ReviewAgent] = Field(default_factory=list)`
 
-    session = orchestrator.advance(
-        run_id=session.run_id,
-        completed_step=OrchestrationStep.TERRA_SYNTHESIS,
-        status="completed",
-    )
-    assert session.status is OrchestrationStatus.AWAITING_HOST_OUTCOME
-    assert session.current_step is OrchestrationStep.AWAITING_HOST_OUTCOME
-    assert session.model_policy is None
-```
+  Populate allowed values from the fixed enum/catalog at session creation. Add an after-validator to the advance request that enforces the single-selection rule and rejects selection fields on all other completed steps. Keep the existing deep-reason validation and all arbitrary-content rejection.
 
-- [ ] **Step 2: Add failing tests for Sol escalation and terminal failures**
+- [ ] **Step 3: Add failing state-machine tests for single-profile compatibility and all bundles.**
 
-```python
-import pytest
+  For the existing single-profile path, assert `selected_bundle is None`, `selected_profile` is the requested profile, and `review_profiles` contains exactly that one profile.
 
-from qa_router_mcp.orchestration import (
-    OrchestrationError,
-    OrchestrationStatus,
-    OrchestrationStep,
-    QaOrchestrator,
-)
+  Parameterize over every fixed bundle. After Luna completion, assert:
 
+  - `selected_bundle` is the requested enum;
+  - `selected_profile` equals the first profile in that bundle;
+  - `review_profiles` equals the exact catalog order;
+  - the next policy is Terra/medium;
+  - returned session copies cannot mutate the stored ordered list.
 
-def test_deep_flow_uses_sol_then_returns_to_terra():
-    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
-    session = orchestrator.start("ordinary_review")
-    session = orchestrator.advance(
-        run_id=session.run_id,
-        completed_step=OrchestrationStep.LUNA_TRIAGE,
-        status="completed",
-        selected_profile="security_reviewer",
-    )
-    session = orchestrator.advance(
-        run_id=session.run_id,
-        completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
-        status="completed",
-        needs_deep_analysis=True,
-        reason_code="security_sensitive",
-    )
+  Add a failure test that attempts to change the bundle/profile after Luna and a failure test that attempts to submit an arbitrary/reordered profile sequence.
 
-    assert session.current_step is OrchestrationStep.SOL_DEEP_REVIEW
-    assert session.model_policy.model.value == "gpt-5.6-sol"
-    assert session.model_policy.reasoning == "high"
+- [ ] **Step 4: Update the state transition implementation.**
 
-    session = orchestrator.advance(
-        run_id=session.run_id,
-        completed_step=OrchestrationStep.SOL_DEEP_REVIEW,
-        status="completed",
-    )
-    assert session.current_step is OrchestrationStep.TERRA_SYNTHESIS
+  On a completed Luna transition, resolve either the one selected profile or the fixed bundle into `review_profiles`. Set `selected_bundle` only for bundle selection and set the compatibility `selected_profile` to the first item. Keep later transitions content-free and preserve the resolved order. Do not add a transition that accepts a list from the host. Ensure all error paths validate before mutating the session map.
 
+- [ ] **Step 5: Run the complete orchestration test slice.**
 
-Add a parametrized test over every `ReviewAgent` value to verify that all seven fixed profiles are accepted after Luna triage, retained in the session, and continue to use the Terra/medium primary-review policy.
+  Run `uv run pytest -q tests/test_orchestration_contracts.py tests/test_orchestration.py` and `uv run ruff check src/qa_router_mcp/orchestration.py tests/test_orchestration_contracts.py tests/test_orchestration.py`.
 
+  Expected result: normal, Sol, terminal partial/blocked, illegal-transition, expiry, session-limit, bundle-order, and immutability tests all pass.
 
-def test_illegal_transition_does_not_mutate_session():
-    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
-    session = orchestrator.start("ordinary_review")
+- [ ] **Step 6: Commit the state-machine change.**
 
-    with pytest.raises(OrchestrationError, match="illegal transition"):
-        orchestrator.advance(
-            run_id=session.run_id,
-            completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
-            status="completed",
-        )
+  Commit with `feat: route qa orchestration through review bundles` after `git diff --check` passes.
 
-    current = orchestrator.get(session.run_id)
-    assert current.current_step is OrchestrationStep.LUNA_TRIAGE
-    assert current.status is OrchestrationStatus.ACTIVE
-
-
-def test_partial_or_blocked_step_is_terminal():
-    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
-    session = orchestrator.start("ordinary_review")
-
-    blocked = orchestrator.advance(
-        run_id=session.run_id,
-        completed_step=OrchestrationStep.LUNA_TRIAGE,
-        status="blocked",
-    )
-
-    assert blocked.status is OrchestrationStatus.BLOCKED
-    with pytest.raises(OrchestrationError, match="terminal"):
-        orchestrator.advance(
-            run_id=session.run_id,
-            completed_step=OrchestrationStep.LUNA_TRIAGE,
-            status="completed",
-            selected_profile="code_reviewer",
-        )
-```
-
-- [ ] **Step 3: Run the state-machine tests and verify RED**
-
-Run: `.venv/bin/pytest -q tests/test_orchestration.py`
-
-Expected: FAIL because `QaOrchestrator` and transition validation are not implemented.
-
-- [ ] **Step 4: Implement bounded in-memory state and transitions**
-
-Implement `QaOrchestrator` with a private dictionary of sessions, injected clock, TTL cleanup before `start`, `get`, and `advance`, and a maximum-session guard. Generate IDs as `qar-` plus 32 lowercase hexadecimal characters. Implement only these transitions:
-
-```text
-LUNA_TRIAGE + completed + selected_profile -> TERRA_PRIMARY_REVIEW
-TERRA_PRIMARY_REVIEW + completed + needs_deep_analysis=false -> TERRA_SYNTHESIS
-TERRA_PRIMARY_REVIEW + completed + needs_deep_analysis=true + reason_code -> SOL_DEEP_REVIEW
-SOL_DEEP_REVIEW + completed -> TERRA_SYNTHESIS
-TERRA_SYNTHESIS + completed -> AWAITING_HOST_OUTCOME
-any active step + partial|blocked -> terminal matching status
-```
-
-Reject a reason code without `needs_deep_analysis`, a deep request without a reason code, a changed profile after triage, missing profile after Luna, repeated steps, terminal-session advances, unknown IDs, expired IDs, and incompatible task/profile values. Return a copy of the Pydantic session so callers cannot mutate the store through a returned object.
-
-- [ ] **Step 5: Add expiry and bounded-session tests, then make them pass**
-
-Use a mutable `now` closure passed to `QaOrchestrator(clock=...)` and assert that advancing time beyond `ttl_seconds` makes `get(run_id)` raise `OrchestrationError("expired session")`. Start `max_sessions` sessions, then assert the next `start` raises `OrchestrationError("session limit")`; after advancing the clock beyond TTL, assert a new session can be created.
-
-Run: `.venv/bin/pytest -q tests/test_orchestration_contracts.py tests/test_orchestration.py`
-
-Expected: all contract, normal-path, deep-path, failure, expiry and limit tests pass.
-
-- [ ] **Step 6: Commit the state machine**
-
-```bash
-git add src/qa_router_mcp/orchestration.py tests/test_orchestration.py
-git commit -m "feat: add qa orchestration state machine"
-```
-
-### Task 3: Service and MCP Orchestration Surface
+### Task 3: Expose bundle selection through the existing MCP contract
 
 **Files:**
-- Modify: `src/qa_router_mcp/config.py`
+
 - Modify: `src/qa_router_mcp/service.py`
 - Modify: `src/qa_router_mcp/server.py`
-- Modify: `tests/test_config.py`
 - Modify: `tests/test_service.py`
 - Modify: `tests/test_server.py`
-- Modify: `tests/test_install_artifacts.py`
+- Test if required by the implementation: `tests/test_install_artifacts.py`
 
 **Interfaces:**
-- Consumes: `QaOrchestrator.start`, `.advance`, `.get`, contracts from Tasks 1–2, and existing `RouterService`/FastMCP construction.
-- Produces: MCP tools `start_qa_orchestration`, `advance_qa_orchestration`, and `get_qa_orchestration`; total tool set becomes the existing three tools plus these three.
 
-- [ ] **Step 1: Write failing service and MCP-surface tests**
+- Keep exactly six published tools: `prepare_review_route`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `record_qa_task_outcome`, and `get_metrics_report`.
+- Add `selected_bundle: ReviewBundle | None = None` to the existing `advance_qa_orchestration` tool input and pass it into the strict request model.
+- Include `display_name` in `prepare_review_route` output.
+- Include fixed allowed/selected bundle and ordered profile metadata in orchestration responses without adding evidence, prompts, outputs, or findings.
 
-```python
-@pytest.mark.asyncio
-async def test_server_exposes_six_tools(tmp_path):
-    service = RouterService.from_settings(data_dir=tmp_path)
+- [ ] **Step 1: Add failing service and server tests.**
 
-    async with Client(build_server(service)) as client:
-        names = {tool.name for tool in await client.list_tools()}
+  Assert that a `start_qa_orchestration` response exposes all fixed bundles and profiles, starts at Luna/max, and contains no content-bearing field. Advance with `ordinary_mr` and assert the exact ordered profiles. Keep a separate test for the single-profile compatibility path and assert the route display name for `code_explorer`.
 
-    assert names == {
-        "prepare_review_route",
-        "record_qa_task_outcome",
-        "get_metrics_report",
-        "start_qa_orchestration",
-        "advance_qa_orchestration",
-        "get_qa_orchestration",
-    }
+  Through the MCP boundary, reject both bundle and profile together, missing selection after successful Luna, unknown bundle values, selection on a Terra transition, and a caller-defined profile order. Preserve the exact six-tool list.
 
+- [ ] **Step 2: Implement the minimal service/server plumbing.**
 
-@pytest.mark.asyncio
-async def test_orchestration_tools_return_no_evidence_fields(tmp_path):
-    service = RouterService.from_settings(data_dir=tmp_path)
+  Keep `RouterService` as the owner of the in-memory orchestrator. Add only the new typed bundle argument and response serialization needed by the contracts. Do not move model calls, evidence retrieval, or external-system access into the service or FastMCP layer.
 
-    async with Client(build_server(service)) as client:
-        result = await client.call_tool(
-            "start_qa_orchestration",
-            {"task_type": "ordinary_review"},
-        )
+- [ ] **Step 3: Run focused integration tests and lint.**
 
-    payload = result.structured_content
-    assert payload["model_policy"] == {
-        "model": "gpt-5.6-luna",
-        "reasoning": "max",
-    }
-    assert "evidence" not in payload
-    assert "prompt" not in payload
-    assert "output" not in payload
-```
+  Run `uv run pytest -q tests/test_service.py tests/test_server.py tests/test_install_artifacts.py` and `uv run ruff check src/qa_router_mcp/service.py src/qa_router_mcp/server.py tests/test_service.py tests/test_server.py`.
 
-- [ ] **Step 2: Run the focused service/server tests and verify RED**
+  Expected result: the six-tool surface is unchanged, bundle selection works through the public boundary, and content-bearing inputs remain rejected.
 
-Run: `.venv/bin/pytest -q tests/test_service.py tests/test_server.py tests/test_install_artifacts.py`
+- [ ] **Step 4: Commit the MCP contract change.**
 
-Expected: FAIL because the three orchestration tools and settings do not exist, while the current tests still expect only the original three tools.
+  Commit with `feat: expose review bundles through qa-router mcp` after `git diff --check` passes.
 
-- [ ] **Step 3: Add session settings and wire the orchestrator into `RouterService`**
-
-Add to `Settings`:
-
-```python
-orchestration_session_ttl_seconds: int = 1_800
-orchestration_max_sessions: int = 100
-```
-
-Read `QA_ROUTER_ORCHESTRATION_TTL_SECONDS` and `QA_ROUTER_ORCHESTRATION_MAX_SESSIONS` in `Settings.from_env`; reject non-positive values. Construct one `QaOrchestrator` in `RouterService.__init__` and add thin wrappers with these signatures:
-
-```python
-def start_qa_orchestration(self, task_type: QaTaskType) -> QaOrchestrationSession: ...
-
-def advance_qa_orchestration(
-    self,
-    request: AdvanceQaOrchestrationRequest,
-) -> QaOrchestrationSession: ...
-
-def get_qa_orchestration(self, run_id: str) -> QaOrchestrationSession: ...
-```
-
-The FastMCP wrapper constructs `AdvanceQaOrchestrationRequest` from its explicit typed parameters, then calls the service wrapper; the service forwards the validated fields to `QaOrchestrator.advance(**request.model_dump())`. No free-form field is accepted at either boundary.
-
-- [ ] **Step 4: Register the three MCP tools without passing free-form content**
-
-Add synchronous FastMCP wrappers with explicit typed parameters. `advance_qa_orchestration` accepts `run_id: str`, `completed_step: OrchestrationStep`, `status: QaTaskOutcome`, `selected_profile: ReviewAgent | None`, `needs_deep_analysis: bool`, and `reason_code: OrchestrationReason | None`; `start_qa_orchestration` accepts only `task_type: QaTaskType`, and `get_qa_orchestration` accepts only `run_id: str`. The server must pass structured values directly to `RouterService`; it must not accept an Evidence Packet, arbitrary prompt, model output, or free-form reason. Keep `prepare_review_route`, `record_qa_task_outcome`, and `get_metrics_report` unchanged except for the metrics additions in Task 4.
-
-- [ ] **Step 5: Run service, MCP, launcher and config tests and verify GREEN**
-
-Run: `.venv/bin/pytest -q tests/test_config.py tests/test_service.py tests/test_server.py tests/test_install_artifacts.py && .venv/bin/ruff check src tests`
-
-Expected: all tests pass, the launcher remains valid, and the MCP tool list contains exactly six tools.
-
-- [ ] **Step 6: Commit the MCP surface**
-
-```bash
-git add src/qa_router_mcp/config.py src/qa_router_mcp/service.py src/qa_router_mcp/server.py tests/test_config.py tests/test_service.py tests/test_server.py tests/test_install_artifacts.py
-git commit -m "feat: expose qa orchestration tools"
-```
-
-### Task 4: Content-Free Orchestration Metrics
+### Task 4: Update host-facing routing documentation and status flow
 
 **Files:**
-- Modify: `src/qa_router_mcp/events.py`
-- Modify: `src/qa_router_mcp/service.py`
-- Modify: `src/qa_router_mcp/server.py`
-- Modify: `src/qa_router_mcp/report.py`
-- Modify: `tests/test_report.py`
-- Modify: `tests/test_service.py`
-- Modify: `tests/test_server.py`
 
-**Interfaces:**
-- Consumes: existing task metrics validation/reporting and the completed orchestration session contract.
-- Produces: optional content-free fields `orchestration_used`, `luna_calls`, `terra_calls`, `sol_calls`, `orchestration_steps_completed`, and `orchestration_retries` in the outcome tool and report.
-
-- [ ] **Step 1: Write failing metrics tests**
-
-```python
-def test_report_aggregates_orchestration_counters():
-    line = json.dumps(
-        {
-            "schema_version": 1,
-            "event_type": "qa_task_outcome",
-            "timestamp": datetime.now(UTC).isoformat(),
-            "task_type": "ordinary_review",
-            "outcome": "completed",
-            "deep_analysis_used": True,
-            "deep_model": "gpt-5.6-sol",
-            "deep_reasoning": "high",
-            "codegraph_calls": 1,
-            "source_mcp_calls": 2,
-            "findings_identified": 1,
-            "findings_confirmed": 1,
-            "findings_rejected": 0,
-            "repeated_source_reads": 0,
-            "orchestration_used": True,
-            "luna_calls": 1,
-            "terra_calls": 2,
-            "sol_calls": 1,
-            "orchestration_steps_completed": 4,
-            "orchestration_retries": 0,
-        }
-    )
-
-    report = summarize_events([line])
-
-    assert report["qa_tasks"]["orchestration"] == {
-        "tasks": 1,
-        "luna_calls": 1,
-        "terra_calls": 2,
-        "sol_calls": 1,
-        "steps_completed": 4,
-        "retries": 0,
-    }
-
-
-def test_metrics_reject_negative_orchestration_counter(tmp_path):
-    service = RouterService.from_settings(data_dir=tmp_path)
-
-    with pytest.raises(ValueError, match="QA task metrics are inconsistent"):
-        service.record_qa_task_outcome(
-            task_type="ordinary_review",
-            outcome="completed",
-            codegraph_calls=0,
-            source_mcp_calls=0,
-            findings_identified=0,
-            findings_confirmed=0,
-            findings_rejected=0,
-            repeated_source_reads=0,
-            orchestration_used=True,
-            luna_calls=-1,
-        )
-```
-
-- [ ] **Step 2: Run the metrics tests and verify RED**
-
-Run: `.venv/bin/pytest -q tests/test_report.py tests/test_service.py tests/test_server.py`
-
-Expected: FAIL because the event whitelist, service signature and report do not contain orchestration counters.
-
-- [ ] **Step 3: Extend event validation and persistence**
-
-Add a dedicated `ORCHESTRATION_COUNTERS` set and an `orchestration_used` boolean to `events.py`. Include the fields in the event whitelist. Require exact non-negative integers for counters; reject counters when `orchestration_used` is false and any counter is positive. Preserve the existing no-unknown-fields, findings consistency, source/CodeGraph consistency, retention, locking and content-free guarantees.
-
-- [ ] **Step 4: Wire metrics through service/server and aggregate the report**
-
-Add the optional parameters to `RouterService.record_qa_task_outcome` and the FastMCP tool. Add an `orchestration` object under `qa_tasks` in `summarize_events` with task count and the five aggregate counters. Do not include prompts, outputs, run IDs, task identifiers, paths, or arbitrary model metadata.
-
-- [ ] **Step 5: Run the metrics and full focused checks**
-
-Run: `.venv/bin/pytest -q tests/test_report.py tests/test_service.py tests/test_server.py tests/test_install_artifacts.py && .venv/bin/ruff check .`
-
-Expected: all tests pass and the report contains only aggregate orchestration data.
-
-- [ ] **Step 6: Commit metrics support**
-
-```bash
-git add src/qa_router_mcp/events.py src/qa_router_mcp/service.py src/qa_router_mcp/server.py src/qa_router_mcp/report.py tests/test_report.py tests/test_service.py tests/test_server.py
-git commit -m "feat: record orchestration metrics"
-```
-
-### Task 5: Documentation, Client Rules, and Complete Verification
-
-**Files:**
 - Modify: `README.md`
-- Modify: `CONTRIBUTING.md`
 - Modify: `docs/ROUTING_POLICY.md`
 - Modify: `docs/clients/codex.md`
+- Modify: `docs/clients/generic-mcp.md`
 - Modify: `docs/clients/claude-code.md`
 - Modify: `docs/clients/cursor.md`
-- Modify: `docs/clients/generic-mcp.md`
+- Modify: `client-rules/generic/QA_ROUTER_INSTRUCTIONS.md`
 - Modify: `client-rules/claude-code/CLAUDE.md`
 - Modify: `client-rules/cursor/qa-router.mdc`
-- Modify: `client-rules/generic/QA_ROUTER_INSTRUCTIONS.md`
 - Modify: `tests/test_install_artifacts.py`
-- Test: complete repository suite
 
-**Interfaces:**
-- Consumes: the six-tool MCP surface, model policy, state transitions, host-owned boundaries and metrics fields from Tasks 1–4.
-- Produces: operational docs that describe Luna/max → Terra/medium → optional Sol/high → Terra/medium, without instructing clients to call models from QA Router or perform autonomous writes.
+**Documentation contract:**
 
-- [ ] **Step 1: Write failing documentation assertions**
+- Explain that Luna/max chooses one fixed bundle or one compatibility profile and Terra/medium executes the selected profiles in the fixed order.
+- Document the five bundle names and exact ordered profiles.
+- Document the seven user-facing names, including `Faraday — Evidence Investigator` for `code_explorer`.
+- Show a normal host status sequence such as:
 
-Extend `tests/test_install_artifacts.py` so README, routing policy and generic client instructions must contain `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol`, and `host_owns_decisions`, while not describing model calls from the router or arbitrary evidence submission.
+  `Luna / Max → Ordinary MR Review`
 
-- [ ] **Step 2: Run the documentation test and verify RED**
+  `Terra / Medium → Faraday — Evidence Investigator`
 
-Run: `.venv/bin/pytest -q tests/test_install_artifacts.py::test_operational_artifacts_describe_host_orchestration`
+  `Terra / Medium → Code Reviewer`
 
-Expected: FAIL because the current docs describe the three-tool route-only service and do not document the orchestration tools or model policy.
+  `Terra / Medium → Test Analyzer`
 
-- [ ] **Step 3: Update operational docs and client rules**
+  `Terra / Medium → Synthesis`
 
-Document the exact six-tool surface, the host-owned model assignments, state transitions, optional Sol branch, in-memory session/TTL behavior, content-free metrics, and the rule that primary host owns evidence, decisions and writes. Keep the existing no-local-runtime boundary intact and do not add model credentials or source-system instructions to QA Router.
+  `Host → Final QA outcome`
 
-- [ ] **Step 4: Run the documentation test and static checks**
+  Show `Sol / High → Deep read-only review` only when one fixed deep-analysis reason is present.
+- State plainly that Faraday is an internal display name, not an external agent, provider, package, or model.
+- Keep the six-tool MCP list and content-free boundary documentation accurate.
+- Keep all retired local-model and generic-agent references absent from project documentation and client rules.
 
-Run: `.venv/bin/pytest -q tests/test_install_artifacts.py::test_operational_artifacts_describe_host_orchestration && .venv/bin/ruff check .`
+- [ ] **Step 1: Update the source-bound documents.**
 
-Expected: PASS and Ruff reports no errors.
+  Replace statements that imply one profile is always selected with the bundle-or-profile contract. Add the exact catalog and status flow above. Preserve the current QA review responsibilities, safety rules, metrics explanation, and host-owned decision boundary.
 
-- [ ] **Step 5: Run complete verification**
+- [ ] **Step 2: Add documentation regression assertions.**
 
-Run:
+  Assert that installation artifacts mention the five bundles, Faraday, all three model stages, and the six tools. Assert that documentation does not contain retired local-model terms, model invocation claims, evidence storage claims, or an external Faraday integration claim.
 
-```bash
-.venv/bin/pytest -q
-.venv/bin/ruff check .
-git diff --check
-git status --short --branch
-```
+- [ ] **Step 3: Validate documentation and artifacts.**
 
-Also run a repository-scoped scan for retired generation APIs and confirm the CodeGraph index has no pending changes:
+  Run `uv run pytest -q tests/test_install_artifacts.py`, `uv run ruff check .`, and `git diff --check`. Review every changed document for consistent names, order, model/reasoning labels, and the no-external-agent boundary.
 
-```bash
-/Applications/ChatGPT.app/Contents/Resources/rg -n -i "draft_review_checklist|record_canary_feedback|shadow_evaluation_required|generation_stats" \
-  --glob '!docs/superpowers/plans/2026-09-19-qa-orchestrator-plan.md' .
-/Users/andreiviarshko/.local/bin/codegraph status --json .
-```
+- [ ] **Step 4: Commit the documentation change.**
 
-Expected: zero test failures, Ruff success, clean diff/status, no retired generation API references, and `pendingChanges` equal to zero.
+  Commit with `docs: document qa review bundles` after the artifact tests pass.
 
-- [ ] **Step 6: Commit documentation and final migration**
+### Task 5: Full verification and delivery checkpoint
 
-```bash
-git add README.md CONTRIBUTING.md docs client-rules tests/test_install_artifacts.py
-git commit -m "docs: describe host-owned qa orchestration"
-```
+**Files:**
+
+- No planned source changes; modify tests or docs only if a verification failure identifies a concrete contract mismatch.
+
+- [ ] **Step 1: Run the full automated verification.**
+
+  Run `uv run pytest -q`, `uv run ruff check .`, `git diff --check`, and `/bin/sh -n scripts/qa-router-mcp`.
+
+- [ ] **Step 2: Verify the public surface and retired references.**
+
+  Confirm the launcher still publishes exactly six tools. Search source, docs, and client rules for retired local-model terms and for accidental evidence/prompt/model-output fields. Confirm no model SDK, endpoint, or external-agent dependency was introduced.
+
+- [ ] **Step 3: Review the final diff against the approved spec.**
+
+  Check the exact model/reasoning matrix, all seven names, all five bundle orders, the single-profile compatibility path, immutable session copies, fail-closed transitions, and the host status sequence. Check that metrics remain aggregate and content-free.
+
+- [ ] **Step 4: Report the evidence-backed result.**
+
+  Report changed files, commit hashes, automated checks and their results, the unchanged six-tool surface, and any item that could not be verified. Do not claim runtime model execution, external-system access, or stage behavior because this repository intentionally does not perform those actions.
+
+## Execution Notes
+
+- Implement each task in order because later contracts depend on the fixed profile and bundle catalog.
+- Use test-first changes inside each task: write the narrow failing test, run it to establish RED, implement the smallest change, run the focused GREEN checks, then commit.
+- Keep commits separate by task so the bundle contract, state machine, MCP boundary, and documentation can be reviewed independently.
+- The host remains responsible for acquiring Jira/GitLab/TestRail or other evidence, invoking the selected model with the appropriate reasoning effort, displaying the named status, and deciding the final QA outcome.

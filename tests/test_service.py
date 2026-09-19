@@ -2,8 +2,9 @@ import json
 
 import pytest
 
-from qa_router_mcp.contracts import ReviewAgent
+from qa_router_mcp.contracts import ReviewAgent, ReviewBundle
 from qa_router_mcp.orchestration import AdvanceQaOrchestrationRequest, OrchestrationStep
+from qa_router_mcp.review_profiles import REVIEW_BUNDLES
 from qa_router_mcp.service import RouterService
 
 
@@ -14,6 +15,39 @@ def test_service_resolves_all_review_profiles(tmp_path):
 
     assert [route.profile for route in routes] == list(ReviewAgent)
     assert all(route.read_only and route.host_owns_decisions for route in routes)
+
+
+def test_service_exposes_fixed_profiles_and_bundles(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+
+    session = service.start_qa_orchestration("ordinary_review")
+
+    assert session.allowed_profiles == list(ReviewAgent)
+    assert session.allowed_bundles == list(ReviewBundle)
+    assert session.selected_bundle is None
+    assert session.review_profiles == []
+    assert session.model_policy.model.value == "gpt-5.6-luna"
+    assert session.model_policy.reasoning == "max"
+    assert service.prepare_review_route(ReviewAgent.CODE_EXPLORER).display_name == (
+        "Faraday — Evidence Investigator"
+    )
+
+
+def test_service_advances_with_a_fixed_bundle(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review")
+
+    advanced = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            status="completed",
+            selected_bundle=ReviewBundle.ORDINARY_MR,
+        )
+    )
+
+    assert advanced.selected_bundle is ReviewBundle.ORDINARY_MR
+    assert advanced.review_profiles == list(REVIEW_BUNDLES[ReviewBundle.ORDINARY_MR])
 
 
 def test_service_rejects_unknown_review_profile(tmp_path):

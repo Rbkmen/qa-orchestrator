@@ -7,6 +7,7 @@ from qa_router_mcp.contracts import QaTaskOutcomeReceipt, ReviewAgent, ReviewRou
 def test_review_route_requires_focus_and_sections():
     route = ReviewRoute(
         profile=ReviewAgent.CODE_REVIEWER,
+        display_name="Code Reviewer",
         focus="changed surface",
         required_sections=["Scope"],
         constraints=["read only"],

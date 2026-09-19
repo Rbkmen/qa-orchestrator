@@ -19,8 +19,8 @@ QA Router owns only deterministic profile routing, content-free orchestration st
 
 | Стадия | Model | Reasoning | Ответственность |
 |---|---|---|---|
-| Triage | `gpt-5.6-luna` | `max` | Выбор review profile и выявление evidence gaps |
-| Primary review | `gpt-5.6-terra` | `medium` | Основное implementation-aware ревью |
+| Triage | `gpt-5.6-luna` | `max` | Выбор fixed review bundle или compatibility profile и выявление evidence gaps |
+| Primary review | `gpt-5.6-terra` | `medium` | Последовательное implementation-aware ревью выбранных профилей |
 | Deep escalation | `gpt-5.6-sol` | `high` | Опциональная read-only проверка сложного или рискованного случая |
 | Synthesis | `gpt-5.6-terra` | `medium` | Сведение результата после проверки host |
 
@@ -29,7 +29,7 @@ Router только возвращает следующую policy и transition
 ## Orchestration flow
 
 1. Host вызывает `start_qa_orchestration(task_type)` и получает `run_id`, Luna/max и next action.
-2. После triage host передаёт `advance_qa_orchestration` с одним из семи `ReviewAgent` profiles.
+2. После triage host передаёт `advance_qa_orchestration` с одним fixed bundle или одним из семи `ReviewAgent` profiles.
 3. После Terra primary host либо идёт напрямую в Terra synthesis, либо передаёт fixed `reason_code` и получает optional Sol/high.
 4. После Sol host возвращается к Terra synthesis.
 5. После synthesis состояние становится `awaiting_host_outcome`; host один раз вызывает `record_qa_task_outcome` со статусом `completed`, `partial` или `blocked`.
@@ -42,6 +42,41 @@ Luna triage → Terra primary → Terra synthesis → awaiting host outcome
 ```
 
 Сессии content-free, in-memory, с TTL `1800` секунд и лимитом `100` по умолчанию. Unknown run, expired session, illegal/repeated transition и invalid signal отклоняются без изменения состояния. После рестарта host начинает новую сессию.
+
+Обычный status flow для `ordinary_mr`:
+
+```text
+Luna / Max → Ordinary MR Review
+Terra / Medium → Faraday — Evidence Investigator
+Terra / Medium → Code Reviewer
+Terra / Medium → Test Analyzer
+Terra / Medium → Synthesis
+Host → Final QA outcome
+```
+
+`Sol / High → Deep read-only review` появляется только при одном fixed `reason_code` и возвращает поток к Terra synthesis.
+
+## Fixed bundles и имена профилей
+
+| Bundle | Ordered profiles |
+|---|---|
+| `ordinary_mr` | `code_explorer` → `code_reviewer` → `pr_test_analyzer` |
+| `widget` | `code_explorer` → `react_reviewer` → `typescript_reviewer` → `pr_test_analyzer` |
+| `security` | `code_explorer` → `security_reviewer` → `silent_failure_hunter` |
+| `autotest` | `code_reviewer` → `pr_test_analyzer` → `typescript_reviewer` |
+| `requirements` | `code_explorer` → `code_reviewer` |
+
+| Technical profile | Display name |
+|---|---|
+| `code_explorer` | `Faraday — Evidence Investigator` |
+| `code_reviewer` | `Code Reviewer` |
+| `pr_test_analyzer` | `Test Analyzer` |
+| `security_reviewer` | `Security Reviewer` |
+| `silent_failure_hunter` | `Silent Failure Hunter` |
+| `typescript_reviewer` | `TypeScript Reviewer` |
+| `react_reviewer` | `React Reviewer` |
+
+Faraday — внутреннее отображаемое имя `code_explorer`. Это не отдельный внешний агент, сервис, package или model. Router возвращает только фиксированный идентификатор и порядок, а host запускает Terra для каждой роли.
 
 ## Review profiles
 

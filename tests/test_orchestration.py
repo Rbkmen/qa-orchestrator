@@ -2,13 +2,14 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from qa_router_mcp.contracts import ReviewAgent
+from qa_router_mcp.contracts import ReviewAgent, ReviewBundle
 from qa_router_mcp.orchestration import (
     OrchestrationError,
     OrchestrationStatus,
     OrchestrationStep,
     QaOrchestrator,
 )
+from qa_router_mcp.review_profiles import REVIEW_BUNDLES
 
 
 def test_normal_flow_skips_sol():
@@ -88,10 +89,67 @@ def test_all_review_profiles_are_retained_after_triage(profile: ReviewAgent):
     )
 
     assert session.selected_profile is profile
+    assert session.selected_bundle is None
+    assert session.review_profiles == [profile]
     assert session.current_step is OrchestrationStep.TERRA_PRIMARY_REVIEW
     assert session.model_policy.model is not None
     assert session.model_policy.model.value == "gpt-5.6-terra"
     assert session.model_policy.reasoning == "medium"
+
+
+@pytest.mark.parametrize("bundle", list(ReviewBundle))
+def test_fixed_bundle_order_is_retained_after_triage(bundle: ReviewBundle):
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review")
+
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.LUNA_TRIAGE,
+        status="completed",
+        selected_bundle=bundle,
+    )
+
+    assert session.selected_bundle is bundle
+    assert session.selected_profile is REVIEW_BUNDLES[bundle][0]
+    assert session.review_profiles == list(REVIEW_BUNDLES[bundle])
+    assert session.current_step is OrchestrationStep.TERRA_PRIMARY_REVIEW
+    assert session.model_policy.model.value == "gpt-5.6-terra"
+    assert session.model_policy.reasoning == "medium"
+
+
+def test_returned_bundle_profile_list_cannot_mutate_store():
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review")
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.LUNA_TRIAGE,
+        status="completed",
+        selected_bundle=ReviewBundle.ORDINARY_MR,
+    )
+    session.review_profiles.clear()
+
+    stored = orchestrator.get(session.run_id)
+
+    assert stored.review_profiles == list(REVIEW_BUNDLES[ReviewBundle.ORDINARY_MR])
+
+
+def test_profile_or_bundle_cannot_change_after_triage():
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review")
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.LUNA_TRIAGE,
+        status="completed",
+        selected_bundle=ReviewBundle.ORDINARY_MR,
+    )
+
+    with pytest.raises(OrchestrationError, match="invalid transition signal"):
+        orchestrator.advance(
+            run_id=session.run_id,
+            completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
+            status="completed",
+            selected_profile=ReviewAgent.SECURITY_REVIEWER,
+        )
 
 
 def test_illegal_transition_does_not_mutate_session():

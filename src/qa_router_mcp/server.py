@@ -6,6 +6,7 @@ from qa_router_mcp.contracts import (
     QaTaskOutcomeReceipt,
     QaTaskType,
     ReviewAgent,
+    ReviewBundle,
     ReviewRoute,
 )
 from qa_router_mcp.events import JsonEventSink, read_metrics_lines
@@ -37,6 +38,7 @@ def build_server(service: RouterService) -> FastMCP:
         run_id: str,
         completed_step: OrchestrationStep,
         status: QaTaskOutcome,
+        selected_bundle: ReviewBundle | None = None,
         selected_profile: ReviewAgent | None = None,
         needs_deep_analysis: bool = False,
         reason_code: OrchestrationReason | None = None,
@@ -47,6 +49,7 @@ def build_server(service: RouterService) -> FastMCP:
                 run_id=run_id,
                 completed_step=completed_step,
                 status=status,
+                selected_bundle=selected_bundle,
                 selected_profile=selected_profile,
                 needs_deep_analysis=needs_deep_analysis,
                 reason_code=reason_code,

@@ -4,7 +4,9 @@
 
 ## Goal
 
-Add a deterministic, host-owned orchestration layer to QA Router. The orchestrator coordinates a three-model QA flow without becoming a model runtime, source-system client, autonomous agent factory, or decision authority.
+Add a deterministic, host-owned orchestration layer to QA Router. The orchestrator coordinates a three-model QA flow and a fixed catalog of specialist review profiles without becoming a model runtime, source-system client, autonomous agent factory, or decision authority.
+
+The implementation must allow one task to run a deterministic bundle of specialist profiles together. The bundle is selected during Luna triage, executed by Terra in the host, and synthesized by Terra after host verification. This adds coordinated specialist coverage without adding another model provider or another autonomous agent role.
 
 The primary host agent remains responsible for authoritative evidence, tool calls, verification, final QA judgment, code changes, and every external write.
 
@@ -14,13 +16,43 @@ The orchestration contract exposes model assignments and reasoning levels to the
 
 | Stage | Model | Reasoning | Responsibility |
 |---|---|---|---|
-| Triage | `gpt-5.6-luna` | `max` | Classify the task, identify the likely QA profile, and list evidence gaps |
+| Triage | `gpt-5.6-luna` | `max` | Classify the task, identify the likely profile or bundle, and list evidence gaps |
 | Primary review | `gpt-5.6-terra` | `medium` | Analyze requirements, diff, callers, contracts, tests, and verification evidence |
 | Deep escalation | `gpt-5.6-sol` | `high` | Optional read-only analysis for complex or high-risk cases |
 
 The normal flow is `Luna/max → Terra/medium → optional Sol/high → Terra/medium synthesis`. `max` is intentionally limited to the Luna triage stage; Sol is not raised automatically above `high`.
 
 No model runtime, provider process, model API credential, or hidden fallback is part of the server.
+
+## Named specialist profiles and review bundles
+
+The specialist profiles are deterministic review roles, not separate model runtimes. Their technical identifiers remain stable for MCP clients; the host may display the following names:
+
+| Technical profile | User-facing name | Responsibility |
+|---|---|---|
+| `code_explorer` | `Faraday — Evidence Investigator` | Map callers, dependencies, contracts, and evidence gaps |
+| `code_reviewer` | `Code Reviewer` | Review changed behavior, failure paths, and regression risk |
+| `pr_test_analyzer` | `Test Analyzer` | Check test intent, branches, assertions, and missing protection |
+| `security_reviewer` | `Security Reviewer` | Check auth, validation, secrets, payment, and access boundaries |
+| `silent_failure_hunter` | `Silent Failure Hunter` | Find swallowed errors, false success, fallback, timeout, and observability gaps |
+| `typescript_reviewer` | `TypeScript Reviewer` | Check types, async contracts, serialization, and unsafe casts |
+| `react_reviewer` | `React Reviewer` | Check state, effects, rendering, accessibility, and user-visible behavior |
+
+`Faraday` is an internal display name for the `code_explorer` profile. It is not an external Faraday service, model, provider, or credential.
+
+Luna selects one fixed bundle or one single profile. The initial fixed bundles are:
+
+| Bundle | Ordered profiles |
+|---|---|
+| `ordinary_mr` | `code_explorer`, `code_reviewer`, `pr_test_analyzer` |
+| `widget` | `code_explorer`, `react_reviewer`, `typescript_reviewer`, `pr_test_analyzer` |
+| `security` | `code_explorer`, `security_reviewer`, `silent_failure_hunter` |
+| `autotest` | `code_reviewer`, `pr_test_analyzer`, `typescript_reviewer` |
+| `requirements` | `code_explorer`, `code_reviewer` |
+
+The host runs the selected profiles in order during the Terra primary-review stage. The router exposes the ordered profile list as content-free metadata; it does not run or prompt the profiles. A single-profile selection remains supported for compatibility and is represented as a one-item profile list.
+
+The public contract adds a `ReviewBundle` enum and fixed `REVIEW_BUNDLES` mapping. A session exposes `selected_bundle`, compatibility field `selected_profile`, and ordered `review_profiles`. After Luna completes, exactly one of `selected_bundle` or `selected_profile` must be supplied. A bundle expands to its immutable profile order; a single profile expands to a one-item list. The host cannot submit an arbitrary list or reorder a bundle.
 
 ## Responsibility boundary
 
@@ -36,7 +68,7 @@ No model runtime, provider process, model API credential, or hidden fallback is 
 ### QA Router owns
 
 - deterministic workflow state and allowed transitions;
-- the selected review profile and model policy metadata;
+- the selected review bundle or single profile, ordered profile metadata, and model policy metadata;
 - read-only constraints and the next host action;
 - content-free orchestration and QA-task metrics.
 
@@ -44,7 +76,9 @@ The router never receives prompts, evidence, source text, model output, logs, is
 
 ## Orchestration state machine
 
-An orchestration session is an in-memory, content-free state machine. It has an opaque `run_id`, task type, current step, selected review profile when known, model policy, transition history represented only by step/status metadata, and an expiry time. It does not persist across a server restart; the host starts a new session if needed.
+An orchestration session is an in-memory, content-free state machine. It has an opaque `run_id`, task type, current step, selected review bundle or profile when known, ordered profile metadata, model policy, transition history represented only by step/status metadata, and an expiry time. It does not persist across a server restart; the host starts a new session if needed.
+
+When a bundle is selected, the session contains only the fixed bundle identifier and its ordered specialist profile list. It does not contain profile prompts, evidence, outputs, source references, or arbitrary display text.
 
 The default states are:
 
@@ -67,6 +101,8 @@ The Sol branch is entered only when the host reports that deeper read-only analy
 
 Keep the existing deterministic route and metrics tools. Add three orchestration tools:
 
+`prepare_review_route(agent_profile)` remains the single-profile route entrypoint and returns the stable technical profile, its user-facing display name, focus, required sections, constraints, escalation signals, and read-only ownership flags. Bundle execution reuses this route for each profile in the ordered list; it does not add a second model or an external agent call.
+
 ### `start_qa_orchestration`
 
 Creates a session for a `QaTaskType` and returns:
@@ -74,7 +110,7 @@ Creates a session for a `QaTaskType` and returns:
 - `run_id`;
 - current step and next host action;
 - the Luna model policy (`gpt-5.6-luna`, `max`);
-- allowed review profiles;
+- allowed review profiles and fixed review bundles;
 - `read_only=true` and `host_owns_decisions=true`.
 
 It accepts no Evidence Packet or free-form task content.
@@ -85,11 +121,11 @@ Advances one valid state transition using structured, content-free signals only:
 
 - completed step;
 - step status: `completed`, `partial`, or `blocked`;
-- selected `ReviewAgent` after Luna triage;
+- exactly one selected fixed bundle or one `ReviewAgent` after Luna triage;
 - `needs_deep_analysis=true` to request the optional Sol branch;
 - optional reason code from a fixed enum such as `evidence_gap`, `cross_repository`, `security_sensitive`, `payment_sensitive`, `root_cause`, or `high_blast_radius`.
 
-It returns the next step, its assigned model/reasoning, the route profile, and the constraints for the host. Invalid ordering, unknown sessions, and incompatible signals fail closed.
+It returns the next step, its assigned model/reasoning, the selected bundle and ordered profile list, and the constraints for the host. Invalid ordering, unknown sessions, incompatible bundle/profile signals, and arbitrary profile names fail closed.
 
 ### `get_qa_orchestration`
 
@@ -101,11 +137,13 @@ Returns the current content-free session state and next action. It never returns
 
 ### Luna triage
 
-The host gives Luna a minimal Evidence Packet. Luna may suggest one of the seven profiles and identify missing verification, but cannot confirm findings, set severity, decide readiness, or perform writes. The host validates the suggested profile before advancing the session.
+The host gives Luna a minimal Evidence Packet. Luna may suggest one fixed bundle or one of the seven profiles and identify missing verification, but cannot confirm findings, set severity, decide readiness, or perform writes. The host validates the suggestion against the fixed catalog before advancing the session.
 
 ### Terra primary review
 
-Terra performs the main implementation-aware review using the selected profile. Its output is treated as candidate analysis. The host checks callers, contracts, tests, runtime evidence, and repository rules before accepting any finding.
+Terra performs the main implementation-aware review using the selected profile or ordered bundle. For a bundle, Terra runs each profile in order and returns candidate analysis for each role. The host checks callers, contracts, tests, runtime evidence, and repository rules before accepting any finding.
+
+The host may report user-facing status at profile boundaries, for example: `Terra / Medium → Faraday — Evidence Investigator`, then `Terra / Medium → Code Reviewer`. The router does not emit conversational progress messages itself.
 
 ### Sol deep review
 
@@ -124,7 +162,7 @@ Synthesis never authorizes a merge, release, severity, or external write by itse
 
 ## Failure and recovery
 
-- Unknown profile, unknown run, expired session, or illegal transition: typed error and no state change.
+- Unknown profile or bundle, incompatible bundle/profile selection, altered profile order, unknown run, expired session, or illegal transition: typed error and no state change.
 - Model timeout or unavailable host model: host records `partial` or `blocked`; no automatic fallback tier.
 - Sol not required: host advances directly from Terra primary review to Terra synthesis.
 - Server restart: active sessions are discarded; the host starts a fresh session without losing source data because the router never held it.
@@ -141,22 +179,26 @@ Extend content-free task metrics with optional orchestration counters:
 
 These are non-negative counters supplied by the host. They do not contain model prompts, outputs, issue identifiers, source paths, or task text. The existing source-MCP, CodeGraph, findings, repeated-read, and deep-analysis measurements remain unchanged.
 
+If profile-level metrics are added, they must remain aggregate non-negative counters only; profile names, prompts, evidence, findings, and model outputs must not be stored.
+
 ## Testing requirements
 
 Tests must cover:
 
 1. Luna → Terra → Terra synthesis without Sol;
 2. Luna → Terra → Sol → Terra synthesis;
-3. all seven profiles and their model assignments;
-4. illegal transitions, expired sessions, unknown runs, and invalid signals;
-5. no evidence or free-form content accepted by orchestration tools;
-6. content-free orchestration metrics and the existing exact MCP surface plus the three new tools;
-7. clean startup with no model process, model endpoint, or provider dependency.
+3. every fixed bundle, its exact profile order, and the single-profile compatibility path;
+4. all seven profiles, their display names, and their model assignments;
+5. illegal transitions, expired sessions, unknown runs, and invalid signals;
+6. no evidence or free-form content accepted by orchestration tools;
+7. content-free orchestration metrics and the existing exact MCP surface plus the three new tools;
+8. clean startup with no model process, model endpoint, external Faraday/Qodo/Devin/Jules dependency, or provider dependency.
 
 ## Non-goals
 
 - Calling models from the QA Router process;
 - retrieving Jira, GitLab, TestRail, monitoring, Slack, Confluence, or repository data from the router;
 - spawning autonomous Codex/Claude/Cursor agents or threads;
+- integrating external Faraday, Qodo, Devin, Jules, or similar products into the core route;
 - automatic severity, root-cause, release, merge, or external-write decisions;
 - persistent conversation, evidence, model output, or QA memory.

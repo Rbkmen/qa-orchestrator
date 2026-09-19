@@ -25,7 +25,9 @@ QA Router использует стандартный MCP STDIO transport. Со�
 ## Проверка
 
 1. Убедись, что сервер подключается и показывает ровно шесть tools: `prepare_review_route`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `record_qa_task_outcome`, `get_metrics_report`.
-2. Запусти orchestration: Luna/max triage, Terra/medium primary review, optional Sol/high read-only analysis и Terra/medium synthesis.
+2. Запусти orchestration: Luna/max выбирает fixed bundle или один profile, Terra/medium выполняет выбранные роли в фиксированном порядке, optional Sol/high делает read-only analysis и Terra/medium выполняет synthesis.
 3. После каждой стадии передавай Router только structured signal; evidence и outputs храни в host agent.
 4. Проверь `read_only=true` и `host_owns_decisions=true`, затем заверши задачу одним вызовом `record_qa_task_outcome`.
 5. Проверь aggregate counters через `get_metrics_report`.
+
+Для обычного MR используй `ordinary_mr`: `code_explorer` (`Faraday — Evidence Investigator`) → `code_reviewer` → `pr_test_analyzer`. Остальные fixed bundles и отображаемые имена перечислены в [routing policy](../ROUTING_POLICY.md); Faraday — только внутреннее имя роли.
