@@ -3,6 +3,7 @@ import json
 import pytest
 
 from qa_router_mcp.contracts import ReviewAgent
+from qa_router_mcp.orchestration import AdvanceQaOrchestrationRequest, OrchestrationStep
 from qa_router_mcp.service import RouterService
 
 
@@ -61,3 +62,20 @@ def test_service_rejects_inconsistent_task_outcome(tmp_path):
             findings_rejected=0,
             repeated_source_reads=0,
         )
+
+
+def test_service_exposes_orchestration_state_machine(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+
+    started = service.start_qa_orchestration("ordinary_review")
+    advanced = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            status="completed",
+            selected_profile="code_reviewer",
+        )
+    )
+
+    assert advanced.current_step is OrchestrationStep.TERRA_PRIMARY_REVIEW
+    assert service.get_qa_orchestration(started.run_id).run_id == started.run_id

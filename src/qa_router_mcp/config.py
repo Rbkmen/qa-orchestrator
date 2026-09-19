@@ -7,6 +7,8 @@ from pathlib import Path
 class Settings:
     metrics_retention_days: int = 30
     metrics_max_events: int = 10_000
+    orchestration_session_ttl_seconds: int = 1_800
+    orchestration_max_sessions: int = 100
     data_dir: Path = Path.home() / ".qa-router"
 
     @property
@@ -16,6 +18,8 @@ class Settings:
     def __post_init__(self) -> None:
         if self.metrics_retention_days < 1 or self.metrics_max_events < 1:
             raise ValueError("metrics retention must be positive")
+        if self.orchestration_session_ttl_seconds < 1 or self.orchestration_max_sessions < 1:
+            raise ValueError("orchestration limits must be positive")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -27,6 +31,18 @@ class Settings:
             ),
             metrics_max_events=int(
                 environ.get("QA_ROUTER_METRICS_MAX_EVENTS", str(defaults.metrics_max_events))
+            ),
+            orchestration_session_ttl_seconds=int(
+                environ.get(
+                    "QA_ROUTER_ORCHESTRATION_TTL_SECONDS",
+                    str(defaults.orchestration_session_ttl_seconds),
+                )
+            ),
+            orchestration_max_sessions=int(
+                environ.get(
+                    "QA_ROUTER_ORCHESTRATION_MAX_SESSIONS",
+                    str(defaults.orchestration_max_sessions),
+                )
             ),
             data_dir=data_dir,
         )

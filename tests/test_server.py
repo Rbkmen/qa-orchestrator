@@ -7,7 +7,7 @@ from qa_router_mcp.service import RouterService
 
 
 @pytest.mark.asyncio
-async def test_server_exposes_only_deterministic_route_and_metrics_tools(tmp_path):
+async def test_server_exposes_six_tools(tmp_path):
     service = RouterService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
@@ -17,6 +17,9 @@ async def test_server_exposes_only_deterministic_route_and_metrics_tools(tmp_pat
         "prepare_review_route",
         "record_qa_task_outcome",
         "get_metrics_report",
+        "start_qa_orchestration",
+        "advance_qa_orchestration",
+        "get_qa_orchestration",
     }
 
 
@@ -33,6 +36,54 @@ async def test_prepare_review_route_returns_selected_profile(tmp_path):
     assert result.structured_content["profile"] == "security_reviewer"
     assert result.structured_content["read_only"] is True
     assert result.structured_content["host_owns_decisions"] is True
+
+
+@pytest.mark.asyncio
+async def test_orchestration_tools_return_no_evidence_fields(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+
+    async with Client(build_server(service)) as client:
+        result = await client.call_tool(
+            "start_qa_orchestration",
+            {"task_type": "ordinary_review"},
+        )
+
+    payload = result.structured_content
+    assert payload["model_policy"] == {
+        "model": "gpt-5.6-luna",
+        "reasoning": "max",
+    }
+    assert payload["read_only"] is True
+    assert payload["host_owns_decisions"] is True
+    assert "evidence" not in payload
+    assert "prompt" not in payload
+    assert "output" not in payload
+
+
+@pytest.mark.asyncio
+async def test_orchestration_tools_advance_and_get_structured_state(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+
+    async with Client(build_server(service)) as client:
+        started = await client.call_tool(
+            "start_qa_orchestration",
+            {"task_type": "ordinary_review"},
+        )
+        run_id = started.structured_content["run_id"]
+        advanced = await client.call_tool(
+            "advance_qa_orchestration",
+            {
+                "run_id": run_id,
+                "completed_step": "luna_triage",
+                "status": "completed",
+                "selected_profile": "code_reviewer",
+            },
+        )
+        current = await client.call_tool("get_qa_orchestration", {"run_id": run_id})
+
+    assert advanced.structured_content["current_step"] == "terra_primary_review"
+    assert current.structured_content["current_step"] == "terra_primary_review"
+    assert current.structured_content["selected_profile"] == "code_reviewer"
 
 
 @pytest.mark.asyncio

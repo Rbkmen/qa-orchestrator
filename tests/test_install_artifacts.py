@@ -27,6 +27,8 @@ def test_launcher_forwards_metrics_overrides():
 
     assert 'QA_ROUTER_METRICS_RETENTION_DAYS="${QA_ROUTER_METRICS_RETENTION_DAYS:-30}"' in content
     assert 'QA_ROUTER_METRICS_MAX_EVENTS="${QA_ROUTER_METRICS_MAX_EVENTS:-10000}"' in content
+    assert 'QA_ROUTER_ORCHESTRATION_TTL_SECONDS="${QA_ROUTER_ORCHESTRATION_TTL_SECONDS:-1800}"' in content
+    assert 'QA_ROUTER_ORCHESTRATION_MAX_SESSIONS="${QA_ROUTER_ORCHESTRATION_MAX_SESSIONS:-100}"' in content
 
 
 def test_operational_artifacts_describe_primary_agent_routing():
@@ -44,7 +46,7 @@ def test_operational_artifacts_describe_primary_agent_routing():
 
 
 @pytest.mark.asyncio
-async def test_launcher_exposes_only_model_free_tools():
+async def test_launcher_exposes_six_tools():
     transport = StdioTransport(command=str(LAUNCHER), args=[])
 
     try:
@@ -57,4 +59,7 @@ async def test_launcher_exposes_only_model_free_tools():
         "prepare_review_route",
         "record_qa_task_outcome",
         "get_metrics_report",
+        "start_qa_orchestration",
+        "advance_qa_orchestration",
+        "get_qa_orchestration",
     }

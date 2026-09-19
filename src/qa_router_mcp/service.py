@@ -9,6 +9,11 @@ from qa_router_mcp.contracts import (
     ReviewRoute,
 )
 from qa_router_mcp.events import EventSink, JsonEventSink, valid_qa_task_metrics
+from qa_router_mcp.orchestration import (
+    AdvanceQaOrchestrationRequest,
+    QaOrchestrationSession,
+    QaOrchestrator,
+)
 from qa_router_mcp.review_profiles import build_review_route
 
 
@@ -25,6 +30,10 @@ class RouterService:
             settings.metrics_retention_days,
             settings.metrics_max_events,
         )
+        self.orchestrator = QaOrchestrator(
+            ttl_seconds=settings.orchestration_session_ttl_seconds,
+            max_sessions=settings.orchestration_max_sessions,
+        )
 
     def prepare_review_route(self, agent_profile: ReviewAgent | str) -> ReviewRoute:
         try:
@@ -32,6 +41,18 @@ class RouterService:
         except (TypeError, ValueError) as exc:
             raise ValueError("unknown review agent profile") from exc
         return build_review_route(resolved_profile)
+
+    def start_qa_orchestration(self, task_type: QaTaskType) -> QaOrchestrationSession:
+        return self.orchestrator.start(task_type)
+
+    def advance_qa_orchestration(
+        self,
+        request: AdvanceQaOrchestrationRequest,
+    ) -> QaOrchestrationSession:
+        return self.orchestrator.advance(**request.model_dump())
+
+    def get_qa_orchestration(self, run_id: str) -> QaOrchestrationSession:
+        return self.orchestrator.get(run_id)
 
     def record_qa_task_outcome(
         self,

@@ -9,6 +9,12 @@ from qa_router_mcp.contracts import (
     ReviewRoute,
 )
 from qa_router_mcp.events import JsonEventSink, read_metrics_lines
+from qa_router_mcp.orchestration import (
+    AdvanceQaOrchestrationRequest,
+    OrchestrationReason,
+    OrchestrationStep,
+    QaOrchestrationSession,
+)
 from qa_router_mcp.report import summarize_events
 from qa_router_mcp.service import RouterService
 
@@ -20,6 +26,37 @@ def build_server(service: RouterService) -> FastMCP:
     def prepare_review_route(agent_profile: ReviewAgent) -> ReviewRoute:
         """Return deterministic instructions for one read-only QA review profile."""
         return service.prepare_review_route(agent_profile)
+
+    @mcp.tool
+    def start_qa_orchestration(task_type: QaTaskType) -> QaOrchestrationSession:
+        """Start a content-free, host-owned QA orchestration session."""
+        return service.start_qa_orchestration(task_type)
+
+    @mcp.tool
+    def advance_qa_orchestration(
+        run_id: str,
+        completed_step: OrchestrationStep,
+        status: QaTaskOutcome,
+        selected_profile: ReviewAgent | None = None,
+        needs_deep_analysis: bool = False,
+        reason_code: OrchestrationReason | None = None,
+    ) -> QaOrchestrationSession:
+        """Advance one validated, content-free orchestration transition."""
+        return service.advance_qa_orchestration(
+            AdvanceQaOrchestrationRequest(
+                run_id=run_id,
+                completed_step=completed_step,
+                status=status,
+                selected_profile=selected_profile,
+                needs_deep_analysis=needs_deep_analysis,
+                reason_code=reason_code,
+            )
+        )
+
+    @mcp.tool
+    def get_qa_orchestration(run_id: str) -> QaOrchestrationSession:
+        """Read the current content-free orchestration state."""
+        return service.get_qa_orchestration(run_id)
 
     @mcp.tool
     def record_qa_task_outcome(
