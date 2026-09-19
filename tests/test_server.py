@@ -2,6 +2,7 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
+from qa_router_mcp.contracts import ReviewBundle
 from qa_router_mcp.server import build_server
 from qa_router_mcp.service import RouterService
 
@@ -34,6 +35,7 @@ async def test_prepare_review_route_returns_selected_profile(tmp_path):
         )
 
     assert result.structured_content["profile"] == "security_reviewer"
+    assert result.structured_content["display_name"] == "Security Reviewer"
     assert result.structured_content["read_only"] is True
     assert result.structured_content["host_owns_decisions"] is True
 
@@ -55,6 +57,18 @@ async def test_orchestration_tools_return_no_evidence_fields(tmp_path):
     }
     assert payload["read_only"] is True
     assert payload["host_owns_decisions"] is True
+    assert payload["allowed_profiles"] == [
+        "pr_test_analyzer",
+        "code_reviewer",
+        "security_reviewer",
+        "silent_failure_hunter",
+        "code_explorer",
+        "typescript_reviewer",
+        "react_reviewer",
+    ]
+    assert payload["allowed_bundles"] == [bundle.value for bundle in ReviewBundle]
+    assert payload["selected_bundle"] is None
+    assert payload["review_profiles"] == []
     assert "evidence" not in payload
     assert "prompt" not in payload
     assert "output" not in payload
@@ -84,6 +98,122 @@ async def test_orchestration_tools_advance_and_get_structured_state(tmp_path):
     assert advanced.structured_content["current_step"] == "terra_primary_review"
     assert current.structured_content["current_step"] == "terra_primary_review"
     assert current.structured_content["selected_profile"] == "code_reviewer"
+
+
+@pytest.mark.asyncio
+async def test_orchestration_tools_advance_with_bundle_order(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+
+    async with Client(build_server(service)) as client:
+        started = await client.call_tool(
+            "start_qa_orchestration",
+            {"task_type": "ordinary_review"},
+        )
+        advanced = await client.call_tool(
+            "advance_qa_orchestration",
+            {
+                "run_id": started.structured_content["run_id"],
+                "completed_step": "luna_triage",
+                "status": "completed",
+                "selected_bundle": "ordinary_mr",
+            },
+        )
+
+    assert advanced.structured_content["selected_bundle"] == "ordinary_mr"
+    assert advanced.structured_content["selected_profile"] == "code_explorer"
+    assert advanced.structured_content["review_profiles"] == [
+        "code_explorer",
+        "code_reviewer",
+        "pr_test_analyzer",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_orchestration_tool_rejects_incompatible_bundle_signals(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+
+    async with Client(build_server(service)) as client:
+        started = await client.call_tool(
+            "start_qa_orchestration",
+            {"task_type": "ordinary_review"},
+        )
+        run_id = started.structured_content["run_id"]
+
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "advance_qa_orchestration",
+                {
+                    "run_id": run_id,
+                    "completed_step": "luna_triage",
+                    "status": "completed",
+                    "selected_profile": "code_reviewer",
+                    "selected_bundle": "ordinary_mr",
+                },
+            )
+
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "advance_qa_orchestration",
+                {
+                    "run_id": run_id,
+                    "completed_step": "luna_triage",
+                    "status": "completed",
+                },
+            )
+
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "advance_qa_orchestration",
+                {
+                    "run_id": run_id,
+                    "completed_step": "luna_triage",
+                    "status": "completed",
+                    "selected_bundle": "unknown_bundle",
+                },
+            )
+
+
+@pytest.mark.asyncio
+async def test_orchestration_tool_rejects_selection_after_luna_and_custom_order(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+
+    async with Client(build_server(service)) as client:
+        started = await client.call_tool(
+            "start_qa_orchestration",
+            {"task_type": "ordinary_review"},
+        )
+        run_id = started.structured_content["run_id"]
+        await client.call_tool(
+            "advance_qa_orchestration",
+            {
+                "run_id": run_id,
+                "completed_step": "luna_triage",
+                "status": "completed",
+                "selected_bundle": "ordinary_mr",
+            },
+        )
+
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "advance_qa_orchestration",
+                {
+                    "run_id": run_id,
+                    "completed_step": "terra_primary_review",
+                    "status": "completed",
+                    "selected_profile": "security_reviewer",
+                },
+            )
+
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "advance_qa_orchestration",
+                {
+                    "run_id": run_id,
+                    "completed_step": "terra_primary_review",
+                    "status": "completed",
+                    "review_profiles": ["code_reviewer", "code_explorer"],
+                },
+            )
 
 
 @pytest.mark.asyncio
