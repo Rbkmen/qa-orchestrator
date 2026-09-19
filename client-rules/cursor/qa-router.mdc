@@ -10,9 +10,9 @@ alwaysApply: true
 - Получай sources, запускай model stages, анализируй evidence, принимай QA-решение и выполняй code/file/external changes в Cursor Agent.
 - Для implementation-aware ревью начни с `start_qa_orchestration`, на Luna выбери fixed bundle или compatibility profile, затем вызови `prepare_review_route` для каждой роли в порядке bundle: `ordinary_mr`, `widget`, `security`, `autotest` или `requirements`.
 - Имена ролей: `Faraday — Evidence Investigator` (`code_explorer`), `Code Reviewer`, `Test Analyzer`, `Security Reviewer`, `Silent Failure Hunter`, `TypeScript Reviewer`, `React Reviewer`. Faraday — внутреннее имя роли, не внешний сервис или model.
-- Policy: `gpt-5.6-luna/max` для triage, `gpt-5.6-terra/medium` для primary каждой роли и synthesis, optional `gpt-5.6-sol/high` для read-only deep analysis. После стадий вызывай `advance_qa_orchestration` только со structured signals; `get_qa_orchestration` возвращает состояние.
+- Policy: `gpt-5.6-luna/max` для triage, `gpt-5.6-terra/medium` для primary каждой роли и synthesis, optional `gpt-5.6-sol/high` для read-only deep analysis. После каждой Terra-роли вызывай `advance_qa_orchestration` с её `completed_profile`; Sol и synthesis разрешены только после последней роли. Передавай только structured signals; `get_qa_orchestration` возвращает состояние.
 - Route задаёт focus и обязательные секции; он не является autonomous agent и не заменяет проверку diff, contracts или runtime evidence.
 - Router не принимает evidence, prompts или model outputs и не выполняет внешние записи.
-- После любой QA-задачи со статусом `completed`, `partial` или `blocked` вызови `record_qa_task_outcome` ровно один раз. Передавай только counters и optional deep measurements.
+- После любой QA-задачи со статусом `completed`, `partial` или `blocked` вызови `record_qa_task_outcome` ровно один раз. Для orchestration передай его `run_id`; передавай только counters и optional deep measurements.
 - Никогда не передавай issue keys, paths, source text, code, logs или prompts в metrics.
 - `get_metrics_report` используй для агрегированного контроля метрик; не принимай его как evidence или readiness decision.

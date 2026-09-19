@@ -11,13 +11,13 @@ QA Router MCP — небольшой детерминированный FastMCP-
    - `gpt-5.6-terra` + `medium` — primary review каждого профиля в фиксированном порядке;
    - опционально `gpt-5.6-sol` + `high` — read-only deep analysis по фиксированной причине;
    - `gpt-5.6-terra` + `medium` — synthesis.
-4. Host сам проверяет findings, runtime-доказательства и ограничения, затем один раз вызывает `record_qa_task_outcome`.
+4. Host сам проверяет findings, runtime-доказательства и ограничения, затем один раз вызывает `record_qa_task_outcome`; для orchestrated-задачи передаёт тот же `run_id`, чтобы Router закрыл сессию.
 
 Router не вызывает модели, не выбирает severity или release readiness и не выполняет внешние записи.
 
 ### Bundles и имена профилей
 
-Luna выбирает один из фиксированных bundles либо один профиль для обратной совместимости. Terra выполняет профили bundle последовательно; host показывает статус каждой роли.
+Luna выбирает один из фиксированных bundles либо один профиль для обратной совместимости. Terra выполняет профили bundle последовательно; после каждой роли host передаёт `completed_profile`, а Router возвращает `current_profile` и `completed_profiles`. Перейти к Sol или synthesis можно только после последней роли.
 
 | Bundle | Порядок профилей |
 |---|---|
@@ -52,7 +52,7 @@ Terra / Medium → Synthesis
 Host → Final QA outcome
 ```
 
-При зафиксированной причине для углублённой проверки добавляется `Sol / High → Deep read-only review` между primary review и synthesis.
+При зафиксированной причине после последней роли добавляется `Sol / High → Deep read-only review` между primary review и synthesis.
 
 ## MCP-интерфейс
 
@@ -67,18 +67,21 @@ Host → Final QA outcome
 | `record_qa_task_outcome(...)` | Одна обезличенная запись результата QA-задачи |
 | `get_metrics_report(days)` | Агрегированный отчёт за положительный период |
 
-Оркестрационный flow:
+Оркестрационный flow для bundle:
 
 ```text
-Luna/max → Terra/medium → Terra/medium synthesis → host outcome
-                         ↘ optional Sol/high ↗
+Luna/max → Terra/profile[1] → ... → Terra/profile[N]
+                                      ↘ optional Sol/high ↗
+                                           Terra synthesis → host outcome
 ```
 
-Сессии хранятся только в памяти процесса. По умолчанию TTL — 1800 секунд, максимум — 100 активных сессий. После перезапуска host начинает новую сессию. `read_only=true` и `host_owns_decisions=true` являются частью каждого состояния.
+Сессии хранятся только в памяти процесса. По умолчанию TTL — 1800 секунд, максимум — 100 активных сессий; общий cache также bounded, а старые terminal-сессии могут быть вытеснены при нехватке места. Повтор финального вызова идемпотентен, пока его сессия сохранена. После перезапуска host начинает новую сессию. `read_only=true` и `host_owns_decisions=true` являются частью каждого состояния.
+
+После synthesis сессия ждёт финальный host outcome. Вызов `record_qa_task_outcome` с `orchestration_used=true` обязан содержать `run_id` текущей сессии; Router связывает counters с фактической веткой и переводит её в `completed`, `partial` или `blocked`. Для остановленной на стадии сессии сначала передай в `advance_qa_orchestration` статус `partial` или `blocked`. Повтор того же вызова для того же `run_id` и outcome идемпотентен; для обычной задачи без orchestration `run_id` не передаётся.
 
 ### Профили ревью
 
-`prepare_review_route` возвращает focus, обязательные секции, ограничения, escalation signals и отображаемое имя одного профиля. Для bundle host вызывает route для каждого профиля в полученном фиксированном порядке.
+`prepare_review_route` возвращает focus, обязательные секции, ограничения, escalation signals и отображаемое имя одного профиля. Для bundle host вызывает route для каждого профиля в полученном фиксированном порядке и после каждого вызова передаёт его технический идентификатор в `completed_profile`.
 
 Общие секции route: `Scope`, `Checklist`, `Candidate Coverage Gaps`, `Positive Observations`, `Unverified`.
 
@@ -140,6 +143,8 @@ codex mcp add qa-router -- \
 - `orchestration_used`;
 - `luna_calls`, `terra_calls`, `sol_calls`;
 - `orchestration_steps_completed`, `orchestration_retries`.
+
+Для orchestrated-задачи используй `run_id` из `start_qa_orchestration`; сам opaque идентификатор не записывается в JSONL-метрику.
 
 Значения неотрицательные и согласованные. JSONL не содержит issue keys, путей, исходного текста, кода, логов, prompts или ответов моделей. Отчёт можно получить через MCP или локально:
 

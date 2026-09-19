@@ -85,14 +85,15 @@ The default states are:
 ```text
 created
   -> luna_triage
-  -> terra_primary_review
+  -> terra_primary_review(profile[1..N])
   -> terra_synthesis
   -> awaiting_host_outcome
   -> completed | partial | blocked
 
-terra_primary_review
-  -> sol_deep_review
-  -> terra_synthesis
+terra_primary_review(profile[i])
+  -> terra_primary_review(profile[i+1])
+  -> sol_deep_review          (only after profile[N])
+  -> terra_synthesis          (only after profile[N])
 ```
 
 The Sol branch is entered only when the host reports that deeper read-only analysis is justified. It is never selected from raw evidence by the router. Any stage may end as `partial` or `blocked`; the router does not retry a model or silently switch tiers.
@@ -122,16 +123,17 @@ Advances one valid state transition using structured, content-free signals only:
 - completed step;
 - step status: `completed`, `partial`, or `blocked`;
 - exactly one selected fixed bundle or one `ReviewAgent` after Luna triage;
+- `completed_profile` after each completed Terra primary profile; the router requires the current profile and the fixed bundle order;
 - `needs_deep_analysis=true` to request the optional Sol branch;
 - optional reason code from a fixed enum such as `evidence_gap`, `cross_repository`, `security_sensitive`, `payment_sensitive`, `root_cause`, or `high_blast_radius`.
 
-It returns the next step, its assigned model/reasoning, the selected bundle and ordered profile list, and the constraints for the host. Invalid ordering, unknown sessions, incompatible bundle/profile signals, and arbitrary profile names fail closed.
+It returns the next step, its assigned model/reasoning, the selected bundle, ordered profile list, current profile, completed profiles, and the constraints for the host. Invalid ordering, skipped profiles, early Sol/synthesis, unknown sessions, incompatible bundle/profile signals, and arbitrary profile names fail closed.
 
 ### `get_qa_orchestration`
 
 Returns the current content-free session state and next action. It never returns model prompts, outputs, evidence, or source references.
 
-`record_qa_task_outcome` remains the single metrics write for a finished task. The host calls it once after the session reaches `awaiting_host_outcome`, `partial`, or `blocked`.
+`record_qa_task_outcome` remains the single metrics write for a finished task. For an orchestrated task the host calls it once with the same opaque `run_id` after the session reaches `awaiting_host_outcome`, `partial`, or `blocked`; Router validates and finalizes that session without storing the identifier in metrics. Repeating the same `run_id` and outcome is idempotent.
 
 ## Model-stage behavior
 
@@ -141,7 +143,7 @@ The host gives Luna a minimal Evidence Packet. Luna may suggest one fixed bundle
 
 ### Terra primary review
 
-Terra performs the main implementation-aware review using the selected profile or ordered bundle. For a bundle, Terra runs each profile in order and returns candidate analysis for each role. The host checks callers, contracts, tests, runtime evidence, and repository rules before accepting any finding.
+Terra performs the main implementation-aware review using the selected profile or ordered bundle. For a bundle, Terra runs each profile in order and returns candidate analysis for each role. The host calls `advance_qa_orchestration` with that role's `completed_profile` before the router exposes the next role; synthesis and Sol are unavailable until the final profile is complete. The host checks callers, contracts, tests, runtime evidence, and repository rules before accepting any finding.
 
 The host may report user-facing status at profile boundaries, for example: `Terra / Medium → Faraday — Evidence Investigator`, then `Terra / Medium → Code Reviewer`. The router does not emit conversational progress messages itself.
 
@@ -162,7 +164,7 @@ Synthesis never authorizes a merge, release, severity, or external write by itse
 
 ## Failure and recovery
 
-- Unknown profile or bundle, incompatible bundle/profile selection, altered profile order, unknown run, expired session, or illegal transition: typed error and no state change.
+- Unknown profile or bundle, incompatible bundle/profile selection, altered or skipped profile order, early synthesis/Sol, unknown run, expired session, or illegal transition: typed error and no state change.
 - Model timeout or unavailable host model: host records `partial` or `blocked`; no automatic fallback tier.
 - Sol not required: host advances directly from Terra primary review to Terra synthesis.
 - Server restart: active sessions are discarded; the host starts a fresh session without losing source data because the router never held it.

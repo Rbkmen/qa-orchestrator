@@ -30,18 +30,20 @@ Router только возвращает следующую policy и transition
 
 1. Host вызывает `start_qa_orchestration(task_type)` и получает `run_id`, Luna/max и next action.
 2. После triage host передаёт `advance_qa_orchestration` с одним fixed bundle или одним из семи `ReviewAgent` profiles.
-3. После Terra primary host либо идёт напрямую в Terra synthesis, либо передаёт fixed `reason_code` и получает optional Sol/high.
-4. После Sol host возвращается к Terra synthesis.
-5. После synthesis состояние становится `awaiting_host_outcome`; host один раз вызывает `record_qa_task_outcome` со статусом `completed`, `partial` или `blocked`.
+3. Для bundle host запускает Terra по одному профилю в возвращённом порядке и после каждой роли передаёт её идентификатор в `completed_profile`; Router не пропускает роль и не принимает произвольный порядок.
+4. После последнего Terra profile host либо идёт напрямую в Terra synthesis, либо передаёт fixed `reason_code` и получает optional Sol/high.
+5. После Sol host возвращается к Terra synthesis.
+6. После synthesis состояние становится `awaiting_host_outcome`; host один раз вызывает `record_qa_task_outcome` с тем же `run_id` и статусом `completed`, `partial` или `blocked`. Router переводит сессию в финальный статус.
 
 Разрешённые переходы:
 
 ```text
-Luna triage → Terra primary → Terra synthesis → awaiting host outcome
-                            ↘ Sol deep review ↗
+Luna triage → Terra profile[1] → ... → Terra profile[N]
+                                      ↘ Sol deep review ↗
+                                         Terra synthesis → awaiting host outcome
 ```
 
-Сессии content-free, in-memory, с TTL `1800` секунд и лимитом `100` по умолчанию. Unknown run, expired session, illegal/repeated transition и invalid signal отклоняются без изменения состояния. После рестарта host начинает новую сессию.
+Сессии content-free, in-memory, с TTL `1800` секунд и лимитом `100` активных сессий по умолчанию; общий cache bounded, поэтому старые terminal-сессии могут быть вытеснены при создании новых. Unknown run, expired session, illegal/repeated transition и invalid signal отклоняются без изменения состояния. После рестарта host начинает новую сессию.
 
 Обычный status flow для `ordinary_mr`:
 
@@ -54,7 +56,7 @@ Terra / Medium → Synthesis
 Host → Final QA outcome
 ```
 
-`Sol / High → Deep read-only review` появляется только при одном fixed `reason_code` и возвращает поток к Terra synthesis.
+`Sol / High → Deep read-only review` появляется только после последнего Terra profile и при одном fixed `reason_code`, затем возвращает поток к Terra synthesis.
 
 ## Fixed bundles и имена профилей
 
@@ -101,6 +103,8 @@ Faraday — внутреннее отображаемое имя `code_explorer`
 - identified/confirmed/rejected findings и repeated source reads;
 - optional `deep_*` measurements;
 - `orchestration_used`, `luna_calls`, `terra_calls`, `sol_calls`, `orchestration_steps_completed`, `orchestration_retries`.
+
+При `orchestration_used=true` поле `run_id` обязательно. Оно используется только для связывания финального outcome и aggregate counters с in-memory сессией, проверяется относительно выбранной ветки и не сохраняется в JSONL.
 
 Orchestration counters неотрицательны и не принимаются как положительные, если orchestration не использовался. Не отправляй issue keys, titles, paths, source text, code, logs, screenshots или generated content. `get_metrics_report(days)` возвращает только агрегаты и data-quality counters.
 
