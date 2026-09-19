@@ -25,8 +25,17 @@ class ReviewAgent(StrEnum):
     REACT_REVIEWER = "react_reviewer"
 
 
+class ReviewBundle(StrEnum):
+    ORDINARY_MR = "ordinary_mr"
+    WIDGET = "widget"
+    SECURITY = "security"
+    AUTOTEST = "autotest"
+    REQUIREMENTS = "requirements"
+
+
 class ReviewRoute(BaseModel):
     profile: ReviewAgent
+    display_name: str = Field(min_length=1)
     focus: str = Field(min_length=1)
     required_sections: list[str] = Field(min_length=1)
     constraints: list[str] = Field(min_length=1)
