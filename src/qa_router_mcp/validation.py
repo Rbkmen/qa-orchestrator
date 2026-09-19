@@ -16,6 +16,21 @@ CASE_HEADING = re.compile(
     r"(?im)^\s*(?:[-*#]+\s*)?(?:test case(?:\s+\d+)?|"
     r"тест[- ]?кейс(?:\s+\d+)?)\s*\**\s*(?:[:—-]|$)"
 )
+REVIEW_SECTION_PATTERNS = {
+    "scope": re.compile(r"(?im)^\s*(?:#{1,6}\s*)?scope\s*[:—-]"),
+    "checklist": re.compile(r"(?im)^\s*(?:#{1,6}\s*)?checklist\s*[:—-]"),
+    "candidate_coverage_gaps": re.compile(
+        r"(?im)^\s*(?:#{1,6}\s*)?candidate coverage gaps\s*[:—-]"
+    ),
+    "positive_observations": re.compile(
+        r"(?im)^\s*(?:#{1,6}\s*)?positive observations\s*[:—-]"
+    ),
+    "unverified": re.compile(r"(?im)^\s*(?:#{1,6}\s*)?unverified\s*[:—-]"),
+}
+REVIEW_UNSUPPORTED_DECISION = re.compile(
+    r"(?im)^\s*(?:[-*#]+\s*)?(?:severity|priority|root cause|release readiness|"
+    r"merge readiness|verdict|confirmed(?: finding)?|confirmation)\s*[:=—-]"
+)
 COVERAGE_ID = re.compile(r"(?im)^\s*coverage id\s*:\s*([A-Za-z0-9][A-Za-z0-9._-]{0,63})\s*$")
 COUNT_WORDS = {
     "two": 2,
@@ -148,6 +163,16 @@ def validate_generated_draft(
         EXTERNAL_WRITE.search(result.draft) or _contains_python_external_write(result.draft)
     ):
         issues.append("automation_external_write")
+    elif kind == DraftKind.REVIEW_CHECKLIST:
+        issues.extend(
+            f"review_missing_{section}"
+            for section, pattern in REVIEW_SECTION_PATTERNS.items()
+            if not pattern.search(result.draft)
+        )
+        if EXTERNAL_WRITE.search(result.draft) or _contains_python_external_write(result.draft):
+            issues.append("review_external_write")
+        if REVIEW_UNSUPPORTED_DECISION.search(result.draft):
+            issues.append("review_unsupported_decision")
 
     return issues
 
@@ -441,6 +466,15 @@ def repair_instruction(issues: list[str]) -> str:
         "short_explanation_too_long": "keep the explanation at or below 120 words",
         "translation_missing_preserve_term": "repeat every preserved term verbatim",
         "automation_external_write": "remove every external write operation",
+        "review_missing_scope": "include the Scope section",
+        "review_missing_checklist": "include the Checklist section",
+        "review_missing_candidate_coverage_gaps": "include the Candidate Coverage Gaps section",
+        "review_missing_positive_observations": "include the Positive Observations section",
+        "review_missing_unverified": "include the Unverified section",
+        "review_external_write": "remove every external write operation",
+        "review_unsupported_decision": (
+            "remove severity, priority, root cause, readiness, verdict, and confirmation claims"
+        ),
     }
     requirements = [descriptions.get(issue, issue) for issue in issues]
     return (

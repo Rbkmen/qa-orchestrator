@@ -93,6 +93,51 @@ def test_translation_requires_every_preserved_term():
     ) == ["translation_missing_preserve_term"]
 
 
+def test_review_checklist_requires_all_contract_sections():
+    result = DraftEnvelope(
+        draft="Scope: changed checkout behavior\nChecklist: inspect it",
+        unverified=[],
+    )
+
+    assert validate_generated_draft(
+        DraftKind.REVIEW_CHECKLIST,
+        "Evidence packet",
+        result,
+    ) == [
+        "review_missing_candidate_coverage_gaps",
+        "review_missing_positive_observations",
+        "review_missing_unverified",
+    ]
+
+
+def test_review_checklist_rejects_external_write():
+    result = DraftEnvelope(
+        draft=(
+            "Scope: changed behavior\nChecklist: inspect\nCandidate Coverage Gaps: none\n"
+            "Positive Observations: none\nUnverified: git push is not allowed"
+        ),
+        unverified=[],
+    )
+
+    assert validate_generated_draft(DraftKind.REVIEW_CHECKLIST, "Evidence", result) == [
+        "review_external_write"
+    ]
+
+
+def test_review_checklist_rejects_decision_claim():
+    result = DraftEnvelope(
+        draft=(
+            "Scope: changed behavior\nChecklist: inspect\nCandidate Coverage Gaps: none\n"
+            "Positive Observations: none\nSeverity: high\nUnverified: none"
+        ),
+        unverified=[],
+    )
+
+    assert validate_generated_draft(DraftKind.REVIEW_CHECKLIST, "Evidence", result) == [
+        "review_unsupported_decision"
+    ]
+
+
 def test_numbered_test_case_heading_counts_as_title():
     result = DraftEnvelope(
         draft=(
