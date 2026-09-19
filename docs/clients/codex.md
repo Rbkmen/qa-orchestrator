@@ -1,23 +1,23 @@
 # Codex setup
 
-Codex supports local STDIO MCP servers through its CLI and `config.toml`. The Codex app, CLI, and IDE extension share the configuration on the same host.
+Codex подключает QA Router как локальный STDIO MCP-сервер. Команда выполняется из `.venv` проекта через launcher.
 
-## Connect the server
+## Подключение
 
-From the cloned repository, get its absolute path:
+Из каталога репозитория получи абсолютный путь:
 
 ```bash
 pwd
 ```
 
-Add the server through the CLI:
+Добавь сервер:
 
 ```bash
 codex mcp add qa-router -- \
   /absolute/path/to/qa-router-mcp/scripts/qa-router-mcp
 ```
 
-Alternatively, add this block to `$HOME/.codex/config.toml`:
+Или добавь в `$HOME/.codex/config.toml`:
 
 ```toml
 [mcp_servers.qa-router]
@@ -27,24 +27,12 @@ startup_timeout_sec = 30
 tool_timeout_sec = 120
 ```
 
-Verify the registration:
+Проверь регистрацию командой `codex mcp list` и перезапусти Codex.
 
-```bash
-codex mcp list
-```
+## Инструкции host agent
 
-Restart Codex after changing the configuration.
+Добавь правила из [`client-rules/generic/QA_ROUTER_INSTRUCTIONS.md`](../../client-rules/generic/QA_ROUTER_INSTRUCTIONS.md) в persistent project instructions или адаптируй их под свои Codex rules. Не устанавливай отдельный routing skill: достаточно MCP-сервера и этих инструкций.
 
-## Install the routing skill
-
-```bash
-mkdir -p "$HOME/.codex/skills/qa-local-routing"
-cp codex/skills/qa-local-routing/SKILL.md \
-  "$HOME/.codex/skills/qa-local-routing/SKILL.md"
-```
-
-The skill implements the shared [QA Router policy](../ROUTING_POLICY.md) for Codex. Codex remains responsible for the final result and any external write.
-
-The installed skill also enforces stable test-case coverage IDs, per-tool quality states, required feedback for each new profile, 10% independent shadow checks, content-free draft feedback, and one content-free outcome record per finished QA task.
+Primary Codex собирает evidence, вызывает `prepare_review_route`, выполняет ревью сам и после завершения записывает один content-free outcome. `qa_deep`, если он нужен, остаётся отдельной host-owned read-only эскалацией.
 
 Reference: [official Codex MCP documentation](https://developers.openai.com/codex/mcp).

@@ -1,10 +1,8 @@
 # Generic MCP client setup
 
-QA Router uses the standard MCP STDIO transport. A compatible client must be able to start a local command, exchange MCP messages over stdin/stdout, and expose server tools to its agent.
+QA Router использует стандартный MCP STDIO transport. Совместимый клиент должен запускать команду, обмениваться MCP-сообщениями через stdin/stdout и показывать tools host agent.
 
-## Generic configuration
-
-Many MCP clients accept an `mcpServers` object similar to this:
+## Конфигурация
 
 ```json
 {
@@ -18,18 +16,16 @@ Many MCP clients accept an `mcpServers` object similar to this:
 }
 ```
 
-The exact configuration file and schema are client-specific. Use an absolute command path because GUI applications may not inherit the same working directory or shell `PATH` as a terminal.
+Точный файл зависит от клиента. Используй абсолютный путь к launcher.
 
-## Agent instructions
+## Инструкции
 
-Copy or merge [`client-rules/generic/QA_ROUTER_INSTRUCTIONS.md`](../../client-rules/generic/QA_ROUTER_INSTRUCTIONS.md) into the client's persistent instruction mechanism. The client must apply the shared [QA Router policy](../ROUTING_POLICY.md), review every draft, and retain exclusive control over external writes.
+Скопируй или объедини [`client-rules/generic/QA_ROUTER_INSTRUCTIONS.md`](../../client-rules/generic/QA_ROUTER_INSTRUCTIONS.md) с persistent instructions клиента. Host должен сам получать sources, анализировать evidence и выполнять внешние действия.
 
-## Verification
+## Проверка
 
-After configuration:
-
-1. Confirm that the server connects and lists its tools.
-2. Call `explain_short` only as an explicit smoke test with non-sensitive text.
-3. Confirm that the result is shown as an unverified draft.
-4. Confirm that the host agent reviews the draft before returning a final answer.
-5. Confirm that the client respects `quality_status`, handles requested shadow evaluation independently, and records one content-free outcome when a QA task ends.
+1. Убедись, что сервер подключается и показывает `prepare_review_route`, `record_qa_task_outcome`, `get_metrics_report`.
+2. Вызови `prepare_review_route` для каждого нужного профиля и проверь read-only флаги.
+3. Выполни маленькое read-only QA-ревью в host agent.
+4. Заверши его одним вызовом `record_qa_task_outcome`.
+5. Проверь агрегаты через `get_metrics_report`.

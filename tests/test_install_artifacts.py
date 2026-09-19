@@ -29,6 +29,20 @@ def test_launcher_forwards_metrics_overrides():
     assert 'QA_ROUTER_METRICS_MAX_EVENTS="${QA_ROUTER_METRICS_MAX_EVENTS:-10000}"' in content
 
 
+def test_operational_artifacts_describe_primary_agent_routing():
+    artifacts = [
+        ROOT / "README.md",
+        ROOT / "docs/ROUTING_POLICY.md",
+        ROOT / "client-rules/generic/QA_ROUTER_INSTRUCTIONS.md",
+    ]
+
+    for artifact in artifacts:
+        text = artifact.read_text(encoding="utf-8").lower()
+        assert "prepare_review_route" in text
+        for forbidden in ("q" + "wen", "lm " + "studio", "local " + "delegation"):
+            assert forbidden not in text
+
+
 @pytest.mark.asyncio
 async def test_launcher_exposes_only_model_free_tools():
     transport = StdioTransport(command=str(LAUNCHER), args=[])

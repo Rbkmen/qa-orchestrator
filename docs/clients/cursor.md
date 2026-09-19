@@ -1,10 +1,10 @@
 # Cursor setup
 
-Cursor supports local STDIO MCP servers through `mcp.json`. Use `$HOME/.cursor/mcp.json` for all projects or `.cursor/mcp.json` in one project.
+Cursor подключает QA Router через `mcp.json`. Используй `$HOME/.cursor/mcp.json` для всех проектов или `.cursor/mcp.json` для одного проекта.
 
-## Connect the server
+## Подключение
 
-Create or merge this configuration without overwriting existing servers:
+Создай или объедини конфигурацию, не затирая существующие серверы:
 
 ```json
 {
@@ -17,9 +17,9 @@ Create or merge this configuration without overwriting existing servers:
 }
 ```
 
-Restart Cursor and check the MCP settings. Cursor Agent exposes connected MCP tools under Available Tools.
+Перезапусти Cursor и проверь, что доступны ровно три инструмента QA Router.
 
-## Install the routing rule
+## Инструкции host agent
 
 ```bash
 mkdir -p /absolute/path/to/your-project/.cursor/rules
@@ -27,10 +27,6 @@ cp /absolute/path/to/qa-router-mcp/client-rules/cursor/qa-router.mdc \
   /absolute/path/to/your-project/.cursor/rules/qa-router.mdc
 ```
 
-The `.mdc` template is an always-applied project rule. It adapts the shared [QA Router policy](../ROUTING_POLICY.md) without assuming a specific Cursor model.
+Правило заставляет Cursor Agent получать evidence и принимать QA-решения самостоятельно; `prepare_review_route` используется как детерминированный профиль, а не как отдельный агент.
 
-For a personal rule across projects, add the same instructions through Cursor Settings → Rules → User Rules.
-
-The rule handles stable coverage IDs, per-tool quality states, required feedback for each new profile, 10% independent shadow checks, content-free draft feedback, and one content-free outcome record per finished QA task.
-
-References: [official Cursor MCP documentation](https://docs.cursor.com/context/model-context-protocol) and [official Cursor Rules documentation](https://cursor.com/docs/rules).
+References: [official Cursor MCP documentation](https://docs.cursor.com/context/model-context-protocol) и [Cursor Rules documentation](https://cursor.com/docs/rules).
