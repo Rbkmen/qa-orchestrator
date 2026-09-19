@@ -1,6 +1,6 @@
 # QA Router Host-Owned Orchestrator
 
-**Status:** Draft for user review
+**Status:** Approved by user on 2026-09-19
 
 ## Goal
 
