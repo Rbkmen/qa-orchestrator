@@ -13,6 +13,7 @@ from qa_router_mcp.contracts import (
     QaTaskOutcome,
     QaTaskOutcomeReceipt,
     QaTaskType,
+    ReviewAgent,
     TokenCount,
 )
 from qa_router_mcp.events import EventSink, JsonEventSink, valid_qa_task_metrics
@@ -192,7 +193,19 @@ class RouterService:
         *,
         expected_coverage_ids: tuple[str, ...] | None = None,
         preserve_terms: tuple[str, ...] = (),
+        review_agent: ReviewAgent | str | None = None,
     ) -> DraftEnvelope:
+        resolved_review_agent: ReviewAgent | None = None
+        if kind == DraftKind.REVIEW_CHECKLIST:
+            if review_agent is None:
+                raise ValueError("review agent profile is required")
+            try:
+                resolved_review_agent = ReviewAgent(review_agent)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("unknown review agent profile") from exc
+        elif review_agent is not None:
+            raise ValueError("review agent profile is only valid for review checklists")
+
         started = monotonic()
         tokenization_ms = 0.0
         model_load_ms = 0.0
@@ -233,6 +246,7 @@ class RouterService:
                 safe_content,
                 safe_pattern,
                 expected_coverage_ids=expected_coverage_ids,
+                review_agent=resolved_review_agent,
             )
             output_limit = self.settings.output_limit(kind, packet)
             phase_started = monotonic()

@@ -215,6 +215,7 @@ git commit -m "feat: validate review checklist drafts"
 
 **Files:**
 - Modify: `src/qa_router_mcp/service.py`
+- Modify: `src/qa_router_mcp/events.py`
 - Test: `tests/test_service.py`
 
 **Interfaces:**
@@ -264,7 +265,7 @@ async def test_review_lane_reuses_quality_metadata_and_profile_prompt(tmp_path, 
     )
 
     assert result.status == "ok"
-    assert result.quality_status == "active"
+    assert result.quality_status == "canary"
     assert result.canary_feedback_required is True
     assert result.draft_id is not None
     assert "REVIEW_AGENT_PROFILE: pr_test_analyzer" in drafting.prompts[0]
@@ -279,7 +280,7 @@ Run the two new node IDs. Expected: the unknown-profile test fails because `draf
 
 Extend `RouterService.draft` with keyword-only `review_agent: ReviewAgent | str | None = None`. Before computing quality gates or calling the backend, convert a review profile through `ReviewAgent(value)`, raise `ValueError("unknown review agent profile")` for invalid values, and raise `ValueError("review agent profile is required")` when the review kind has no profile. Reject a profile supplied for a non-review kind with `ValueError("review agent profile is only valid for review checklists")`.
 
-Pass the resolved enum to both the initial and repair `build_prompt` path. Keep packet sanitization, input/token limits, policy refusal, metrics recording, canary/shadow metadata, fallback, and one-repair behavior unchanged. The review kind must use the existing `_record` path so its metrics tool key is `review_checklist`.
+Pass the resolved enum to the initial prompt path. Keep packet sanitization, input/token limits, policy refusal, metrics recording, canary/shadow metadata, fallback, and one-repair behavior unchanged. Add `"review_checklist": 10` to `CANARY_TOOL_TARGETS` so the new route receives content-free feedback IDs and participates in the existing quality gate without becoming active before its first review sample. The review kind must use the existing `_record` path so its metrics tool key is `review_checklist`.
 
 - [ ] **Step 4: Run service regression tests**
 
@@ -294,7 +295,7 @@ Expected: all service tests pass, including both new review-lane tests and exist
 - [ ] **Step 5: Commit the task**
 
 ```bash
-git add src/qa_router_mcp/service.py tests/test_service.py
+git add src/qa_router_mcp/service.py src/qa_router_mcp/events.py tests/test_service.py
 git commit -m "feat: route review profiles through qa router"
 ```
 

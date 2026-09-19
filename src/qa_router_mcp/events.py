@@ -20,6 +20,7 @@ CANARY_TOOL_TARGETS = {
     "rewrite": 10,
     "translation": 10,
     "short_explanation": 10,
+    "review_checklist": 10,
 }
 REVIEWABLE_TOOLS = set(CANARY_TOOL_TARGETS)
 CANARY_TARGET = sum(CANARY_TOOL_TARGETS.values())

@@ -6,7 +6,7 @@ import pytest
 
 from qa_router_mcp.backends import BackendError
 from qa_router_mcp.config import Settings
-from qa_router_mcp.contracts import DraftEnvelope, DraftKind
+from qa_router_mcp.contracts import DraftEnvelope, DraftKind, ReviewAgent
 from qa_router_mcp.events import CANARY_TARGET, CANARY_TOOL_TARGETS, JsonEventSink
 from qa_router_mcp.service import RouterService
 
@@ -27,6 +27,50 @@ class DraftFake:
         self.prompts.append(prompt)
         self.output_limits.append(max_output_tokens)
         return self.results.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_unknown_review_profile_fails_before_backend(tmp_path):
+    drafting = DraftFake(DraftEnvelope(draft="unused", unverified=[]))
+    service = RouterService(Settings(data_dir=tmp_path), drafting)
+
+    with pytest.raises(ValueError, match="unknown review agent profile"):
+        await service.draft(
+            DraftKind.REVIEW_CHECKLIST,
+            "changed checkout behavior",
+            review_agent="not_registered",
+        )
+
+    assert drafting.token_prompts == []
+    assert drafting.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_review_lane_reuses_quality_metadata_and_profile_prompt(tmp_path, monkeypatch):
+    review = DraftEnvelope(
+        draft=(
+            "Scope: changed checkout behavior\nChecklist: inspect branches\n"
+            "Candidate Coverage Gaps: error path\nPositive Observations: bounded diff\n"
+            "Unverified: runtime behavior"
+        ),
+        unverified=["Review against source"],
+    )
+    drafting = DraftFake(review)
+    service = RouterService(Settings(data_dir=tmp_path), drafting)
+    monkeypatch.setattr("qa_router_mcp.service.is_shadow_sample", lambda _: False)
+
+    result = await service.draft(
+        DraftKind.REVIEW_CHECKLIST,
+        "changed checkout behavior",
+        review_agent=ReviewAgent.PR_TEST_ANALYZER,
+    )
+
+    assert result.status == "ok"
+    assert result.quality_status == "canary"
+    assert result.canary_feedback_required is True
+    assert result.draft_id is not None
+    assert "REVIEW_AGENT_PROFILE: pr_test_analyzer" in drafting.prompts[0]
+    assert '"tool":"review_checklist"' in (tmp_path / "metrics.jsonl").read_text()
 
 
 @pytest.mark.asyncio
