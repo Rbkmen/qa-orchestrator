@@ -49,7 +49,7 @@ def test_report_aggregates_only_model_free_task_outcomes():
         ),
         json.dumps(
             {
-                "schema_version": 7,
+                "schema_version": 1,
                 "event_type": "qa_task_outcome",
                 "timestamp": timestamp,
                 "task_type": "ordinary_review",
