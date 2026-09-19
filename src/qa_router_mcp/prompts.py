@@ -1,6 +1,6 @@
 import re
 
-from qa_router_mcp.contracts import DraftKind
+from qa_router_mcp.contracts import DraftKind, ReviewAgent
 
 SYSTEM_PROMPT = (
     "You are a local routine drafting model. Return only JSON matching the supplied schema. "
@@ -50,6 +50,42 @@ INSTRUCTIONS = {
         "Summarize only the supplied text with the requested focus. Do not add conclusions "
         "that are absent from the input."
     ),
+    DraftKind.REVIEW_CHECKLIST: (
+        "Draft a bounded, read-only review checklist from the supplied Evidence Packet. "
+        "Separate candidate coverage gaps and questions from confirmed findings. Include the "
+        "literal sections Scope, Checklist, Candidate Coverage Gaps, Positive Observations, "
+        "and Unverified. Never invent files, line numbers, contracts, runtime results, or "
+        "external-system state."
+    ),
+}
+
+REVIEW_AGENT_INSTRUCTIONS: dict[ReviewAgent, str] = {
+    ReviewAgent.PR_TEST_ANALYZER: (
+        "Focus on changed behavior, happy-path, negative, edge, integration, and meaningful "
+        "assertion coverage."
+    ),
+    ReviewAgent.CODE_REVIEWER: (
+        "Focus on the exact changed surface, concrete failure modes, nearby contracts, and "
+        "evidence gaps."
+    ),
+    ReviewAgent.SECURITY_REVIEWER: (
+        "Focus on authentication, authorization, input validation, secrets, dependency, "
+        "payment, webhook, and access-control checks."
+    ),
+    ReviewAgent.SILENT_FAILURE_HUNTER: (
+        "Focus on swallowed errors, dangerous fallbacks, lost error propagation, timeout, "
+        "rollback, and observability checks."
+    ),
+    ReviewAgent.CODE_EXPLORER: (
+        "Focus on the execution path, callers, dependencies, and architecture boundaries."
+    ),
+    ReviewAgent.TYPESCRIPT_REVIEWER: (
+        "Focus on types, asynchronous and error contracts, narrowing, and unsafe casts."
+    ),
+    ReviewAgent.REACT_REVIEWER: (
+        "Focus on component state, rendering branches, effects, accessibility, and user-visible "
+        "behavior."
+    ),
 }
 
 
@@ -59,6 +95,7 @@ def build_prompt(
     pattern: str | None = None,
     *,
     expected_coverage_ids: tuple[str, ...] | None = None,
+    review_agent: ReviewAgent | None = None,
 ) -> str:
     pattern_section = f"\nSUPPLIED_PATTERN:\n{pattern}" if pattern else ""
     skeleton_section = ""
@@ -77,11 +114,28 @@ def build_prompt(
                 for coverage_id in coverage_ids
             ]
             skeleton_section = "\nMANDATORY_DRAFT_SKELETON:\n" + "\n\n".join(blocks)
+    review_section = ""
+    if kind == DraftKind.REVIEW_CHECKLIST:
+        if review_agent is None:
+            raise ValueError("review agent profile is required")
+        review_section = (
+            f"\nREVIEW_AGENT_PROFILE: {review_agent.value}\n"
+            f"REVIEW_PROFILE_FOCUS:\n{REVIEW_AGENT_INSTRUCTIONS[review_agent]}\n"
+            "REVIEW_OUTPUT_SECTIONS:\n"
+            "- Scope\n"
+            "- Checklist\n"
+            "- Candidate Coverage Gaps\n"
+            "- Positive Observations\n"
+            "- Unverified"
+        )
+    elif review_agent is not None:
+        raise ValueError("review agent profile is only valid for review checklists")
     return (
         "OUTPUT_FIELDS:\n"
         "- draft: put the complete requested artifact here, never a status or field label. "
         "For test cases, follow the exact repeated heading format from TASK.\n"
         "- unverified: a JSON array of claims or assumptions that still need verification.\n"
         "- assumptions: a JSON array; use an empty array when none are needed.\n"
-        f"TASK:\n{INSTRUCTIONS[kind]}\nINPUT:\n{content}{pattern_section}{skeleton_section}"
+        f"TASK:\n{INSTRUCTIONS[kind]}{review_section}\nINPUT:\n{content}"
+        f"{pattern_section}{skeleton_section}"
     )

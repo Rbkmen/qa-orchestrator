@@ -65,6 +65,17 @@ class DraftKind(StrEnum):
     REWRITE = "rewrite"
     SHORT_EXPLANATION = "short_explanation"
     TEXT_SUMMARY = "text_summary"
+    REVIEW_CHECKLIST = "review_checklist"
+
+
+class ReviewAgent(StrEnum):
+    PR_TEST_ANALYZER = "pr_test_analyzer"
+    CODE_REVIEWER = "code_reviewer"
+    SECURITY_REVIEWER = "security_reviewer"
+    SILENT_FAILURE_HUNTER = "silent_failure_hunter"
+    CODE_EXPLORER = "code_explorer"
+    TYPESCRIPT_REVIEWER = "typescript_reviewer"
+    REACT_REVIEWER = "react_reviewer"
 
 
 class DraftEnvelope(BaseModel):

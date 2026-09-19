@@ -27,6 +27,13 @@ def test_settings_use_pinned_safe_defaults(monkeypatch):
     assert settings.input_limit(DraftKind.LOG_SUMMARY) == 40_000
 
 
+def test_review_checklist_has_a_bounded_budget():
+    settings = Settings()
+
+    assert settings.input_limit(DraftKind.REVIEW_CHECKLIST) == 24_000
+    assert settings.output_limit(DraftKind.REVIEW_CHECKLIST, "evidence") == 2_048
+
+
 @pytest.mark.parametrize(
     ("kind", "content", "expected"),
     [
