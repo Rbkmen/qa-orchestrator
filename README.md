@@ -7,13 +7,52 @@ QA Router MCP — небольшой детерминированный FastMCP-
 1. Primary host получает authoritative evidence из нужных систем и определяет тип QA-задачи.
 2. Host вызывает `start_qa_orchestration`. Router создаёт content-free сессию и возвращает первый шаг — Luna с `max` reasoning.
 3. Host выполняет стадии в своей model configuration и после каждой стадии передаёт Router только структурированный сигнал:
-   - `gpt-5.6-luna` + `max` — triage и выбор одного review profile;
-   - `gpt-5.6-terra` + `medium` — primary review;
+   - `gpt-5.6-luna` + `max` — triage и выбор одного fixed review bundle или одного compatibility profile;
+   - `gpt-5.6-terra` + `medium` — primary review каждого профиля в фиксированном порядке;
    - опционально `gpt-5.6-sol` + `high` — read-only deep analysis по фиксированной причине;
    - `gpt-5.6-terra` + `medium` — synthesis.
 4. Host сам проверяет findings, runtime-доказательства и ограничения, затем один раз вызывает `record_qa_task_outcome`.
 
 Router не вызывает модели, не выбирает severity или release readiness и не выполняет внешние записи.
+
+### Bundles и имена профилей
+
+Luna выбирает один из фиксированных bundles либо один профиль для обратной совместимости. Terra выполняет профили bundle последовательно; host показывает статус каждой роли.
+
+| Bundle | Порядок профилей |
+|---|---|
+| `ordinary_mr` | `code_explorer` → `code_reviewer` → `pr_test_analyzer` |
+| `widget` | `code_explorer` → `react_reviewer` → `typescript_reviewer` → `pr_test_analyzer` |
+| `security` | `code_explorer` → `security_reviewer` → `silent_failure_hunter` |
+| `autotest` | `code_reviewer` → `pr_test_analyzer` → `typescript_reviewer` |
+| `requirements` | `code_explorer` → `code_reviewer` |
+
+Технические профили и отображаемые имена:
+
+| Профиль | Имя для host |
+|---|---|
+| `code_explorer` | `Faraday — Evidence Investigator` |
+| `code_reviewer` | `Code Reviewer` |
+| `pr_test_analyzer` | `Test Analyzer` |
+| `security_reviewer` | `Security Reviewer` |
+| `silent_failure_hunter` | `Silent Failure Hunter` |
+| `typescript_reviewer` | `TypeScript Reviewer` |
+| `react_reviewer` | `React Reviewer` |
+
+Faraday — это только внутреннее отображаемое имя профиля `code_explorer`: отдельный внешний агент, сервис, package или model не подключается.
+
+Обычный status flow:
+
+```text
+Luna / Max → Ordinary MR Review
+Terra / Medium → Faraday — Evidence Investigator
+Terra / Medium → Code Reviewer
+Terra / Medium → Test Analyzer
+Terra / Medium → Synthesis
+Host → Final QA outcome
+```
+
+При зафиксированной причине для углублённой проверки добавляется `Sol / High → Deep read-only review` между primary review и synthesis.
 
 ## MCP-интерфейс
 
@@ -39,7 +78,7 @@ Luna/max → Terra/medium → Terra/medium synthesis → host outcome
 
 ### Профили ревью
 
-`pr_test_analyzer`, `code_reviewer`, `security_reviewer`, `silent_failure_hunter`, `code_explorer`, `typescript_reviewer`, `react_reviewer`.
+`prepare_review_route` возвращает focus, обязательные секции, ограничения, escalation signals и отображаемое имя одного профиля. Для bundle host вызывает route для каждого профиля в полученном фиксированном порядке.
 
 Общие секции route: `Scope`, `Checklist`, `Candidate Coverage Gaps`, `Positive Observations`, `Unverified`.
 

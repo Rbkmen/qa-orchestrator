@@ -75,6 +75,39 @@ def test_operational_artifacts_describe_host_orchestration():
             assert phrase not in text
 
 
+def test_operational_artifacts_describe_review_bundles_and_statuses():
+    artifacts = [
+        ROOT / "README.md",
+        ROOT / "docs/ROUTING_POLICY.md",
+        ROOT / "client-rules/generic/QA_ROUTER_INSTRUCTIONS.md",
+    ]
+    required = (
+        "ordinary_mr",
+        "widget",
+        "security",
+        "autotest",
+        "requirements",
+        "faraday — evidence investigator",
+        "luna / max",
+        "terra / medium",
+        "sol / high",
+        "host → final qa outcome",
+    )
+    forbidden = (
+        "faraday service",
+        "faraday provider",
+        "qa router calls models",
+        "submit evidence to qa router",
+    )
+
+    for artifact in artifacts:
+        text = artifact.read_text(encoding="utf-8").lower()
+        for phrase in required:
+            assert phrase in text, f"{phrase} is missing from {artifact}"
+        for phrase in forbidden:
+            assert phrase not in text
+
+
 def test_documentation_contains_no_retired_runtime_terms():
     artifacts = [
         ROOT / "README.md",

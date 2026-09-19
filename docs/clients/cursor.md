@@ -27,6 +27,6 @@ cp /absolute/path/to/qa-router-mcp/client-rules/cursor/qa-router.mdc \
   /absolute/path/to/your-project/.cursor/rules/qa-router.mdc
 ```
 
-Правило заставляет Cursor Agent получать evidence, выполнять model stages и принимать QA-решения самостоятельно. Используй `start_qa_orchestration` → `advance_qa_orchestration` → `get_qa_orchestration`, а `prepare_review_route` — как детерминированный профиль, а не как отдельный агент. Policy: Luna/max для triage, Terra/medium для primary/synthesis и optional Sol/high для read-only escalation.
+Правило заставляет Cursor Agent получать evidence, выполнять model stages и принимать QA-решения самостоятельно. Используй `start_qa_orchestration` → Luna выбирает fixed bundle или profile → `advance_qa_orchestration` → `get_qa_orchestration`, а `prepare_review_route` — для каждой роли в фиксированном порядке, а не как отдельный внешний агент. Для `ordinary_mr` порядок: `Faraday — Evidence Investigator` → `Code Reviewer` → `Test Analyzer`. Policy: Luna/max для triage, Terra/medium для primary/synthesis и optional Sol/high для read-only escalation.
 
 References: [official Cursor MCP documentation](https://docs.cursor.com/context/model-context-protocol) и [Cursor Rules documentation](https://cursor.com/docs/rules).
