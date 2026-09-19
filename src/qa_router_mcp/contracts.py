@@ -78,6 +78,16 @@ class ReviewAgent(StrEnum):
     REACT_REVIEWER = "react_reviewer"
 
 
+class ReviewRoute(BaseModel):
+    profile: ReviewAgent
+    focus: str = Field(min_length=1)
+    required_sections: list[str] = Field(min_length=1)
+    constraints: list[str] = Field(min_length=1)
+    escalation_signals: list[str] = Field(default_factory=list)
+    read_only: bool = True
+    host_owns_decisions: bool = True
+
+
 class DraftEnvelope(BaseModel):
     status: Literal["ok", "refused", "fallback"] = "ok"
     draft: str = ""

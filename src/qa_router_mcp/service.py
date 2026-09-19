@@ -20,6 +20,7 @@ from qa_router_mcp.events import EventSink, JsonEventSink, valid_qa_task_metrics
 from qa_router_mcp.policy import PolicyError, assert_allowed_request, sanitize_transient
 from qa_router_mcp.prompts import build_prompt
 from qa_router_mcp.quality import MIN_REVIEWS, QualityGate, is_shadow_sample
+from qa_router_mcp.review_profiles import build_review_route
 from qa_router_mcp.validation import (
     normalize_test_case_draft,
     repair_instruction,
@@ -28,10 +29,15 @@ from qa_router_mcp.validation import (
 
 
 class RouterService:
+    @classmethod
+    def from_settings(cls, *, data_dir=None) -> "RouterService":
+        settings = Settings(data_dir=data_dir) if data_dir is not None else Settings()
+        return cls(settings, drafting=None)
+
     def __init__(
         self,
         settings: Settings,
-        drafting: DraftBackend,
+        drafting: DraftBackend | None,
         events: EventSink | None = None,
     ) -> None:
         self.settings = settings
@@ -42,6 +48,13 @@ class RouterService:
             settings.metrics_max_events,
         )
         self._last_generation_finished: float | None = None
+
+    def prepare_review_route(self, agent_profile: ReviewAgent | str):
+        try:
+            resolved_profile = ReviewAgent(agent_profile)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("unknown review agent profile") from exc
+        return build_review_route(resolved_profile)
 
     def record_canary_feedback(
         self,
