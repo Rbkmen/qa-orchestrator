@@ -112,7 +112,7 @@ class JsonEventSink:
         self.path.parent.chmod(0o700)
         with _locked_path(self.path, LOCK_EX):
             try:
-                with self.path.open(encoding="utf-8") as metrics:
+                with self.path.open(encoding="utf-8", errors="replace") as metrics:
                     events = _parse_events(metrics)
             except FileNotFoundError:
                 events = []
@@ -139,7 +139,9 @@ def read_metrics_lines(path: Path) -> list[str]:
     if not path.exists():
         return []
     try:
-        with _locked_path(path, LOCK_SH), path.open(encoding="utf-8") as metrics:
+        with _locked_path(path, LOCK_SH), path.open(
+            encoding="utf-8", errors="replace"
+        ) as metrics:
             return metrics.read().splitlines()
     except FileNotFoundError:
         return []
@@ -148,8 +150,18 @@ def read_metrics_lines(path: Path) -> list[str]:
 @contextmanager
 def _locked_path(path: Path, operation: int) -> Iterator[None]:
     lock_path = path.with_name(f".{path.name}.lock")
-    with lock_path.open("a+", encoding="utf-8") as lock:
-        lock_path.chmod(0o600)
+    lock_mode = "a+" if operation == LOCK_EX else "r"
+    try:
+        lock = lock_path.open(lock_mode, encoding="utf-8")
+    except FileNotFoundError:
+        if operation == LOCK_SH:
+            # Writers use atomic replacement, so an absent lock file is safe for a read.
+            yield
+            return
+        raise
+    with lock:
+        if operation == LOCK_EX:
+            lock_path.chmod(0o600)
         flock(lock.fileno(), operation)
         try:
             yield

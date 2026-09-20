@@ -252,6 +252,52 @@ def test_service_records_orchestration_counters(tmp_path):
     assert event["terra_calls"] == 2
 
 
+@pytest.mark.parametrize(
+    ("outcome", "expected_action"),
+    [
+        ("partial", "Host recorded the partial QA outcome."),
+        ("blocked", "Host recorded the blocked QA outcome."),
+    ],
+)
+def test_service_marks_terminal_action_after_recording_outcome(
+    tmp_path,
+    outcome,
+    expected_action,
+):
+    service = RouterService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review")
+    stopped = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            status=outcome,
+        )
+    )
+
+    receipt = service.record_qa_task_outcome(
+        task_type="ordinary_review",
+        outcome=outcome,
+        codegraph_calls=0,
+        source_mcp_calls=0,
+        findings_identified=0,
+        findings_confirmed=0,
+        findings_rejected=0,
+        repeated_source_reads=0,
+        orchestration_used=True,
+        luna_calls=1,
+        terra_calls=0,
+        sol_calls=0,
+        orchestration_steps_completed=1,
+        run_id=stopped.run_id,
+    )
+
+    final = service.get_qa_orchestration(started.run_id)
+
+    assert receipt.status == "recorded"
+    assert final.outcome_recorded is True
+    assert final.next_action == expected_action
+
+
 def test_service_rejects_outcome_with_mismatched_task_type(tmp_path):
     service = RouterService.from_settings(data_dir=tmp_path)
     started = service.start_qa_orchestration("ordinary_review")

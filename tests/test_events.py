@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from qa_router_mcp.config import Settings
+from qa_router_mcp.events import read_metrics_lines
 from qa_router_mcp.service import RouterService
 
 
@@ -54,6 +55,26 @@ def test_metrics_rewrite_discards_malformed_lines(tmp_path):
     lines = metrics_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0])["event_type"] == "qa_task_outcome"
+
+
+def test_malformed_utf8_metrics_are_discarded_on_next_write(tmp_path):
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_bytes(b"\xff\n")
+    service = RouterService.from_settings(data_dir=tmp_path)
+
+    _record_minimal_outcome(service)
+
+    lines = metrics_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["event_type"] == "qa_task_outcome"
+
+
+def test_reading_metrics_does_not_create_a_lock_file(tmp_path):
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text("{}\n", encoding="utf-8")
+
+    assert read_metrics_lines(metrics_path) == ["{}"]
+    assert not metrics_path.with_name(".metrics.jsonl.lock").exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="metrics permissions use POSIX modes")

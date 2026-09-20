@@ -158,6 +158,13 @@ _TERMINAL_ACTIONS = MappingProxyType(
         OrchestrationStatus.BLOCKED: "Host records the blocked QA outcome.",
     }
 )
+_RECORDED_TERMINAL_ACTIONS = MappingProxyType(
+    {
+        OrchestrationStatus.COMPLETED: "Host recorded the final QA outcome.",
+        OrchestrationStatus.PARTIAL: "Host recorded the partial QA outcome.",
+        OrchestrationStatus.BLOCKED: "Host recorded the blocked QA outcome.",
+    }
+)
 _ACTIVE_SESSION_STATUSES = frozenset(
     {OrchestrationStatus.ACTIVE, OrchestrationStatus.AWAITING_HOST_OUTCOME}
 )
@@ -341,7 +348,12 @@ class QaOrchestrator:
             if session.outcome_recorded and recorded_fingerprint != fingerprint:
                 raise OrchestrationError("conflicting outcome payload")
             if not session.outcome_recorded:
-                session = session.model_copy(update={"outcome_recorded": True})
+                session = session.model_copy(
+                    update={
+                        "outcome_recorded": True,
+                        "next_action": _RECORDED_TERMINAL_ACTIONS[session.status],
+                    }
+                )
                 self._sessions[run_id] = session
                 self._outcome_fingerprints[run_id] = fingerprint
             return self._copy(session)
