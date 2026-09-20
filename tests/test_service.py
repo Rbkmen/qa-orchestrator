@@ -3,7 +3,11 @@ import json
 import pytest
 
 from qa_router_mcp.contracts import ReviewAgent, ReviewBundle
-from qa_router_mcp.orchestration import AdvanceQaOrchestrationRequest, OrchestrationStep
+from qa_router_mcp.orchestration import (
+    AdvanceQaOrchestrationRequest,
+    OrchestrationStatus,
+    OrchestrationStep,
+)
 from qa_router_mcp.review_profiles import REVIEW_BUNDLES
 from qa_router_mcp.service import RouterService
 
@@ -98,6 +102,25 @@ def test_service_rejects_inconsistent_task_outcome(tmp_path):
         )
 
 
+def test_service_rejects_unapproved_deep_model(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+
+    with pytest.raises(ValueError, match="QA task metrics are inconsistent"):
+        service.record_qa_task_outcome(
+            task_type="ordinary_review",
+            outcome="completed",
+            codegraph_calls=0,
+            source_mcp_calls=0,
+            findings_identified=0,
+            findings_confirmed=0,
+            findings_rejected=0,
+            repeated_source_reads=0,
+            deep_analysis_used=True,
+            deep_model="secret/path-or-issue-key",
+            deep_reasoning="high",
+        )
+
+
 def test_service_exposes_orchestration_state_machine(tmp_path):
     service = RouterService.from_settings(data_dir=tmp_path)
 
@@ -133,8 +156,74 @@ def test_metrics_reject_negative_orchestration_counter(tmp_path):
         )
 
 
+def test_metrics_reject_sol_calls_without_deep_analysis(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+
+    with pytest.raises(ValueError, match="QA task metrics are inconsistent"):
+        service.record_qa_task_outcome(
+            task_type="ordinary_review",
+            outcome="partial",
+            codegraph_calls=0,
+            source_mcp_calls=0,
+            findings_identified=0,
+            findings_confirmed=0,
+            findings_rejected=0,
+            repeated_source_reads=0,
+            orchestration_used=True,
+            luna_calls=1,
+            terra_calls=1,
+            sol_calls=1,
+            orchestration_steps_completed=2,
+        )
+
+
+def test_metrics_reject_completed_orchestration_without_required_stages(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+
+    with pytest.raises(ValueError, match="QA task metrics are inconsistent"):
+        service.record_qa_task_outcome(
+            task_type="ordinary_review",
+            outcome="completed",
+            codegraph_calls=0,
+            source_mcp_calls=0,
+            findings_identified=0,
+            findings_confirmed=0,
+            findings_rejected=0,
+            repeated_source_reads=0,
+            orchestration_used=True,
+            luna_calls=1,
+            terra_calls=1,
+            sol_calls=0,
+            orchestration_steps_completed=2,
+        )
+
+
 def test_service_records_orchestration_counters(tmp_path):
     service = RouterService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review")
+    primary = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            status="completed",
+            selected_profile="code_reviewer",
+        )
+    )
+    synthesis = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=primary.current_step,
+            status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+        )
+    )
+    service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=synthesis.current_step,
+            status="completed",
+        )
+    )
 
     receipt = service.record_qa_task_outcome(
         task_type="ordinary_review",
@@ -146,14 +235,199 @@ def test_service_records_orchestration_counters(tmp_path):
         findings_rejected=0,
         repeated_source_reads=0,
         orchestration_used=True,
+        deep_analysis_used=False,
+        luna_calls=1,
+        terra_calls=2,
+        sol_calls=0,
+        orchestration_steps_completed=3,
+        orchestration_retries=0,
+        run_id=started.run_id,
+    )
+
+    assert receipt.status == "recorded"
+    assert service.get_qa_orchestration(started.run_id).status is OrchestrationStatus.COMPLETED
+    assert service.get_qa_orchestration(started.run_id).outcome_recorded is True
+    event = json.loads((tmp_path / "metrics.jsonl").read_text(encoding="utf-8"))
+    assert event["orchestration_used"] is True
+    assert event["terra_calls"] == 2
+
+
+def test_service_records_deep_orchestration_counters(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review")
+    primary = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            status="completed",
+            selected_profile="security_reviewer",
+        )
+    )
+    deep = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=primary.current_step,
+            status="completed",
+            completed_profile=ReviewAgent.SECURITY_REVIEWER,
+            needs_deep_analysis=True,
+            reason_code="security_sensitive",
+        )
+    )
+    synthesis = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=deep.current_step,
+            status="completed",
+        )
+    )
+    service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=synthesis.current_step,
+            status="completed",
+        )
+    )
+
+    with pytest.raises(ValueError, match="QA task metrics are inconsistent"):
+        service.record_qa_task_outcome(
+            task_type="ordinary_review",
+            outcome="completed",
+            codegraph_calls=0,
+            source_mcp_calls=0,
+            findings_identified=0,
+            findings_confirmed=0,
+            findings_rejected=0,
+            repeated_source_reads=0,
+            deep_analysis_used=True,
+            orchestration_used=True,
+            luna_calls=1,
+            terra_calls=2,
+            sol_calls=1,
+            orchestration_steps_completed=4,
+            run_id=started.run_id,
+        )
+
+    receipt = service.record_qa_task_outcome(
+        task_type="ordinary_review",
+        outcome="completed",
+        codegraph_calls=0,
+        source_mcp_calls=0,
+        findings_identified=0,
+        findings_confirmed=0,
+        findings_rejected=0,
+        repeated_source_reads=0,
+        deep_analysis_used=True,
+        deep_model="gpt-5.6-sol",
+        deep_reasoning="high",
+        orchestration_used=True,
         luna_calls=1,
         terra_calls=2,
         sol_calls=1,
         orchestration_steps_completed=4,
-        orchestration_retries=0,
+        run_id=started.run_id,
     )
 
     assert receipt.status == "recorded"
-    event = json.loads((tmp_path / "metrics.jsonl").read_text(encoding="utf-8"))
-    assert event["orchestration_used"] is True
-    assert event["terra_calls"] == 2
+    assert service.get_qa_orchestration(started.run_id).status is OrchestrationStatus.COMPLETED
+
+
+def test_service_rejects_metrics_from_wrong_orchestration_branch(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review")
+    service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            status="partial",
+        )
+    )
+
+    with pytest.raises(ValueError, match="QA task metrics are inconsistent"):
+        service.record_qa_task_outcome(
+            task_type="ordinary_review",
+            outcome="partial",
+            codegraph_calls=0,
+            source_mcp_calls=0,
+            findings_identified=0,
+            findings_confirmed=0,
+            findings_rejected=0,
+            repeated_source_reads=0,
+            deep_analysis_used=True,
+            deep_model="gpt-5.6-sol",
+            deep_reasoning="high",
+            orchestration_used=True,
+            luna_calls=1,
+            terra_calls=0,
+            sol_calls=1,
+            orchestration_steps_completed=1,
+            run_id=started.run_id,
+        )
+
+
+def test_service_does_not_duplicate_finalized_orchestration_metric(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review")
+    primary = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            status="completed",
+            selected_profile="code_reviewer",
+        )
+    )
+    synthesis = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=primary.current_step,
+            status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+        )
+    )
+    service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=synthesis.current_step,
+            status="completed",
+        )
+    )
+    metrics = {
+        "task_type": "ordinary_review",
+        "outcome": "completed",
+        "codegraph_calls": 0,
+        "source_mcp_calls": 0,
+        "findings_identified": 0,
+        "findings_confirmed": 0,
+        "findings_rejected": 0,
+        "repeated_source_reads": 0,
+        "orchestration_used": True,
+        "luna_calls": 1,
+        "terra_calls": 2,
+        "sol_calls": 0,
+        "orchestration_steps_completed": 3,
+        "orchestration_retries": 0,
+        "run_id": started.run_id,
+    }
+
+    first = service.record_qa_task_outcome(**metrics)
+    second = service.record_qa_task_outcome(**metrics)
+
+    assert first.status == "recorded"
+    assert second.status == "recorded"
+    assert len((tmp_path / "metrics.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_service_requires_run_id_for_orchestrated_outcome(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+
+    with pytest.raises(ValueError, match="run_id"):
+        service.record_qa_task_outcome(
+            task_type="ordinary_review",
+            outcome="partial",
+            codegraph_calls=0,
+            source_mcp_calls=0,
+            findings_identified=0,
+            findings_confirmed=0,
+            findings_rejected=0,
+            repeated_source_reads=0,
+            orchestration_used=True,
+        )

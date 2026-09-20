@@ -5,7 +5,6 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from fcntl import LOCK_EX, LOCK_SH, LOCK_UN, flock
 from pathlib import Path
-from re import fullmatch
 from typing import IO, Protocol
 
 from qa_router_mcp.contracts import QaTaskOutcomeReceipt
@@ -41,6 +40,7 @@ ORCHESTRATION_COUNTERS = {
     "orchestration_retries",
 }
 DEEP_REASONING = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+DEEP_MODELS = {"gpt-5.6-sol"}
 EVENT_FIELDS = {
     "schema_version",
     "event_type",
@@ -166,7 +166,7 @@ def valid_qa_task_metrics(event: dict[str, object]) -> bool:
     if "deep_model" in event and (
         not deep_used
         or not isinstance(event["deep_model"], str)
-        or not fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}", event["deep_model"])
+        or event["deep_model"] not in DEEP_MODELS
     ):
         return False
     if "deep_reasoning" in event and (
@@ -199,6 +199,14 @@ def valid_qa_task_metrics(event: dict[str, object]) -> bool:
         return False
     if not orchestration_used and any(
         event.get(field, 0) > 0 for field in ORCHESTRATION_COUNTERS
+    ):
+        return False
+    if orchestration_used and (event.get("sol_calls", 0) > 0) != deep_used:
+        return False
+    if orchestration_used and event["outcome"] == "completed" and (
+        event["luna_calls"] < 1
+        or event["terra_calls"] < 2
+        or event["orchestration_steps_completed"] < 3
     ):
         return False
     if event["codegraph_calls"] == 0 and any(

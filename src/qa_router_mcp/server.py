@@ -40,6 +40,7 @@ def build_server(service: RouterService) -> FastMCP:
         status: QaTaskOutcome,
         selected_bundle: ReviewBundle | None = None,
         selected_profile: ReviewAgent | None = None,
+        completed_profile: ReviewAgent | None = None,
         needs_deep_analysis: bool = False,
         reason_code: OrchestrationReason | None = None,
     ) -> QaOrchestrationSession:
@@ -51,6 +52,7 @@ def build_server(service: RouterService) -> FastMCP:
                 status=status,
                 selected_bundle=selected_bundle,
                 selected_profile=selected_profile,
+                completed_profile=completed_profile,
                 needs_deep_analysis=needs_deep_analysis,
                 reason_code=reason_code,
             )
@@ -86,6 +88,7 @@ def build_server(service: RouterService) -> FastMCP:
         sol_calls: int = 0,
         orchestration_steps_completed: int = 0,
         orchestration_retries: int = 0,
+        run_id: str | None = None,
     ) -> QaTaskOutcomeReceipt:
         """Record one content-free outcome owned by the host QA agent."""
         return service.record_qa_task_outcome(
@@ -112,6 +115,7 @@ def build_server(service: RouterService) -> FastMCP:
             sol_calls=sol_calls,
             orchestration_steps_completed=orchestration_steps_completed,
             orchestration_retries=orchestration_retries,
+            run_id=run_id,
         )
 
     @mcp.tool

@@ -50,7 +50,7 @@
 - Add immutable `REVIEW_BUNDLES: Mapping[ReviewBundle, tuple[ReviewAgent, ...]]` and a helper that returns the ordered tuple for a known bundle.
 - Keep the seven existing `ReviewAgent` values and their required sections, constraints, escalation signals, and host-owned read-only flags unchanged.
 
-- [ ] **Step 1: Write failing tests for the display names and bundle order.**
+- [x] **Step 1: Write failing tests for the display names and bundle order.**
 
   Assert the exact names:
 
@@ -72,23 +72,23 @@
 
   Also assert that the returned bundle sequence is a tuple, an unknown bundle is rejected by Pydantic, and every route remains read-only with `host_owns_decisions=True`.
 
-- [ ] **Step 2: Run the focused tests and verify RED.**
+- [x] **Step 2: Run the focused tests and verify RED.**
 
   Run `uv run pytest -q tests/test_review_profiles.py tests/test_orchestration_contracts.py`.
 
   Expected result: failures identify the missing display-name field, bundle enum/catalog, and bundle assertions; unrelated existing tests must not be changed to make the failures disappear.
 
-- [ ] **Step 3: Implement the fixed catalog and route metadata.**
+- [x] **Step 3: Implement the fixed catalog and route metadata.**
 
   Add `ReviewBundle(StrEnum)` to `contracts.py`. Add `display_name` to the profile definitions and route model with a non-empty string constraint. Build `REVIEW_BUNDLES` from immutable tuples behind a read-only mapping and expose a small typed helper for lookup. Populate the exact names above in `REVIEW_PROFILES`, and make `build_review_route()` include the selected profile's display name.
 
-- [ ] **Step 4: Run focused tests and lint.**
+- [x] **Step 4: Run focused tests and lint.**
 
   Run `uv run pytest -q tests/test_review_profiles.py tests/test_orchestration_contracts.py` and `uv run ruff check src/qa_router_mcp/contracts.py src/qa_router_mcp/review_profiles.py tests/test_review_profiles.py tests/test_orchestration_contracts.py`.
 
   Expected result: all focused tests pass and Ruff reports no errors.
 
-- [ ] **Step 5: Commit the catalog change.**
+- [x] **Step 5: Commit the catalog change.**
 
   Commit with `feat: add named qa review bundles` after checking `git diff --check`.
 
@@ -106,7 +106,7 @@
 - Extend `AdvanceQaOrchestrationRequest` with `selected_bundle` while retaining `selected_profile` compatibility.
 - Keep the existing orchestration steps, statuses, model policy, TTL, session limit, terminal outcomes, and typed `OrchestrationError` behavior.
 
-- [ ] **Step 1: Add failing contract tests for the selection invariant.**
+- [x] **Step 1: Add failing contract tests for the selection invariant.**
 
   Cover these exact cases:
 
@@ -117,7 +117,7 @@
   - arbitrary fields such as evidence, prompt, output, or a caller-supplied profile list are rejected by `extra="forbid"`;
   - `needs_deep_analysis=True` requires one fixed `OrchestrationReason`, and a reason without deep analysis is rejected.
 
-- [ ] **Step 2: Implement the bundle-aware Pydantic contracts.**
+- [x] **Step 2: Implement the bundle-aware Pydantic contracts.**
 
   Import `ReviewBundle` and the immutable catalog. Add these session fields with safe defaults:
 
@@ -129,7 +129,7 @@
 
   Populate allowed values from the fixed enum/catalog at session creation. Add an after-validator to the advance request that enforces the single-selection rule and rejects selection fields on all other completed steps. Keep the existing deep-reason validation and all arbitrary-content rejection.
 
-- [ ] **Step 3: Add failing state-machine tests for single-profile compatibility and all bundles.**
+- [x] **Step 3: Add failing state-machine tests for single-profile compatibility and all bundles.**
 
   For the existing single-profile path, assert `selected_bundle is None`, `selected_profile` is the requested profile, and `review_profiles` contains exactly that one profile.
 
@@ -143,17 +143,17 @@
 
   Add a failure test that attempts to change the bundle/profile after Luna and a failure test that attempts to submit an arbitrary/reordered profile sequence.
 
-- [ ] **Step 4: Update the state transition implementation.**
+- [x] **Step 4: Update the state transition implementation.**
 
   On a completed Luna transition, resolve either the one selected profile or the fixed bundle into `review_profiles`. Set `selected_bundle` only for bundle selection and set the compatibility `selected_profile` to the first item. Keep later transitions content-free and preserve the resolved order. Do not add a transition that accepts a list from the host. Ensure all error paths validate before mutating the session map.
 
-- [ ] **Step 5: Run the complete orchestration test slice.**
+- [x] **Step 5: Run the complete orchestration test slice.**
 
   Run `uv run pytest -q tests/test_orchestration_contracts.py tests/test_orchestration.py` and `uv run ruff check src/qa_router_mcp/orchestration.py tests/test_orchestration_contracts.py tests/test_orchestration.py`.
 
   Expected result: normal, Sol, terminal partial/blocked, illegal-transition, expiry, session-limit, bundle-order, and immutability tests all pass.
 
-- [ ] **Step 6: Commit the state-machine change.**
+- [x] **Step 6: Commit the state-machine change.**
 
   Commit with `feat: route qa orchestration through review bundles` after `git diff --check` passes.
 
@@ -174,23 +174,23 @@
 - Include `display_name` in `prepare_review_route` output.
 - Include fixed allowed/selected bundle and ordered profile metadata in orchestration responses without adding evidence, prompts, outputs, or findings.
 
-- [ ] **Step 1: Add failing service and server tests.**
+- [x] **Step 1: Add failing service and server tests.**
 
   Assert that a `start_qa_orchestration` response exposes all fixed bundles and profiles, starts at Luna/max, and contains no content-bearing field. Advance with `ordinary_mr` and assert the exact ordered profiles. Keep a separate test for the single-profile compatibility path and assert the route display name for `code_explorer`.
 
   Through the MCP boundary, reject both bundle and profile together, missing selection after successful Luna, unknown bundle values, selection on a Terra transition, and a caller-defined profile order. Preserve the exact six-tool list.
 
-- [ ] **Step 2: Implement the minimal service/server plumbing.**
+- [x] **Step 2: Implement the minimal service/server plumbing.**
 
   Keep `RouterService` as the owner of the in-memory orchestrator. Add only the new typed bundle argument and response serialization needed by the contracts. Do not move model calls, evidence retrieval, or external-system access into the service or FastMCP layer.
 
-- [ ] **Step 3: Run focused integration tests and lint.**
+- [x] **Step 3: Run focused integration tests and lint.**
 
   Run `uv run pytest -q tests/test_service.py tests/test_server.py tests/test_install_artifacts.py` and `uv run ruff check src/qa_router_mcp/service.py src/qa_router_mcp/server.py tests/test_service.py tests/test_server.py`.
 
   Expected result: the six-tool surface is unchanged, bundle selection works through the public boundary, and content-bearing inputs remain rejected.
 
-- [ ] **Step 4: Commit the MCP contract change.**
+- [x] **Step 4: Commit the MCP contract change.**
 
   Commit with `feat: expose review bundles through qa-router mcp` after `git diff --check` passes.
 
@@ -233,19 +233,19 @@
 - Keep the six-tool MCP list and content-free boundary documentation accurate.
 - Keep all retired local-model and generic-agent references absent from project documentation and client rules.
 
-- [ ] **Step 1: Update the source-bound documents.**
+- [x] **Step 1: Update the source-bound documents.**
 
   Replace statements that imply one profile is always selected with the bundle-or-profile contract. Add the exact catalog and status flow above. Preserve the current QA review responsibilities, safety rules, metrics explanation, and host-owned decision boundary.
 
-- [ ] **Step 2: Add documentation regression assertions.**
+- [x] **Step 2: Add documentation regression assertions.**
 
   Assert that installation artifacts mention the five bundles, Faraday, all three model stages, and the six tools. Assert that documentation does not contain retired local-model terms, model invocation claims, evidence storage claims, or an external Faraday integration claim.
 
-- [ ] **Step 3: Validate documentation and artifacts.**
+- [x] **Step 3: Validate documentation and artifacts.**
 
   Run `uv run pytest -q tests/test_install_artifacts.py`, `uv run ruff check .`, and `git diff --check`. Review every changed document for consistent names, order, model/reasoning labels, and the no-external-agent boundary.
 
-- [ ] **Step 4: Commit the documentation change.**
+- [x] **Step 4: Commit the documentation change.**
 
   Commit with `docs: document qa review bundles` after the artifact tests pass.
 
@@ -255,19 +255,19 @@
 
 - No planned source changes; modify tests or docs only if a verification failure identifies a concrete contract mismatch.
 
-- [ ] **Step 1: Run the full automated verification.**
+- [x] **Step 1: Run the full automated verification.**
 
   Run `uv run pytest -q`, `uv run ruff check .`, `git diff --check`, and `/bin/sh -n scripts/qa-router-mcp`.
 
-- [ ] **Step 2: Verify the public surface and retired references.**
+- [x] **Step 2: Verify the public surface and retired references.**
 
   Confirm the launcher still publishes exactly six tools. Search source, docs, and client rules for retired local-model terms and for accidental evidence/prompt/model-output fields. Confirm no model SDK, endpoint, or external-agent dependency was introduced.
 
-- [ ] **Step 3: Review the final diff against the approved spec.**
+- [x] **Step 3: Review the final diff against the approved spec.**
 
   Check the exact model/reasoning matrix, all seven names, all five bundle orders, the single-profile compatibility path, immutable session copies, fail-closed transitions, and the host status sequence. Check that metrics remain aggregate and content-free.
 
-- [ ] **Step 4: Report the evidence-backed result.**
+- [x] **Step 4: Report the evidence-backed result.**
 
   Report changed files, commit hashes, automated checks and their results, the unchanged six-tool surface, and any item that could not be verified. Do not claim runtime model execution, external-system access, or stage behavior because this repository intentionally does not perform those actions.
 

@@ -3,6 +3,7 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from qa_router_mcp.contracts import ReviewBundle
+from qa_router_mcp.review_profiles import REVIEW_BUNDLES
 from qa_router_mcp.server import build_server
 from qa_router_mcp.service import RouterService
 
@@ -126,6 +127,75 @@ async def test_orchestration_tools_advance_with_bundle_order(tmp_path):
         "code_reviewer",
         "pr_test_analyzer",
     ]
+    assert advanced.structured_content["current_profile"] == "code_explorer"
+    assert advanced.structured_content["completed_profiles"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bundle", list(ReviewBundle))
+async def test_orchestration_tools_complete_each_bundle(tmp_path, bundle: ReviewBundle):
+    service = RouterService.from_settings(data_dir=tmp_path)
+
+    async with Client(build_server(service)) as client:
+        started = await client.call_tool(
+            "start_qa_orchestration",
+            {"task_type": "ordinary_review"},
+        )
+        run_id = started.structured_content["run_id"]
+        current = await client.call_tool(
+            "advance_qa_orchestration",
+            {
+                "run_id": run_id,
+                "completed_step": "luna_triage",
+                "status": "completed",
+                "selected_bundle": bundle.value,
+            },
+        )
+
+        for profile in REVIEW_BUNDLES[bundle]:
+            current = await client.call_tool(
+                "advance_qa_orchestration",
+                {
+                    "run_id": run_id,
+                    "completed_step": current.structured_content["current_step"],
+                    "status": "completed",
+                    "completed_profile": profile.value,
+                },
+            )
+
+        synthesis = await client.call_tool(
+            "advance_qa_orchestration",
+            {
+                "run_id": run_id,
+                "completed_step": current.structured_content["current_step"],
+                "status": "completed",
+            },
+        )
+        outcome = await client.call_tool(
+            "record_qa_task_outcome",
+            {
+                "task_type": "ordinary_review",
+                "outcome": "completed",
+                "codegraph_calls": 0,
+                "source_mcp_calls": 0,
+                "findings_identified": 0,
+                "findings_confirmed": 0,
+                "findings_rejected": 0,
+                "repeated_source_reads": 0,
+                "orchestration_used": True,
+                "luna_calls": 1,
+                "terra_calls": len(REVIEW_BUNDLES[bundle]) + 1,
+                "sol_calls": 0,
+                "orchestration_steps_completed": len(REVIEW_BUNDLES[bundle]) + 2,
+                "orchestration_retries": 0,
+                "run_id": run_id,
+            },
+        )
+        final = await client.call_tool("get_qa_orchestration", {"run_id": run_id})
+
+    assert synthesis.structured_content["status"] == "awaiting_host_outcome"
+    assert outcome.structured_content == {"status": "recorded"}
+    assert final.structured_content["status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -221,6 +291,37 @@ async def test_server_records_orchestration_metrics(tmp_path):
     service = RouterService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
+        started = await client.call_tool(
+            "start_qa_orchestration",
+            {"task_type": "ordinary_review"},
+        )
+        run_id = started.structured_content["run_id"]
+        primary = await client.call_tool(
+            "advance_qa_orchestration",
+            {
+                "run_id": run_id,
+                "completed_step": "luna_triage",
+                "status": "completed",
+                "selected_profile": "code_reviewer",
+            },
+        )
+        synthesis = await client.call_tool(
+            "advance_qa_orchestration",
+            {
+                "run_id": run_id,
+                "completed_step": primary.structured_content["current_step"],
+                "status": "completed",
+                "completed_profile": "code_reviewer",
+            },
+        )
+        await client.call_tool(
+            "advance_qa_orchestration",
+            {
+                "run_id": run_id,
+                "completed_step": synthesis.structured_content["current_step"],
+                "status": "completed",
+            },
+        )
         await client.call_tool(
             "record_qa_task_outcome",
             {
@@ -238,9 +339,11 @@ async def test_server_records_orchestration_metrics(tmp_path):
                 "sol_calls": 0,
                 "orchestration_steps_completed": 3,
                 "orchestration_retries": 0,
+                "run_id": run_id,
             },
         )
         report = await client.call_tool("get_metrics_report", {"days": 7})
+        current = await client.call_tool("get_qa_orchestration", {"run_id": run_id})
 
     assert report.structured_content["qa_tasks"]["orchestration"] == {
         "tasks": 1,
@@ -250,6 +353,7 @@ async def test_server_records_orchestration_metrics(tmp_path):
         "steps_completed": 3,
         "retries": 0,
     }
+    assert current.structured_content["status"] == "completed"
 
 
 @pytest.mark.asyncio

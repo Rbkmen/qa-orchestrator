@@ -37,6 +37,6 @@ Primary Codex остаётся host и владельцем evidence, решен
 
 Model policy host-owned: `gpt-5.6-luna/max` делает triage, `gpt-5.6-terra/medium` — primary review и synthesis, а optional `gpt-5.6-sol/high` — read-only deep analysis. Передавай Router только структурированные сигналы; prompts, evidence и model outputs остаются в Codex.
 
-На Luna выбирай fixed bundle или один compatibility profile. Для обычного MR bundle `ordinary_mr` порядок такой: `code_explorer` (`Faraday — Evidence Investigator`) → `code_reviewer` (`Code Reviewer`) → `pr_test_analyzer` (`Test Analyzer`). Faraday — внутреннее имя профиля, не отдельный внешний сервис или model. Статусы показывай как `Luna / Max` → `Terra / Medium` по ролям → `Terra / Medium` synthesis → `Host` final outcome.
+На Luna выбирай fixed bundle или один compatibility profile. Для обычного MR bundle `ordinary_mr` порядок такой: `code_explorer` (`Faraday — Evidence Investigator`) → `code_reviewer` (`Code Reviewer`) → `pr_test_analyzer` (`Test Analyzer`). После каждой Terra-роли передавай её идентификатор в `completed_profile`; synthesis или Sol доступны только после последней роли. Faraday — внутреннее имя профиля, не отдельный внешний сервис или model. Статусы показывай как `Luna / Max` → `Terra / Medium` по ролям → `Terra / Medium` synthesis → `Host` final outcome; передавай исходный `run_id` в финальный `record_qa_task_outcome`.
 
 Reference: [official Codex MCP documentation](https://developers.openai.com/codex/mcp).

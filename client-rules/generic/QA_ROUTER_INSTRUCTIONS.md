@@ -9,7 +9,7 @@
 - Доступные bundles: `ordinary_mr` (`code_explorer` → `code_reviewer` → `pr_test_analyzer`), `widget` (`code_explorer` → `react_reviewer` → `typescript_reviewer` → `pr_test_analyzer`), `security` (`code_explorer` → `security_reviewer` → `silent_failure_hunter`), `autotest` (`code_reviewer` → `pr_test_analyzer` → `typescript_reviewer`) и `requirements` (`code_explorer` → `code_reviewer`). Не меняй порядок и не передавай собственный список.
 - Отображаемые имена ролей: `Faraday — Evidence Investigator` = `code_explorer`, `Code Reviewer`, `Test Analyzer`, `Security Reviewer`, `Silent Failure Hunter`, `TypeScript Reviewer`, `React Reviewer`. Faraday — внутреннее имя роли, не внешний сервис или отдельная model.
 - Используй возвращённые `focus`, `required_sections`, `constraints` и `escalation_signals` как рабочий checklist.
-- Выполняй stages по policy: `gpt-5.6-luna/max` для triage, `gpt-5.6-terra/medium` для primary review каждой роли в порядке bundle и synthesis, optional `gpt-5.6-sol/high` для read-only deep analysis. Показывай host status: `Luna / Max → Ordinary MR Review` → `Terra / Medium → Faraday — Evidence Investigator` → `Terra / Medium → Code Reviewer` → `Terra / Medium → Test Analyzer` → `Terra / Medium → Synthesis` → `Host → Final QA outcome`; при escalation добавляй `Sol / High → Deep read-only review`. После каждой стадии вызывай `advance_qa_orchestration` с structured signal, а `get_qa_orchestration` используй для next action.
+- Выполняй stages по policy: `gpt-5.6-luna/max` для triage, `gpt-5.6-terra/medium` для primary review каждой роли в порядке bundle и synthesis, optional `gpt-5.6-sol/high` для read-only deep analysis. Показывай host status: `Luna / Max → Ordinary MR Review` → `Terra / Medium` по каждой роли → `Terra / Medium → Synthesis` → `Host → Final QA outcome`; при escalation добавляй `Sol / High → Deep read-only review` только после последней роли. После каждой стадии вызывай `advance_qa_orchestration` с structured signal, для каждого Terra profile передавай `completed_profile`, а `get_qa_orchestration` используй для next action.
 - Сам получи Jira/MR/TestRail/monitoring/code evidence, проверь diff и отдели confirmed findings от hypotheses и unverified runtime/release facts.
 - Всегда сохраняй итоговый формат: Findings, Changes, Manual Test Plan, Open Questions / Could Not Verify.
 - Route и orchestration states помечены `read_only=true` и `host_owns_decisions=true`; не трактуй Router как автономного агента и не делегируй ему external writes.
@@ -20,8 +20,8 @@
 
 ## Metrics
 
-- После каждого `completed`, `partial` или `blocked` QA task один раз вызови `record_qa_task_outcome`.
-- Передавай только `task_type`, `outcome`, counters вызовов, findings, repeated reads и измеримые `deep_*`/token counters.
+- После каждого `completed`, `partial` или `blocked` QA task один раз вызови `record_qa_task_outcome`; для orchestration передай `run_id` из сессии, для обычной задачи оставь его пустым.
+- Передавай только `task_type`, `outcome`, counters вызовов, findings, repeated reads и измеримые `deep_*`/token counters. Для orchestrated Sol обязательно указывай `deep_model=gpt-5.6-sol` и `deep_reasoning=high`.
 - Никогда не передавай issue keys, titles, paths, source text, code, logs, screenshots, prompts или ответы ревью.
 - `get_metrics_report(days)` используй только для агрегированного read-only отчёта.
 

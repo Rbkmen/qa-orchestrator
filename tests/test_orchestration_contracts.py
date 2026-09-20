@@ -18,10 +18,13 @@ def test_model_policy_assigns_requested_models_and_reasoning():
     assert MODEL_POLICIES[OrchestrationStep.TERRA_PRIMARY_REVIEW].reasoning == "medium"
     assert MODEL_POLICIES[OrchestrationStep.SOL_DEEP_REVIEW].model == OrchestrationModel.SOL
     assert MODEL_POLICIES[OrchestrationStep.SOL_DEEP_REVIEW].reasoning == "high"
+    assert MODEL_POLICIES[OrchestrationStep.TERRA_SYNTHESIS].model == OrchestrationModel.TERRA
+    assert MODEL_POLICIES[OrchestrationStep.TERRA_SYNTHESIS].reasoning == "medium"
     assert set(MODEL_POLICIES) == {
         OrchestrationStep.LUNA_TRIAGE,
         OrchestrationStep.TERRA_PRIMARY_REVIEW,
         OrchestrationStep.SOL_DEEP_REVIEW,
+        OrchestrationStep.TERRA_SYNTHESIS,
     }
 
 
@@ -42,6 +45,7 @@ def test_deep_reason_requires_fixed_reason_code():
             run_id="qar-0123456789abcdef0123456789abcdef",
             completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
             status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
             needs_deep_analysis=True,
         )
 
@@ -49,10 +53,31 @@ def test_deep_reason_requires_fixed_reason_code():
         run_id="qar-0123456789abcdef0123456789abcdef",
         completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
         status="completed",
+        completed_profile=ReviewAgent.CODE_REVIEWER,
         needs_deep_analysis=True,
         reason_code=OrchestrationReason.SECURITY_SENSITIVE,
     )
     assert request.reason_code is OrchestrationReason.SECURITY_SENSITIVE
+
+
+def test_completed_terra_requires_completed_profile():
+    with pytest.raises(ValidationError, match="completed_profile"):
+        AdvanceQaOrchestrationRequest(
+            run_id="qar-0123456789abcdef0123456789abcdef",
+            completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
+            status="completed",
+        )
+
+
+def test_completed_profile_is_rejected_outside_terra():
+    with pytest.raises(ValidationError, match="only be supplied"):
+        AdvanceQaOrchestrationRequest(
+            run_id="qar-0123456789abcdef0123456789abcdef",
+            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            status="completed",
+            selected_profile=ReviewAgent.CODE_REVIEWER,
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+        )
 
 
 def test_non_deep_request_rejects_reason_code():
@@ -61,6 +86,7 @@ def test_non_deep_request_rejects_reason_code():
             run_id="qar-0123456789abcdef0123456789abcdef",
             completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
             status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
             reason_code=OrchestrationReason.ROOT_CAUSE,
         )
 
@@ -100,6 +126,7 @@ def test_selection_is_rejected_after_luna():
             run_id="qar-0123456789abcdef0123456789abcdef",
             completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
             status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
             selected_bundle=ReviewBundle.ORDINARY_MR,
         )
 

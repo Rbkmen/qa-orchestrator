@@ -1,4 +1,5 @@
 from pathlib import Path
+from threading import RLock
 
 from qa_router_mcp.config import Settings
 from qa_router_mcp.contracts import (
@@ -11,6 +12,8 @@ from qa_router_mcp.contracts import (
 from qa_router_mcp.events import EventSink, JsonEventSink, valid_qa_task_metrics
 from qa_router_mcp.orchestration import (
     AdvanceQaOrchestrationRequest,
+    OrchestrationModel,
+    OrchestrationStatus,
     QaOrchestrationSession,
     QaOrchestrator,
 )
@@ -34,6 +37,7 @@ class RouterService:
             ttl_seconds=settings.orchestration_session_ttl_seconds,
             max_sessions=settings.orchestration_max_sessions,
         )
+        self._outcome_lock = RLock()
 
     def prepare_review_route(self, agent_profile: ReviewAgent | str) -> ReviewRoute:
         try:
@@ -80,6 +84,7 @@ class RouterService:
         sol_calls: int = 0,
         orchestration_steps_completed: int = 0,
         orchestration_retries: int = 0,
+        run_id: str | None = None,
     ) -> QaTaskOutcomeReceipt:
         event: dict[str, object] = {
             "task_type": task_type,
@@ -116,4 +121,55 @@ class RouterService:
                 event[field] = value
         if not valid_qa_task_metrics(event):
             raise ValueError("QA task metrics are inconsistent")
-        return self.events.record_qa_task_outcome(event)
+        if orchestration_used and run_id is None:
+            raise ValueError("run_id is required when orchestration_used is true")
+        if run_id is not None and not orchestration_used:
+            raise ValueError("run_id requires orchestration_used")
+
+        with self._outcome_lock:
+            if run_id is not None:
+                session = self.orchestrator.get(run_id)
+                if not self._valid_orchestration_metrics(event, session, outcome):
+                    raise ValueError("QA task metrics are inconsistent")
+                if session.status in {
+                    OrchestrationStatus.COMPLETED,
+                    OrchestrationStatus.PARTIAL,
+                    OrchestrationStatus.BLOCKED,
+                }:
+                    if session.status.value != outcome:
+                        raise ValueError("conflicting final outcome")
+                    if session.outcome_recorded:
+                        return QaTaskOutcomeReceipt(status="recorded")
+                self.orchestrator.finish(run_id=run_id, outcome=outcome)
+
+            receipt = self.events.record_qa_task_outcome(event)
+            if receipt.status == "recorded" and run_id is not None:
+                self.orchestrator.mark_outcome_recorded(run_id=run_id, outcome=outcome)
+            return receipt
+
+    @staticmethod
+    def _valid_orchestration_metrics(
+        event: dict[str, object],
+        session: QaOrchestrationSession,
+        outcome: QaTaskOutcome,
+    ) -> bool:
+        deep_branch_used = session.deep_reason_code is not None
+        if (event["sol_calls"] > 0) != deep_branch_used:
+            return False
+        if deep_branch_used and (
+            event.get("deep_model") != OrchestrationModel.SOL.value
+            or event.get("deep_reasoning") != "high"
+        ):
+            return False
+        if outcome != "completed":
+            return True
+
+        required_terra_calls = len(session.review_profiles) + 1
+        required_steps = len(session.review_profiles) + 2 + int(deep_branch_used)
+        return (
+            event["deep_analysis_used"] is deep_branch_used
+            and event["luna_calls"] >= 1
+            and event["terra_calls"] >= required_terra_calls
+            and event["sol_calls"] >= int(deep_branch_used)
+            and event["orchestration_steps_completed"] >= required_steps
+        )

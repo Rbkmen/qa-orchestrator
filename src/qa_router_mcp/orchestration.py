@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from threading import RLock
 from types import MappingProxyType
 from typing import Literal
 from uuid import uuid4
@@ -64,6 +65,10 @@ MODEL_POLICIES = MappingProxyType(
             model=OrchestrationModel.SOL,
             reasoning="high",
         ),
+        OrchestrationStep.TERRA_SYNTHESIS: ModelPolicy(
+            model=OrchestrationModel.TERRA,
+            reasoning="medium",
+        ),
     }
 )
 
@@ -80,10 +85,14 @@ class QaOrchestrationSession(BaseModel):
     selected_bundle: ReviewBundle | None = None
     selected_profile: ReviewAgent | None = None
     review_profiles: list[ReviewAgent] = Field(default_factory=list)
+    current_profile: ReviewAgent | None = None
+    completed_profiles: list[ReviewAgent] = Field(default_factory=list)
+    deep_reason_code: OrchestrationReason | None = None
     model_policy: ModelPolicy | None = None
     next_action: str = Field(min_length=1)
     read_only: bool = True
     host_owns_decisions: bool = True
+    outcome_recorded: bool = False
     expires_at: datetime
 
 
@@ -95,6 +104,7 @@ class AdvanceQaOrchestrationRequest(BaseModel):
     status: QaTaskOutcome
     selected_bundle: ReviewBundle | None = None
     selected_profile: ReviewAgent | None = None
+    completed_profile: ReviewAgent | None = None
     needs_deep_analysis: bool = False
     reason_code: OrchestrationReason | None = None
 
@@ -108,6 +118,12 @@ class AdvanceQaOrchestrationRequest(BaseModel):
                 raise ValueError("exactly one selection is required after Luna triage")
         elif self.selected_bundle is not None or self.selected_profile is not None:
             raise ValueError("selection may only be supplied after Luna")
+
+        if self.completed_step is OrchestrationStep.TERRA_PRIMARY_REVIEW:
+            if self.status == "completed" and self.completed_profile is None:
+                raise ValueError("completed_profile is required after Terra primary review")
+        elif self.completed_profile is not None:
+            raise ValueError("completed_profile may only be supplied after Terra primary review")
 
         if self.needs_deep_analysis:
             if self.completed_step is not OrchestrationStep.TERRA_PRIMARY_REVIEW:
@@ -137,8 +153,19 @@ _NEXT_ACTIONS = MappingProxyType(
 )
 _TERMINAL_ACTIONS = MappingProxyType(
     {
+        OrchestrationStatus.COMPLETED: "Host recorded the final QA outcome.",
         OrchestrationStatus.PARTIAL: "Host records the partial QA outcome.",
         OrchestrationStatus.BLOCKED: "Host records the blocked QA outcome.",
+    }
+)
+_ACTIVE_SESSION_STATUSES = frozenset(
+    {OrchestrationStatus.ACTIVE, OrchestrationStatus.AWAITING_HOST_OUTCOME}
+)
+_TERMINAL_SESSION_STATUSES = frozenset(
+    {
+        OrchestrationStatus.COMPLETED,
+        OrchestrationStatus.PARTIAL,
+        OrchestrationStatus.BLOCKED,
     }
 )
 _TASK_TYPE_ADAPTER = TypeAdapter(QaTaskType)
@@ -160,6 +187,7 @@ class QaOrchestrator:
         self._max_sessions = max_sessions
         self._clock = clock
         self._sessions: dict[str, QaOrchestrationSession] = {}
+        self._lock = RLock()
 
     def start(self, task_type: QaTaskType) -> QaOrchestrationSession:
         try:
@@ -167,24 +195,26 @@ class QaOrchestrator:
         except ValidationError as exc:
             raise OrchestrationError("invalid task type") from exc
 
-        now = self._clock()
-        self._purge_expired(now)
-        if len(self._sessions) >= self._max_sessions:
-            raise OrchestrationError("session limit")
+        with self._lock:
+            now = self._clock()
+            self._purge_expired(now)
+            if self._active_session_count() >= self._max_sessions:
+                raise OrchestrationError("session limit")
+            self._evict_terminal_sessions_until_capacity()
 
-        session = QaOrchestrationSession(
-            run_id=f"qar-{uuid4().hex}",
-            task_type=validated_task_type,
-            status=OrchestrationStatus.ACTIVE,
-            current_step=OrchestrationStep.LUNA_TRIAGE,
-            allowed_profiles=list(ReviewAgent),
-            allowed_bundles=list(REVIEW_BUNDLES),
-            model_policy=MODEL_POLICIES[OrchestrationStep.LUNA_TRIAGE],
-            next_action=_NEXT_ACTIONS[OrchestrationStep.LUNA_TRIAGE],
-            expires_at=now + timedelta(seconds=self._ttl_seconds),
-        )
-        self._sessions[session.run_id] = session
-        return self._copy(session)
+            session = QaOrchestrationSession(
+                run_id=f"qar-{uuid4().hex}",
+                task_type=validated_task_type,
+                status=OrchestrationStatus.ACTIVE,
+                current_step=OrchestrationStep.LUNA_TRIAGE,
+                allowed_profiles=list(ReviewAgent),
+                allowed_bundles=list(REVIEW_BUNDLES),
+                model_policy=MODEL_POLICIES[OrchestrationStep.LUNA_TRIAGE],
+                next_action=_NEXT_ACTIONS[OrchestrationStep.LUNA_TRIAGE],
+                expires_at=now + timedelta(seconds=self._ttl_seconds),
+            )
+            self._sessions[session.run_id] = session
+            return self._copy(session)
 
     def advance(
         self,
@@ -194,6 +224,7 @@ class QaOrchestrator:
         status: QaTaskOutcome,
         selected_bundle: ReviewBundle | None = None,
         selected_profile: ReviewAgent | None = None,
+        completed_profile: ReviewAgent | None = None,
         needs_deep_analysis: bool = False,
         reason_code: OrchestrationReason | None = None,
     ) -> QaOrchestrationSession:
@@ -204,46 +235,103 @@ class QaOrchestrator:
                 status=status,
                 selected_bundle=selected_bundle,
                 selected_profile=selected_profile,
+                completed_profile=completed_profile,
                 needs_deep_analysis=needs_deep_analysis,
                 reason_code=reason_code,
             )
         except ValidationError as exc:
             raise OrchestrationError("invalid transition signal") from exc
 
-        now = self._clock()
-        self._purge_expired(now, keep_run_id=request.run_id)
-        session = self._require_session(request.run_id, now)
-        if session.status is not OrchestrationStatus.ACTIVE:
-            raise OrchestrationError("terminal session")
-        if request.completed_step is not session.current_step:
-            raise OrchestrationError("illegal transition")
+        with self._lock:
+            now = self._clock()
+            self._purge_expired(now, keep_run_id=request.run_id)
+            session = self._require_session(request.run_id, now)
+            if session.status is not OrchestrationStatus.ACTIVE:
+                raise OrchestrationError("terminal session")
+            if request.completed_step is not session.current_step:
+                raise OrchestrationError("illegal transition")
 
-        if request.status in ("partial", "blocked"):
-            updated = session.model_copy(
-                update={
-                    "status": OrchestrationStatus(request.status),
-                    "model_policy": None,
-                    "next_action": _TERMINAL_ACTIONS[OrchestrationStatus(request.status)],
-                }
-            )
+            if request.status in ("partial", "blocked"):
+                updated = session.model_copy(
+                    update={
+                        "status": OrchestrationStatus(request.status),
+                        "model_policy": None,
+                        "next_action": _TERMINAL_ACTIONS[OrchestrationStatus(request.status)],
+                    }
+                )
+                self._sessions[request.run_id] = updated
+                return self._copy(updated)
+
+            if (
+                request.selected_profile is not None
+                and session.selected_profile is not None
+                and request.selected_profile != session.selected_profile
+            ):
+                raise OrchestrationError("changed profile after triage")
+
+            updated = self._completed_transition(session, request)
             self._sessions[request.run_id] = updated
             return self._copy(updated)
 
-        if (
-            request.selected_profile is not None
-            and session.selected_profile is not None
-            and request.selected_profile != session.selected_profile
-        ):
-            raise OrchestrationError("changed profile after triage")
-
-        updated = self._completed_transition(session, request)
-        self._sessions[request.run_id] = updated
-        return self._copy(updated)
-
     def get(self, run_id: str) -> QaOrchestrationSession:
-        now = self._clock()
-        self._purge_expired(now, keep_run_id=run_id)
-        return self._copy(self._require_session(run_id, now))
+        with self._lock:
+            now = self._clock()
+            self._purge_expired(now, keep_run_id=run_id)
+            return self._copy(self._require_session(run_id, now))
+
+    def finish(self, *, run_id: str, outcome: QaTaskOutcome) -> QaOrchestrationSession:
+        """Record the host-owned final outcome for a completed orchestration flow."""
+        try:
+            final_status = OrchestrationStatus(outcome)
+        except ValueError as exc:
+            raise OrchestrationError("invalid final outcome") from exc
+
+        if final_status not in {
+            OrchestrationStatus.COMPLETED,
+            OrchestrationStatus.PARTIAL,
+            OrchestrationStatus.BLOCKED,
+        }:
+            raise OrchestrationError("invalid final outcome")
+
+        with self._lock:
+            now = self._clock()
+            self._purge_expired(now, keep_run_id=run_id)
+            session = self._require_session(run_id, now)
+
+            if session.status in _TERMINAL_SESSION_STATUSES:
+                if session.status is not final_status:
+                    raise OrchestrationError("conflicting final outcome")
+                return self._copy(session)
+
+            if session.status is not OrchestrationStatus.AWAITING_HOST_OUTCOME:
+                raise OrchestrationError("outcome is not ready")
+
+            updated = session.model_copy(
+                update={
+                    "status": final_status,
+                    "model_policy": None,
+                    "next_action": _TERMINAL_ACTIONS[final_status],
+                }
+            )
+            self._sessions[run_id] = updated
+            return self._copy(updated)
+
+    def mark_outcome_recorded(
+        self,
+        *,
+        run_id: str,
+        outcome: QaTaskOutcome,
+    ) -> QaOrchestrationSession:
+        with self._lock:
+            now = self._clock()
+            self._purge_expired(now, keep_run_id=run_id)
+            session = self._require_session(run_id, now)
+            if session.status is not OrchestrationStatus(outcome):
+                raise OrchestrationError("conflicting final outcome")
+            if not session.outcome_recorded:
+                session = session.model_copy(update={"outcome_recorded": True})
+                self._sessions[run_id] = session
+            return self._copy(session)
 
     def _completed_transition(
         self,
@@ -265,16 +353,48 @@ class QaOrchestrator:
                     "selected_bundle": request.selected_bundle,
                     "selected_profile": selected_profile,
                     "review_profiles": list(selected_profiles),
+                    "current_profile": selected_profile,
+                    "completed_profiles": [],
+                    "deep_reason_code": None,
                     "model_policy": MODEL_POLICIES[OrchestrationStep.TERRA_PRIMARY_REVIEW],
                     "next_action": _NEXT_ACTIONS[OrchestrationStep.TERRA_PRIMARY_REVIEW],
                 }
             )
 
         if session.current_step is OrchestrationStep.TERRA_PRIMARY_REVIEW:
+            if session.current_profile is None or not session.review_profiles:
+                raise OrchestrationError("missing current profile")
+            next_profile_index = len(session.completed_profiles)
+            if next_profile_index >= len(session.review_profiles):
+                raise OrchestrationError("all review profiles are already completed")
+            expected_profile = session.review_profiles[next_profile_index]
+            if session.current_profile is not expected_profile:
+                raise OrchestrationError("current profile state is inconsistent")
+            if request.completed_profile is not expected_profile:
+                raise OrchestrationError("completed profile does not match current profile")
+            is_last_profile = next_profile_index == len(session.review_profiles) - 1
+            if request.needs_deep_analysis and not is_last_profile:
+                raise OrchestrationError("deep analysis requires the final review profile")
+
+            completed_profiles = [*session.completed_profiles, expected_profile]
+            if not is_last_profile:
+                next_profile = session.review_profiles[next_profile_index + 1]
+                return session.model_copy(
+                    update={
+                        "current_profile": next_profile,
+                        "completed_profiles": completed_profiles,
+                        "model_policy": MODEL_POLICIES[OrchestrationStep.TERRA_PRIMARY_REVIEW],
+                        "next_action": _NEXT_ACTIONS[OrchestrationStep.TERRA_PRIMARY_REVIEW],
+                    }
+                )
+
             if request.needs_deep_analysis:
                 return session.model_copy(
                     update={
                         "current_step": OrchestrationStep.SOL_DEEP_REVIEW,
+                        "current_profile": None,
+                        "completed_profiles": completed_profiles,
+                        "deep_reason_code": request.reason_code,
                         "model_policy": MODEL_POLICIES[OrchestrationStep.SOL_DEEP_REVIEW],
                         "next_action": _NEXT_ACTIONS[OrchestrationStep.SOL_DEEP_REVIEW],
                     }
@@ -282,7 +402,9 @@ class QaOrchestrator:
             return session.model_copy(
                 update={
                     "current_step": OrchestrationStep.TERRA_SYNTHESIS,
-                    "model_policy": MODEL_POLICIES[OrchestrationStep.TERRA_PRIMARY_REVIEW],
+                    "current_profile": None,
+                    "completed_profiles": completed_profiles,
+                    "model_policy": MODEL_POLICIES[OrchestrationStep.TERRA_SYNTHESIS],
                     "next_action": _NEXT_ACTIONS[OrchestrationStep.TERRA_SYNTHESIS],
                 }
             )
@@ -291,7 +413,7 @@ class QaOrchestrator:
             return session.model_copy(
                 update={
                     "current_step": OrchestrationStep.TERRA_SYNTHESIS,
-                    "model_policy": MODEL_POLICIES[OrchestrationStep.TERRA_PRIMARY_REVIEW],
+                    "model_policy": MODEL_POLICIES[OrchestrationStep.TERRA_SYNTHESIS],
                     "next_action": _NEXT_ACTIONS[OrchestrationStep.TERRA_SYNTHESIS],
                 }
             )
@@ -320,6 +442,28 @@ class QaOrchestrator:
         for run_id, session in tuple(self._sessions.items()):
             if run_id != keep_run_id and session.expires_at <= now:
                 del self._sessions[run_id]
+
+    def _active_session_count(self) -> int:
+        return sum(
+            session.status in _ACTIVE_SESSION_STATUSES
+            for session in self._sessions.values()
+        )
+
+    def _evict_terminal_sessions_until_capacity(self) -> None:
+        required_evictions = len(self._sessions) - self._max_sessions + 1
+        if required_evictions <= 0:
+            return
+        terminal_run_ids = sorted(
+            (
+                (session.expires_at, run_id)
+                for run_id, session in self._sessions.items()
+                if session.status in _TERMINAL_SESSION_STATUSES
+            ),
+        )
+        if len(terminal_run_ids) < required_evictions:
+            raise OrchestrationError("session limit")
+        for _, run_id in terminal_run_ids[:required_evictions]:
+            del self._sessions[run_id]
 
     @staticmethod
     def _copy(session: QaOrchestrationSession) -> QaOrchestrationSession:
