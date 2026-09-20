@@ -40,8 +40,8 @@ class ReviewRoute(BaseModel):
     required_sections: list[str] = Field(min_length=1)
     constraints: list[str] = Field(min_length=1)
     escalation_signals: list[str] = Field(default_factory=list)
-    read_only: bool = True
-    host_owns_decisions: bool = True
+    read_only: Literal[True] = True
+    host_owns_decisions: Literal[True] = True
 
 
 class QaTaskOutcomeReceipt(BaseModel):

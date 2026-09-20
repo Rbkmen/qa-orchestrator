@@ -77,7 +77,7 @@ Luna/max → Terra/profile[1] → ... → Terra/profile[N]
 
 Сессии хранятся только в памяти процесса. По умолчанию TTL — 1800 секунд, максимум — 100 активных сессий; общий cache также bounded, а старые terminal-сессии могут быть вытеснены при нехватке места. Повтор финального вызова идемпотентен, пока его сессия сохранена. После перезапуска host начинает новую сессию. `read_only=true` и `host_owns_decisions=true` являются частью каждого состояния.
 
-После synthesis сессия ждёт финальный host outcome. Вызов `record_qa_task_outcome` с `orchestration_used=true` обязан содержать `run_id` текущей сессии; Router связывает counters с фактической веткой и переводит её в `completed`, `partial` или `blocked`. Для остановленной на стадии сессии сначала передай в `advance_qa_orchestration` статус `partial` или `blocked`. Повтор того же вызова для того же `run_id` и outcome идемпотентен; для обычной задачи без orchestration `run_id` не передаётся.
+После synthesis сессия ждёт финальный host outcome. Вызов `record_qa_task_outcome` с `orchestration_used=true` обязан содержать `run_id` текущей сессии; Router связывает counters с фактической веткой и переводит её в `completed`, `partial` или `blocked`. Для остановленной на стадии сессии сначала передай в `advance_qa_orchestration` статус `partial` или `blocked`. Повтор абсолютно того же вызова для того же `run_id` идемпотентен; изменённый payload отклоняется как конфликт. Для обычной задачи без orchestration `run_id` не передаётся.
 
 ### Профили ревью
 
@@ -101,7 +101,8 @@ QA Router отвечает только за fixed routing, state transitions, r
 
 - Python 3.12+;
 - [`uv`](https://docs.astral.sh/uv/);
-- MCP-клиент, поддерживающий STDIO.
+- MCP-клиент, поддерживающий STDIO;
+- POSIX-система: macOS или Linux.
 
 ## Установка
 
@@ -113,7 +114,7 @@ uv run pytest -q
 uv run ruff check .
 ```
 
-Подключи `scripts/qa-router-mcp` как STDIO MCP-сервер. Launcher передаёт каталог метрик и параметры retention/orchestration, не требует отдельного фонового процесса.
+Подключи `scripts/qa-router-mcp` как STDIO MCP-сервер. Launcher сначала использует `.venv` проекта, затем активный `VIRTUAL_ENV` или установленный `qa-router-mcp` из `PATH`; отдельный фоновый процесс не требуется.
 
 Пример для Codex:
 

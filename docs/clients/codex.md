@@ -1,6 +1,6 @@
 # Codex setup
 
-Codex подключает QA Router как локальный STDIO MCP-сервер. Команда выполняется из `.venv` проекта через launcher.
+Codex подключает QA Router как локальный STDIO MCP-сервер. Launcher использует `.venv` проекта, активный `VIRTUAL_ENV` или установленный `qa-router-mcp` из `PATH`.
 
 ## Подключение
 

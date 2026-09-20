@@ -1,10 +1,12 @@
 import json
+import os
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from fcntl import LOCK_EX, LOCK_SH, LOCK_UN, flock
 from pathlib import Path
+from tempfile import mkstemp
 from typing import IO, Protocol
 
 from qa_router_mcp.contracts import QaTaskOutcomeReceipt
@@ -103,53 +105,77 @@ class JsonEventSink:
         return QaTaskOutcomeReceipt(status="recorded" if self._write(payload) else "unavailable")
 
     @contextmanager
-    def _locked_events(self) -> Iterator[tuple[IO[str], list[dict[str, object]]]]:
+    def _locked_events(self) -> Iterator[list[dict[str, object]]]:
         if self.path is None:
             raise OSError("metrics path is unavailable")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.parent.chmod(0o700)
-        with self.path.open("a+", encoding="utf-8") as metrics:
-            flock(metrics.fileno(), LOCK_EX)
+        with _locked_path(self.path, LOCK_EX):
             try:
-                metrics.seek(0)
-                events = _parse_events(metrics)
-                yield metrics, events
-                self.path.chmod(0o600)
-            finally:
-                flock(metrics.fileno(), LOCK_UN)
+                with self.path.open(encoding="utf-8") as metrics:
+                    events = _parse_events(metrics)
+            except FileNotFoundError:
+                events = []
+            yield events
 
     def _write(self, event: dict[str, object]) -> bool:
         line = _serialize(event)
         print(line, file=sys.stderr, flush=True)
         try:
-            with self._locked_events() as (metrics, events):
+            with self._locked_events() as events:
                 cutoff = datetime.now(UTC) - timedelta(days=self.retention_days)
                 retained = [
                     item
                     for item in [*events, event]
                     if (timestamp := _event_timestamp(item)) is not None and timestamp >= cutoff
                 ]
-                metrics.seek(0)
-                metrics.truncate()
-                metrics.write(
-                    "".join(_serialize(item) + "\n" for item in retained[-self.max_events :])
-                )
-                metrics.flush()
+                _atomic_write_events(self.path, retained[-self.max_events :])
             return True
         except OSError:
             return False
 
 
 def read_metrics_lines(path: Path) -> list[str]:
+    if not path.exists():
+        return []
     try:
-        with path.open(encoding="utf-8") as metrics:
-            flock(metrics.fileno(), LOCK_SH)
-            try:
-                return metrics.read().splitlines()
-            finally:
-                flock(metrics.fileno(), LOCK_UN)
+        with _locked_path(path, LOCK_SH), path.open(encoding="utf-8") as metrics:
+            return metrics.read().splitlines()
     except FileNotFoundError:
         return []
+
+
+@contextmanager
+def _locked_path(path: Path, operation: int) -> Iterator[None]:
+    lock_path = path.with_name(f".{path.name}.lock")
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        lock_path.chmod(0o600)
+        flock(lock.fileno(), operation)
+        try:
+            yield
+        finally:
+            flock(lock.fileno(), LOCK_UN)
+
+
+def _atomic_write_events(path: Path, events: list[dict[str, object]]) -> None:
+    file_descriptor, temporary_name = mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as temporary:
+            os.fchmod(temporary.fileno(), 0o600)
+            temporary.write("".join(_serialize(item) + "\n" for item in events))
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_name, path)
+        directory_descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
 
 
 def valid_qa_task_metrics(event: dict[str, object]) -> bool:

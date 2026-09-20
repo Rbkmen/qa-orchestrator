@@ -4,6 +4,20 @@ set -eu
 router_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 router_home=${HOME:?HOME must be set}
 router_data_dir=${QA_ROUTER_DATA_DIR:-"$router_home/.qa-router"}
+router_command=
+
+if [ -x "$router_root/.venv/bin/qa-router-mcp" ]; then
+  router_command="$router_root/.venv/bin/qa-router-mcp"
+elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/qa-router-mcp" ]; then
+  router_command="$VIRTUAL_ENV/bin/qa-router-mcp"
+else
+  router_command=$(command -v qa-router-mcp || true)
+fi
+
+if [ -z "$router_command" ]; then
+  echo "QA Router is not installed. Run 'uv sync' or activate a virtualenv containing qa-router-mcp." >&2
+  exit 127
+fi
 
 exec /usr/bin/env -i \
   HOME="$router_home" \
@@ -13,4 +27,4 @@ exec /usr/bin/env -i \
   QA_ROUTER_ORCHESTRATION_TTL_SECONDS="${QA_ROUTER_ORCHESTRATION_TTL_SECONDS:-1800}" \
   QA_ROUTER_ORCHESTRATION_MAX_SESSIONS="${QA_ROUTER_ORCHESTRATION_MAX_SESSIONS:-100}" \
   QA_ROUTER_DATA_DIR="$router_data_dir" \
-  "$router_root/.venv/bin/qa-router-mcp"
+  "$router_command"

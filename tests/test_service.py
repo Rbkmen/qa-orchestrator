@@ -252,6 +252,56 @@ def test_service_records_orchestration_counters(tmp_path):
     assert event["terra_calls"] == 2
 
 
+def test_service_rejects_outcome_with_mismatched_task_type(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review")
+    primary = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            status="completed",
+            selected_profile="code_reviewer",
+        )
+    )
+    synthesis = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=primary.current_step,
+            status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+        )
+    )
+    service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=synthesis.current_step,
+            status="completed",
+        )
+    )
+
+    with pytest.raises(ValueError, match="task_type"):
+        service.record_qa_task_outcome(
+            task_type="widget_review",
+            outcome="completed",
+            codegraph_calls=0,
+            source_mcp_calls=0,
+            findings_identified=0,
+            findings_confirmed=0,
+            findings_rejected=0,
+            repeated_source_reads=0,
+            orchestration_used=True,
+            luna_calls=1,
+            terra_calls=2,
+            sol_calls=0,
+            orchestration_steps_completed=3,
+            orchestration_retries=0,
+            run_id=started.run_id,
+        )
+
+    assert service.get_qa_orchestration(started.run_id).status is OrchestrationStatus.AWAITING_HOST_OUTCOME
+    assert not (tmp_path / "metrics.jsonl").exists()
+
+
 def test_service_records_deep_orchestration_counters(tmp_path):
     service = RouterService.from_settings(data_dir=tmp_path)
     started = service.start_qa_orchestration("ordinary_review")
@@ -414,6 +464,60 @@ def test_service_does_not_duplicate_finalized_orchestration_metric(tmp_path):
     assert first.status == "recorded"
     assert second.status == "recorded"
     assert len((tmp_path / "metrics.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_service_rejects_conflicting_finalized_orchestration_payload(tmp_path):
+    service = RouterService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review")
+    primary = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            status="completed",
+            selected_profile="code_reviewer",
+        )
+    )
+    synthesis = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=primary.current_step,
+            status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+        )
+    )
+    service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=synthesis.current_step,
+            status="completed",
+        )
+    )
+    metrics = {
+        "task_type": "ordinary_review",
+        "outcome": "completed",
+        "codegraph_calls": 0,
+        "source_mcp_calls": 0,
+        "findings_identified": 0,
+        "findings_confirmed": 0,
+        "findings_rejected": 0,
+        "repeated_source_reads": 0,
+        "orchestration_used": True,
+        "luna_calls": 1,
+        "terra_calls": 2,
+        "sol_calls": 0,
+        "orchestration_steps_completed": 3,
+        "orchestration_retries": 0,
+        "run_id": started.run_id,
+    }
+
+    assert service.record_qa_task_outcome(**metrics).status == "recorded"
+
+    with pytest.raises(ValueError, match="conflicting outcome payload"):
+        service.record_qa_task_outcome(**{**metrics, "findings_identified": 1})
+
+    events = (tmp_path / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(events) == 1
+    assert json.loads(events[0])["findings_identified"] == 0
 
 
 def test_service_requires_run_id_for_orchestrated_outcome(tmp_path):

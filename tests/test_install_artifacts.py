@@ -1,5 +1,7 @@
 import os
+import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -29,6 +31,15 @@ def test_launcher_forwards_metrics_overrides():
     assert 'QA_ROUTER_METRICS_MAX_EVENTS="${QA_ROUTER_METRICS_MAX_EVENTS:-10000}"' in content
     assert 'QA_ROUTER_ORCHESTRATION_TTL_SECONDS="${QA_ROUTER_ORCHESTRATION_TTL_SECONDS:-1800}"' in content
     assert 'QA_ROUTER_ORCHESTRATION_MAX_SESSIONS="${QA_ROUTER_ORCHESTRATION_MAX_SESSIONS:-100}"' in content
+
+
+def test_ci_uses_immutable_action_refs_and_builds_wheel():
+    content = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    refs = re.findall(r"uses:\s+\S+@([^\s#]+)", content)
+
+    assert refs
+    assert all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in refs)
+    assert "uv build --wheel --out-dir dist" in content
 
 
 def test_operational_artifacts_describe_primary_agent_routing():
@@ -125,8 +136,14 @@ def test_documentation_contains_no_retired_runtime_terms():
 
 
 @pytest.mark.asyncio
-async def test_launcher_exposes_six_tools():
-    transport = StdioTransport(command=str(LAUNCHER), args=[])
+async def test_launcher_exposes_six_tools(monkeypatch):
+    virtual_env = str(Path(sys.executable).parent.parent)
+    monkeypatch.setenv("VIRTUAL_ENV", virtual_env)
+    transport = StdioTransport(
+        command=str(LAUNCHER),
+        args=[],
+        env={**os.environ, "VIRTUAL_ENV": virtual_env},
+    )
 
     try:
         async with Client(transport) as client:

@@ -90,8 +90,8 @@ class QaOrchestrationSession(BaseModel):
     deep_reason_code: OrchestrationReason | None = None
     model_policy: ModelPolicy | None = None
     next_action: str = Field(min_length=1)
-    read_only: bool = True
-    host_owns_decisions: bool = True
+    read_only: Literal[True] = True
+    host_owns_decisions: Literal[True] = True
     outcome_recorded: bool = False
     expires_at: datetime
 
@@ -187,6 +187,7 @@ class QaOrchestrator:
         self._max_sessions = max_sessions
         self._clock = clock
         self._sessions: dict[str, QaOrchestrationSession] = {}
+        self._outcome_fingerprints: dict[str, str] = {}
         self._lock = RLock()
 
     def start(self, task_type: QaTaskType) -> QaOrchestrationSession:
@@ -279,6 +280,13 @@ class QaOrchestrator:
             self._purge_expired(now, keep_run_id=run_id)
             return self._copy(self._require_session(run_id, now))
 
+    def get_outcome_fingerprint(self, run_id: str) -> str | None:
+        with self._lock:
+            now = self._clock()
+            self._purge_expired(now, keep_run_id=run_id)
+            self._require_session(run_id, now)
+            return self._outcome_fingerprints.get(run_id)
+
     def finish(self, *, run_id: str, outcome: QaTaskOutcome) -> QaOrchestrationSession:
         """Record the host-owned final outcome for a completed orchestration flow."""
         try:
@@ -321,6 +329,7 @@ class QaOrchestrator:
         *,
         run_id: str,
         outcome: QaTaskOutcome,
+        fingerprint: str,
     ) -> QaOrchestrationSession:
         with self._lock:
             now = self._clock()
@@ -328,9 +337,13 @@ class QaOrchestrator:
             session = self._require_session(run_id, now)
             if session.status is not OrchestrationStatus(outcome):
                 raise OrchestrationError("conflicting final outcome")
+            recorded_fingerprint = self._outcome_fingerprints.get(run_id)
+            if session.outcome_recorded and recorded_fingerprint != fingerprint:
+                raise OrchestrationError("conflicting outcome payload")
             if not session.outcome_recorded:
                 session = session.model_copy(update={"outcome_recorded": True})
                 self._sessions[run_id] = session
+                self._outcome_fingerprints[run_id] = fingerprint
             return self._copy(session)
 
     def _completed_transition(
@@ -442,6 +455,7 @@ class QaOrchestrator:
         for run_id, session in tuple(self._sessions.items()):
             if run_id != keep_run_id and session.expires_at <= now:
                 del self._sessions[run_id]
+                self._outcome_fingerprints.pop(run_id, None)
 
     def _active_session_count(self) -> int:
         return sum(
@@ -464,6 +478,7 @@ class QaOrchestrator:
             raise OrchestrationError("session limit")
         for _, run_id in terminal_run_ids[:required_evictions]:
             del self._sessions[run_id]
+            self._outcome_fingerprints.pop(run_id, None)
 
     @staticmethod
     def _copy(session: QaOrchestrationSession) -> QaOrchestrationSession:

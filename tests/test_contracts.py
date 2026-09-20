@@ -30,6 +30,28 @@ def test_review_route_requires_non_empty_focus():
     assert error.value.errors()[0]["loc"] == ("focus",)
 
 
+def test_review_route_rejects_disabled_ownership_flags():
+    with pytest.raises(ValidationError):
+        ReviewRoute(
+            profile=ReviewAgent.CODE_REVIEWER,
+            display_name="Code Reviewer",
+            focus="changed surface",
+            required_sections=["Scope"],
+            constraints=["read only"],
+            read_only=False,
+        )
+
+    with pytest.raises(ValidationError):
+        ReviewRoute(
+            profile=ReviewAgent.CODE_REVIEWER,
+            display_name="Code Reviewer",
+            focus="changed surface",
+            required_sections=["Scope"],
+            constraints=["read only"],
+            host_owns_decisions=False,
+        )
+
+
 def test_task_outcome_receipt_has_only_recording_status():
     receipt = QaTaskOutcomeReceipt(status="recorded")
 

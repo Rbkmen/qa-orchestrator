@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from pydantic import ValidationError
 
@@ -7,7 +9,9 @@ from qa_router_mcp.orchestration import (
     AdvanceQaOrchestrationRequest,
     OrchestrationModel,
     OrchestrationReason,
+    OrchestrationStatus,
     OrchestrationStep,
+    QaOrchestrationSession,
 )
 
 
@@ -26,6 +30,29 @@ def test_model_policy_assigns_requested_models_and_reasoning():
         OrchestrationStep.SOL_DEEP_REVIEW,
         OrchestrationStep.TERRA_SYNTHESIS,
     }
+
+
+def test_orchestration_session_rejects_disabled_ownership_flags():
+    with pytest.raises(ValidationError):
+        QaOrchestrationSession(
+            run_id="qar-0123456789abcdef0123456789abcdef",
+            task_type="ordinary_review",
+            status=OrchestrationStatus.ACTIVE,
+            current_step=OrchestrationStep.LUNA_TRIAGE,
+            next_action="Host runs Luna triage.",
+            read_only=False,
+        )
+
+    with pytest.raises(ValidationError):
+        QaOrchestrationSession(
+            run_id="qar-0123456789abcdef0123456789abcdef",
+            task_type="ordinary_review",
+            status=OrchestrationStatus.ACTIVE,
+            current_step=OrchestrationStep.LUNA_TRIAGE,
+            next_action="Host runs Luna triage.",
+            host_owns_decisions=False,
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
 
 
 def test_advance_request_rejects_free_form_fields():

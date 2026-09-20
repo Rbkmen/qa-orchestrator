@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 from threading import RLock
 
@@ -127,8 +129,11 @@ class RouterService:
             raise ValueError("run_id requires orchestration_used")
 
         with self._outcome_lock:
+            fingerprint = _outcome_fingerprint(event)
             if run_id is not None:
                 session = self.orchestrator.get(run_id)
+                if event["task_type"] != session.task_type:
+                    raise ValueError("task_type does not match run_id")
                 if not self._valid_orchestration_metrics(event, session, outcome):
                     raise ValueError("QA task metrics are inconsistent")
                 if session.status in {
@@ -139,12 +144,18 @@ class RouterService:
                     if session.status.value != outcome:
                         raise ValueError("conflicting final outcome")
                     if session.outcome_recorded:
+                        if self.orchestrator.get_outcome_fingerprint(run_id) != fingerprint:
+                            raise ValueError("conflicting outcome payload")
                         return QaTaskOutcomeReceipt(status="recorded")
                 self.orchestrator.finish(run_id=run_id, outcome=outcome)
 
             receipt = self.events.record_qa_task_outcome(event)
             if receipt.status == "recorded" and run_id is not None:
-                self.orchestrator.mark_outcome_recorded(run_id=run_id, outcome=outcome)
+                self.orchestrator.mark_outcome_recorded(
+                    run_id=run_id,
+                    outcome=outcome,
+                    fingerprint=fingerprint,
+                )
             return receipt
 
     @staticmethod
@@ -173,3 +184,8 @@ class RouterService:
             and event["sol_calls"] >= int(deep_branch_used)
             and event["orchestration_steps_completed"] >= required_steps
         )
+
+
+def _outcome_fingerprint(event: dict[str, object]) -> str:
+    payload = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
