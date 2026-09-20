@@ -275,6 +275,86 @@ def test_bundle_requires_each_profile_in_fixed_order_before_synthesis():
     assert session.completed_profiles == list(REVIEW_BUNDLES[ReviewBundle.ORDINARY_MR])
 
 
+@pytest.mark.parametrize("bundle", list(ReviewBundle))
+def test_every_fixed_bundle_completes_normal_flow(bundle: ReviewBundle):
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review")
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.LUNA_TRIAGE,
+        status="completed",
+        selected_bundle=bundle,
+    )
+
+    for profile in REVIEW_BUNDLES[bundle]:
+        session = orchestrator.advance(
+            run_id=session.run_id,
+            completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
+            status="completed",
+            completed_profile=profile,
+        )
+
+    assert session.current_step is OrchestrationStep.TERRA_SYNTHESIS
+    assert session.model_policy.model.value == "gpt-5.6-terra"
+    assert session.model_policy.reasoning == "medium"
+
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TERRA_SYNTHESIS,
+        status="completed",
+    )
+    completed = orchestrator.finish(run_id=session.run_id, outcome="completed")
+
+    assert session.status is OrchestrationStatus.AWAITING_HOST_OUTCOME
+    assert completed.status is OrchestrationStatus.COMPLETED
+
+
+@pytest.mark.parametrize("bundle", list(ReviewBundle))
+def test_every_fixed_bundle_can_escalate_after_final_profile(bundle: ReviewBundle):
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review")
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.LUNA_TRIAGE,
+        status="completed",
+        selected_bundle=bundle,
+    )
+
+    profiles = REVIEW_BUNDLES[bundle]
+    for profile in profiles[:-1]:
+        session = orchestrator.advance(
+            run_id=session.run_id,
+            completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
+            status="completed",
+            completed_profile=profile,
+        )
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
+        status="completed",
+        completed_profile=profiles[-1],
+        needs_deep_analysis=True,
+        reason_code="high_blast_radius",
+    )
+
+    assert session.current_step is OrchestrationStep.SOL_DEEP_REVIEW
+    assert session.model_policy.model.value == "gpt-5.6-sol"
+    assert session.model_policy.reasoning == "high"
+
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.SOL_DEEP_REVIEW,
+        status="completed",
+    )
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TERRA_SYNTHESIS,
+        status="completed",
+    )
+
+    assert session.status is OrchestrationStatus.AWAITING_HOST_OUTCOME
+
+
 def test_deep_reason_is_retained_in_content_free_session():
     orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
     session = orchestrator.start("ordinary_review")

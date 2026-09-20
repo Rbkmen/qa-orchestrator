@@ -181,6 +181,8 @@ Extend content-free task metrics with optional orchestration counters:
 
 These are non-negative counters supplied by the host. They do not contain model prompts, outputs, issue identifiers, source paths, or task text. The existing source-MCP, CodeGraph, findings, repeated-read, and deep-analysis measurements remain unchanged.
 
+For an orchestrated Sol branch, `deep_model=gpt-5.6-sol` and `deep_reasoning=high` are required to preserve the fixed model policy. Deep duration and token measurements remain optional.
+
 If profile-level metrics are added, they must remain aggregate non-negative counters only; profile names, prompts, evidence, findings, and model outputs must not be stored.
 
 ## Testing requirements

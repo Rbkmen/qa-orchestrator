@@ -13,6 +13,6 @@ alwaysApply: true
 - Policy: `gpt-5.6-luna/max` для triage, `gpt-5.6-terra/medium` для primary каждой роли и synthesis, optional `gpt-5.6-sol/high` для read-only deep analysis. После каждой Terra-роли вызывай `advance_qa_orchestration` с её `completed_profile`; Sol и synthesis разрешены только после последней роли. Передавай только structured signals; `get_qa_orchestration` возвращает состояние.
 - Route задаёт focus и обязательные секции; он не является autonomous agent и не заменяет проверку diff, contracts или runtime evidence.
 - Router не принимает evidence, prompts или model outputs и не выполняет внешние записи.
-- После любой QA-задачи со статусом `completed`, `partial` или `blocked` вызови `record_qa_task_outcome` ровно один раз. Для orchestration передай его `run_id`; передавай только counters и optional deep measurements.
+- После любой QA-задачи со статусом `completed`, `partial` или `blocked` вызови `record_qa_task_outcome` ровно один раз. Для orchestration передай его `run_id`; передавай только counters и deep measurements. Для orchestrated Sol укажи `deep_model=gpt-5.6-sol` и `deep_reasoning=high`.
 - Никогда не передавай issue keys, paths, source text, code, logs или prompts в metrics.
 - `get_metrics_report` используй для агрегированного контроля метрик; не принимай его как evidence или readiness decision.

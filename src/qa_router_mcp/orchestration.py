@@ -65,6 +65,10 @@ MODEL_POLICIES = MappingProxyType(
             model=OrchestrationModel.SOL,
             reasoning="high",
         ),
+        OrchestrationStep.TERRA_SYNTHESIS: ModelPolicy(
+            model=OrchestrationModel.TERRA,
+            reasoning="medium",
+        ),
     }
 )
 
@@ -400,7 +404,7 @@ class QaOrchestrator:
                     "current_step": OrchestrationStep.TERRA_SYNTHESIS,
                     "current_profile": None,
                     "completed_profiles": completed_profiles,
-                    "model_policy": MODEL_POLICIES[OrchestrationStep.TERRA_PRIMARY_REVIEW],
+                    "model_policy": MODEL_POLICIES[OrchestrationStep.TERRA_SYNTHESIS],
                     "next_action": _NEXT_ACTIONS[OrchestrationStep.TERRA_SYNTHESIS],
                 }
             )
@@ -409,7 +413,7 @@ class QaOrchestrator:
             return session.model_copy(
                 update={
                     "current_step": OrchestrationStep.TERRA_SYNTHESIS,
-                    "model_policy": MODEL_POLICIES[OrchestrationStep.TERRA_PRIMARY_REVIEW],
+                    "model_policy": MODEL_POLICIES[OrchestrationStep.TERRA_SYNTHESIS],
                     "next_action": _NEXT_ACTIONS[OrchestrationStep.TERRA_SYNTHESIS],
                 }
             )

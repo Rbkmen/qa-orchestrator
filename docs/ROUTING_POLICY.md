@@ -101,7 +101,7 @@ Faraday — внутреннее отображаемое имя `code_explorer`
 - `task_type`, `outcome`;
 - CodeGraph/source call counters;
 - identified/confirmed/rejected findings и repeated source reads;
-- optional `deep_*` measurements;
+- `deep_model=gpt-5.6-sol` и `deep_reasoning=high` для orchestrated Sol-ветки; duration и token measurements optional;
 - `orchestration_used`, `luna_calls`, `terra_calls`, `sol_calls`, `orchestration_steps_completed`, `orchestration_retries`.
 
 При `orchestration_used=true` поле `run_id` обязательно. Оно используется только для связывания финального outcome и aggregate counters с in-memory сессией, проверяется относительно выбранной ветки и не сохраняется в JSONL.

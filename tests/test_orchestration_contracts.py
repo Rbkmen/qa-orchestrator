@@ -18,10 +18,13 @@ def test_model_policy_assigns_requested_models_and_reasoning():
     assert MODEL_POLICIES[OrchestrationStep.TERRA_PRIMARY_REVIEW].reasoning == "medium"
     assert MODEL_POLICIES[OrchestrationStep.SOL_DEEP_REVIEW].model == OrchestrationModel.SOL
     assert MODEL_POLICIES[OrchestrationStep.SOL_DEEP_REVIEW].reasoning == "high"
+    assert MODEL_POLICIES[OrchestrationStep.TERRA_SYNTHESIS].model == OrchestrationModel.TERRA
+    assert MODEL_POLICIES[OrchestrationStep.TERRA_SYNTHESIS].reasoning == "medium"
     assert set(MODEL_POLICIES) == {
         OrchestrationStep.LUNA_TRIAGE,
         OrchestrationStep.TERRA_PRIMARY_REVIEW,
         OrchestrationStep.SOL_DEEP_REVIEW,
+        OrchestrationStep.TERRA_SYNTHESIS,
     }
 
 

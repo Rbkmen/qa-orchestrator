@@ -21,7 +21,7 @@
 ## Metrics
 
 - После каждого `completed`, `partial` или `blocked` QA task один раз вызови `record_qa_task_outcome`; для orchestration передай `run_id` из сессии, для обычной задачи оставь его пустым.
-- Передавай только `task_type`, `outcome`, counters вызовов, findings, repeated reads и измеримые `deep_*`/token counters.
+- Передавай только `task_type`, `outcome`, counters вызовов, findings, repeated reads и измеримые `deep_*`/token counters. Для orchestrated Sol обязательно указывай `deep_model=gpt-5.6-sol` и `deep_reasoning=high`.
 - Никогда не передавай issue keys, titles, paths, source text, code, logs, screenshots, prompts или ответы ревью.
 - `get_metrics_report(days)` используй только для агрегированного read-only отчёта.
 

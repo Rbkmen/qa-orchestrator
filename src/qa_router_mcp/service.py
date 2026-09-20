@@ -12,6 +12,7 @@ from qa_router_mcp.contracts import (
 from qa_router_mcp.events import EventSink, JsonEventSink, valid_qa_task_metrics
 from qa_router_mcp.orchestration import (
     AdvanceQaOrchestrationRequest,
+    OrchestrationModel,
     OrchestrationStatus,
     QaOrchestrationSession,
     QaOrchestrator,
@@ -154,6 +155,11 @@ class RouterService:
     ) -> bool:
         deep_branch_used = session.deep_reason_code is not None
         if (event["sol_calls"] > 0) != deep_branch_used:
+            return False
+        if deep_branch_used and (
+            event.get("deep_model") != OrchestrationModel.SOL.value
+            or event.get("deep_reasoning") != "high"
+        ):
             return False
         if outcome != "completed":
             return True

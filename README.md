@@ -138,7 +138,7 @@ codex mcp add qa-router -- \
 
 ## Метрики
 
-`record_qa_task_outcome` принимает task type, outcome, counters CodeGraph/source MCP, findings, repeated reads, optional deep-analysis measurements и content-free orchestration counters:
+`record_qa_task_outcome` принимает task type, outcome, counters CodeGraph/source MCP, findings, repeated reads, deep-analysis measurements и content-free orchestration counters. Для orchestrated Sol-ветки `deep_model=gpt-5.6-sol` и `deep_reasoning=high` обязательны; duration и token measurements остаются optional:
 
 - `orchestration_used`;
 - `luna_calls`, `terra_calls`, `sol_calls`;

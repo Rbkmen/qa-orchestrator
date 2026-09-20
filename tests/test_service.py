@@ -288,6 +288,25 @@ def test_service_records_deep_orchestration_counters(tmp_path):
         )
     )
 
+    with pytest.raises(ValueError, match="QA task metrics are inconsistent"):
+        service.record_qa_task_outcome(
+            task_type="ordinary_review",
+            outcome="completed",
+            codegraph_calls=0,
+            source_mcp_calls=0,
+            findings_identified=0,
+            findings_confirmed=0,
+            findings_rejected=0,
+            repeated_source_reads=0,
+            deep_analysis_used=True,
+            orchestration_used=True,
+            luna_calls=1,
+            terra_calls=2,
+            sol_calls=1,
+            orchestration_steps_completed=4,
+            run_id=started.run_id,
+        )
+
     receipt = service.record_qa_task_outcome(
         task_type="ordinary_review",
         outcome="completed",
