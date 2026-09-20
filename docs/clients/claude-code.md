@@ -1,27 +1,27 @@
 # Claude Code setup
 
-Claude Code может запускать QA Router как локальный STDIO MCP-сервер. Используй user scope для всех проектов или local scope для одного проекта.
+Claude Code can run QA Router as a local STDIO MCP server. Use user scope for all projects or local scope for one project.
 
-## Подключение
+## Connection
 
 ```bash
 claude mcp add --transport stdio --scope user qa-router -- \
   /absolute/path/to/qa-router-mcp/scripts/qa-router-mcp
 ```
 
-Проверь `claude mcp get qa-router`, `claude mcp list` или `/mcp` внутри Claude Code.
+Verify the connection with `claude mcp get qa-router`, `claude mcp list`, or `/mcp` inside Claude Code.
 
-## Инструкции host agent
+## Host-agent instructions
 
-Для проекта без `CLAUDE.md`:
+For a project without `CLAUDE.md`:
 
 ```bash
 cp /absolute/path/to/qa-router-mcp/client-rules/claude-code/CLAUDE.md \
   /absolute/path/to/your-project/CLAUDE.md
 ```
 
-Если файл уже есть, объедини правила вручную. Claude Code остаётся владельцем evidence, анализа, findings, model calls, изменений и external writes. Router публикует шесть инструментов для route, orchestration state и aggregate metrics; он возвращает только структурированные content-free данные.
+If the file already exists, merge the rules manually. Claude Code remains the owner of evidence, analysis, findings, model calls, changes, and external writes. The router publishes six tools for routing, orchestration state, and aggregate metrics; it returns only structured content-free data.
 
-Используй flow `gpt-5.6-luna/max` → `gpt-5.6-terra/medium` для выбранных ролей → optional `gpt-5.6-sol/high` → `gpt-5.6-terra/medium` synthesis. Luna выбирает fixed bundle или один compatibility profile; порядок bundle менять нельзя. Для `ordinary_mr`: `Faraday — Evidence Investigator` → `Code Reviewer` → `Test Analyzer`; после каждой Terra-роли передавай её `completed_profile`, а Sol/synthesis запускай только после последней. После каждой стадии вызывай `advance_qa_orchestration`, а итог записывай одним вызовом `record_qa_task_outcome` с исходным `run_id`.
+Use the flow `gpt-5.6-luna/max` → `gpt-5.6-terra/medium` for the selected roles → optional `gpt-5.6-sol/high` → `gpt-5.6-terra/medium` synthesis. Luna selects a fixed bundle or one compatibility profile; the bundle order cannot be changed. For `ordinary_mr`, use `Faraday — Evidence Investigator` → `Code Reviewer` → `Test Analyzer`; after every Terra role, pass its `completed_profile`, and start Sol or synthesis only after the last role. After each stage, call `advance_qa_orchestration`; record the final result once with `record_qa_task_outcome` and the original `run_id`.
 
 Reference: [official Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).

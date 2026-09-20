@@ -5,14 +5,14 @@ alwaysApply: true
 
 # QA Router usage
 
-Когда доступен MCP-сервер `qa-router`, используй его как read-only routing helper.
+When the `qa-router` MCP server is available, use it as a read-only routing helper.
 
-- Получай sources, запускай model stages, анализируй evidence, принимай QA-решение и выполняй code/file/external changes в Cursor Agent.
-- Для implementation-aware ревью начни с `start_qa_orchestration`, на Luna выбери fixed bundle или compatibility profile, затем вызови `prepare_review_route` для каждой роли в порядке bundle: `ordinary_mr`, `widget`, `security`, `autotest` или `requirements`.
-- Имена ролей: `Faraday — Evidence Investigator` (`code_explorer`), `Code Reviewer`, `Test Analyzer`, `Security Reviewer`, `Silent Failure Hunter`, `TypeScript Reviewer`, `React Reviewer`. Faraday — внутреннее имя роли, не внешний сервис или model.
-- Policy: `gpt-5.6-luna/max` для triage, `gpt-5.6-terra/medium` для primary каждой роли и synthesis, optional `gpt-5.6-sol/high` для read-only deep analysis. После каждой Terra-роли вызывай `advance_qa_orchestration` с её `completed_profile`; Sol и synthesis разрешены только после последней роли. Передавай только structured signals; `get_qa_orchestration` возвращает состояние.
-- Route задаёт focus и обязательные секции; он не является autonomous agent и не заменяет проверку diff, contracts или runtime evidence.
-- Router не принимает evidence, prompts или model outputs и не выполняет внешние записи.
-- После любой QA-задачи со статусом `completed`, `partial` или `blocked` вызови `record_qa_task_outcome` ровно один раз. Для orchestration передай его `run_id`; передавай только counters и deep measurements. Для orchestrated Sol укажи `deep_model=gpt-5.6-sol` и `deep_reasoning=high`.
-- Никогда не передавай issue keys, paths, source text, code, logs или prompts в metrics.
-- `get_metrics_report` используй для агрегированного контроля метрик; не принимай его как evidence или readiness decision.
+- Obtain sources, run model stages, analyze evidence, make the QA decision, and perform code, file, or external changes in Cursor Agent.
+- For an implementation-aware review, start with `start_qa_orchestration`. During Luna triage, select a fixed bundle or compatibility profile, then call `prepare_review_route` for each role in the bundle order: `ordinary_mr`, `widget`, `security`, `autotest`, or `requirements`.
+- Role names are `Faraday — Evidence Investigator` (`code_explorer`), `Code Reviewer`, `Test Analyzer`, `Security Reviewer`, `Silent Failure Hunter`, `TypeScript Reviewer`, and `React Reviewer`. Faraday is an internal role name, not an external service or model.
+- Policy: `gpt-5.6-luna/max` for triage, `gpt-5.6-terra/medium` for primary review of every role and for synthesis, and optional `gpt-5.6-sol/high` for read-only deep analysis. After every Terra role, call `advance_qa_orchestration` with its `completed_profile`; Sol and synthesis are allowed only after the last role. Send only structured signals; `get_qa_orchestration` returns the state.
+- Use the route for focus and required sections; it is not an autonomous agent and does not replace checking the diff, contracts, or runtime evidence.
+- The router does not accept evidence, prompts, or model outputs and does not perform external writes.
+- After any QA task with status `completed`, `partial`, or `blocked`, call `record_qa_task_outcome` exactly once. For orchestration, pass its `run_id`; send only counters and deep-analysis measurements. For an orchestrated Sol branch, set `deep_model=gpt-5.6-sol` and `deep_reasoning=high`.
+- Never send issue keys, paths, source text, code, logs, or prompts in metrics.
+- Use `get_metrics_report` for aggregate metrics control; do not treat it as evidence or a readiness decision.

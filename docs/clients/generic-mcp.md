@@ -1,8 +1,8 @@
 # Generic MCP client setup
 
-QA Router использует стандартный MCP STDIO transport. Совместимый клиент должен запускать команду, обмениваться MCP-сообщениями через stdin/stdout и показывать tools host agent.
+QA Router uses the standard MCP STDIO transport. A compatible client must start the command, exchange MCP messages through stdin/stdout, and expose the tools to the host agent.
 
-## Конфигурация
+## Configuration
 
 ```json
 {
@@ -16,18 +16,18 @@ QA Router использует стандартный MCP STDIO transport. Со�
 }
 ```
 
-Точный файл зависит от клиента. Используй абсолютный путь к launcher.
+The exact file depends on the client. Use an absolute path to the launcher.
 
-## Инструкции
+## Instructions
 
-Скопируй или объедини [`client-rules/generic/QA_ROUTER_INSTRUCTIONS.md`](../../client-rules/generic/QA_ROUTER_INSTRUCTIONS.md) с persistent instructions клиента. Host должен сам получать sources, анализировать evidence и выполнять внешние действия.
+Copy or merge [`client-rules/generic/QA_ROUTER_INSTRUCTIONS.md`](../../client-rules/generic/QA_ROUTER_INSTRUCTIONS.md) into the client's persistent instructions. The host must obtain sources, analyze evidence, and perform external actions itself.
 
-## Проверка
+## Verification
 
-1. Убедись, что сервер подключается и показывает ровно шесть tools: `prepare_review_route`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `record_qa_task_outcome`, `get_metrics_report`.
-2. Запусти orchestration: Luna/max выбирает fixed bundle или один profile, Terra/medium выполняет роли по одной в фиксированном порядке — после каждой передавай `completed_profile`; только после последней роли возможны optional Sol/high и Terra/medium synthesis.
-3. После каждой стадии передавай Router только structured signal; evidence и outputs храни в host agent.
-4. Проверь `read_only=true` и `host_owns_decisions=true`, затем заверши orchestrated-задачу одним вызовом `record_qa_task_outcome` с её `run_id`.
-5. Проверь aggregate counters через `get_metrics_report`.
+1. Confirm that the server connects and exposes exactly six tools: `prepare_review_route`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `record_qa_task_outcome`, and `get_metrics_report`.
+2. Start orchestration: Luna/max selects a fixed bundle or one profile; Terra/medium executes roles one at a time in a fixed order, and the host passes `completed_profile` after each role. Optional Sol/high and Terra/medium synthesis are available only after the final role.
+3. After every stage, send the router only a structured signal; keep evidence and outputs in the host agent.
+4. Verify `read_only=true` and `host_owns_decisions=true`, then finish the orchestrated task with one `record_qa_task_outcome` call using its `run_id`.
+5. Check aggregate counters through `get_metrics_report`.
 
-Для обычного MR используй `ordinary_mr`: `code_explorer` (`Faraday — Evidence Investigator`) → `code_reviewer` → `pr_test_analyzer`. Остальные fixed bundles и отображаемые имена перечислены в [routing policy](../ROUTING_POLICY.md); Faraday — только внутреннее имя роли.
+For a normal MR, use `ordinary_mr`: `code_explorer` (`Faraday — Evidence Investigator`) → `code_reviewer` → `pr_test_analyzer`. The remaining fixed bundles and display names are listed in the [routing policy](../ROUTING_POLICY.md); Faraday is only an internal role name.

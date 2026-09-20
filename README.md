@@ -1,25 +1,25 @@
 # QA Router MCP
 
-QA Router MCP — небольшой детерминированный FastMCP-сервис для host-owned QA-ревью и обезличенных метрик. Router хранит только ограниченное состояние маршрута: evidence, исходный код, логи, prompts, ответы моделей и финальные решения остаются у primary host agent.
+QA Router MCP is a small deterministic FastMCP service for host-owned QA reviews and anonymized metrics. The router stores only bounded route state: evidence, source code, logs, prompts, model responses, and final decisions remain with the primary host agent.
 
-## Как работает
+## How it works
 
-1. Primary host получает authoritative evidence из нужных систем и определяет тип QA-задачи.
-2. Host вызывает `start_qa_orchestration`. Router создаёт content-free сессию и возвращает первый шаг — Luna с `max` reasoning.
-3. Host выполняет стадии в своей model configuration и после каждой стадии передаёт Router только структурированный сигнал:
-   - `gpt-5.6-luna` + `max` — triage и выбор одного fixed review bundle или одного compatibility profile;
-   - `gpt-5.6-terra` + `medium` — primary review каждого профиля в фиксированном порядке;
-   - опционально `gpt-5.6-sol` + `high` — read-only deep analysis по фиксированной причине;
+1. The primary host obtains authoritative evidence from the required systems and classifies the QA task.
+2. The host calls `start_qa_orchestration`. The router creates a content-free session and returns the first step: Luna with `max` reasoning.
+3. The host runs each stage in its configured model environment and sends the router only a structured signal after each stage:
+   - `gpt-5.6-luna` + `max` — triage and selection of one fixed review bundle or one compatibility profile;
+   - `gpt-5.6-terra` + `medium` — primary review of every profile in the fixed order;
+   - optional `gpt-5.6-sol` + `high` — read-only deep analysis for one fixed reason;
    - `gpt-5.6-terra` + `medium` — synthesis.
-4. Host сам проверяет findings, runtime-доказательства и ограничения, затем один раз вызывает `record_qa_task_outcome`; для orchestrated-задачи передаёт тот же `run_id`, чтобы Router закрыл сессию.
+4. The host validates findings, runtime evidence, and limitations, then calls `record_qa_task_outcome` once. For an orchestrated task it passes the same `run_id` so the router can close the session.
 
-Router не вызывает модели, не выбирает severity или release readiness и не выполняет внешние записи.
+The router does not call models, choose severity or release readiness, or perform external writes.
 
-### Bundles и имена профилей
+### Bundles and profile names
 
-Luna выбирает один из фиксированных bundles либо один профиль для обратной совместимости. Terra выполняет профили bundle последовательно; после каждой роли host передаёт `completed_profile`, а Router возвращает `current_profile` и `completed_profiles`. Перейти к Sol или synthesis можно только после последней роли.
+Luna selects one fixed bundle or one compatibility profile. Terra executes bundle profiles sequentially. After every role, the host sends `completed_profile`, and the router returns `current_profile` and `completed_profiles`. Sol or synthesis is available only after the final role.
 
-| Bundle | Порядок профилей |
+| Bundle | Profile order |
 |---|---|
 | `ordinary_mr` | `code_explorer` → `code_reviewer` → `pr_test_analyzer` |
 | `widget` | `code_explorer` → `react_reviewer` → `typescript_reviewer` → `pr_test_analyzer` |
@@ -27,9 +27,9 @@ Luna выбирает один из фиксированных bundles либо 
 | `autotest` | `code_reviewer` → `pr_test_analyzer` → `typescript_reviewer` |
 | `requirements` | `code_explorer` → `code_reviewer` |
 
-Технические профили и отображаемые имена:
+Technical profiles and display names:
 
-| Профиль | Имя для host |
+| Profile | Host-facing name |
 |---|---|
 | `code_explorer` | `Faraday — Evidence Investigator` |
 | `code_reviewer` | `Code Reviewer` |
@@ -39,9 +39,9 @@ Luna выбирает один из фиксированных bundles либо 
 | `typescript_reviewer` | `TypeScript Reviewer` |
 | `react_reviewer` | `React Reviewer` |
 
-Faraday — это только внутреннее отображаемое имя профиля `code_explorer`: отдельный внешний агент, сервис, package или model не подключается.
+Faraday is only the internal display name of the `code_explorer` profile. No external agent, service, package, or model is connected under that name.
 
-Обычный status flow:
+Normal status flow:
 
 ```text
 Luna / Max → Ordinary MR Review
@@ -52,22 +52,32 @@ Terra / Medium → Synthesis
 Host → Final QA outcome
 ```
 
-При зафиксированной причине после последней роли добавляется `Sol / High → Deep read-only review` между primary review и synthesis.
+When a fixed deep-analysis reason is present, `Sol / High → Deep read-only review` is inserted after the final primary-review role and before synthesis.
 
-## MCP-интерфейс
+## Visual workflow
 
-Сервис публикует ровно шесть инструментов:
+### Normal MR review
 
-| Инструмент | Назначение |
+![QA Route normal MR review](docs/assets/qa-route-normal-review.png)
+
+### Deep review escalation
+
+![QA Route deep review](docs/assets/qa-route-deep-review.png)
+
+## MCP interface
+
+The service publishes exactly six tools:
+
+| Tool | Purpose |
 |---|---|
-| `prepare_review_route(agent_profile)` | Детерминированный checklist для одного из семи профилей |
-| `start_qa_orchestration(task_type)` | Создание host-owned orchestration-сессии |
-| `advance_qa_orchestration(...)` | Один структурированный переход между стадиями |
-| `get_qa_orchestration(run_id)` | Чтение текущего content-free состояния |
-| `record_qa_task_outcome(...)` | Одна обезличенная запись результата QA-задачи |
-| `get_metrics_report(days)` | Агрегированный отчёт за положительный период |
+| `prepare_review_route(agent_profile)` | Deterministic checklist for one of the seven profiles |
+| `start_qa_orchestration(task_type)` | Create a host-owned orchestration session |
+| `advance_qa_orchestration(...)` | Make one structured transition between stages |
+| `get_qa_orchestration(run_id)` | Read the current content-free state |
+| `record_qa_task_outcome(...)` | Record one anonymized QA-task result |
+| `get_metrics_report(days)` | Return an aggregate report for a positive time range |
 
-Оркестрационный flow для bundle:
+Bundle orchestration flow:
 
 ```text
 Luna/max → Terra/profile[1] → ... → Terra/profile[N]
@@ -75,36 +85,36 @@ Luna/max → Terra/profile[1] → ... → Terra/profile[N]
                                            Terra synthesis → host outcome
 ```
 
-Сессии хранятся только в памяти процесса. По умолчанию TTL — 1800 секунд, максимум — 100 активных сессий; общий cache также bounded, а старые terminal-сессии могут быть вытеснены при нехватке места. Повтор финального вызова идемпотентен, пока его сессия сохранена. После перезапуска host начинает новую сессию. `read_only=true` и `host_owns_decisions=true` являются частью каждого состояния.
+Sessions are kept in process memory only. The default TTL is 1,800 seconds and the maximum is 100 active sessions; the shared cache is also bounded, so older terminal sessions may be evicted when capacity is needed. Repeating the final call is idempotent while its session is retained. After a restart, the host starts a new session. `read_only=true` and `host_owns_decisions=true` are part of every state.
 
-После synthesis сессия ждёт финальный host outcome. Вызов `record_qa_task_outcome` с `orchestration_used=true` обязан содержать `run_id` текущей сессии; Router связывает counters с фактической веткой и переводит её в `completed`, `partial` или `blocked`. Для остановленной на стадии сессии сначала передай в `advance_qa_orchestration` статус `partial` или `blocked`. Повтор абсолютно того же вызова для того же `run_id` идемпотентен; изменённый payload отклоняется как конфликт. Для обычной задачи без orchestration `run_id` не передаётся.
+After synthesis, the session waits for the final host outcome. A call to `record_qa_task_outcome` with `orchestration_used=true` must include the `run_id` of the current session; the router associates counters with the actual branch and moves it to `completed`, `partial`, or `blocked`. For a session stopped at an intermediate stage, first pass `partial` or `blocked` to `advance_qa_orchestration`. Repeating the exact same call for the same `run_id` is idempotent; a changed payload is rejected as a conflict. For a regular task without orchestration, omit `run_id`.
 
-### Профили ревью
+### Review profiles
 
-`prepare_review_route` возвращает focus, обязательные секции, ограничения, escalation signals и отображаемое имя одного профиля. Для bundle host вызывает route для каждого профиля в полученном фиксированном порядке и после каждого вызова передаёт его технический идентификатор в `completed_profile`.
+`prepare_review_route` returns the focus, required sections, constraints, escalation signals, and display name for one profile. For a bundle, the host calls the route for every profile in the returned fixed order and passes its technical identifier in `completed_profile` after each call.
 
-Общие секции route: `Scope`, `Checklist`, `Candidate Coverage Gaps`, `Positive Observations`, `Unverified`.
+Common route sections are `Scope`, `Checklist`, `Candidate Coverage Gaps`, `Positive Observations`, and `Unverified`.
 
-## Границы ответственности
+## Responsibility boundary
 
-Primary host отвечает за:
+The primary host is responsible for:
 
-- получение и проверку evidence;
-- вызовы Jira, GitLab, TestRail, Sentry, Grafana, OpenSearch, Slack, Confluence, CodeGraph и файловой системы;
-- запуск трёх model stages по policy и проверку их результатов;
-- confirmed findings, severity, release/readiness judgment и финальный QA-ответ;
-- изменения файлов и любые внешние записи.
+- obtaining and validating evidence;
+- calling Jira, GitLab, TestRail, Sentry, Grafana, OpenSearch, Slack, Confluence, CodeGraph, and the file system;
+- running the three model stages under the policy and validating their outputs;
+- confirmed findings, severity, release/readiness judgment, and the final QA response;
+- file changes and all external writes.
 
-QA Router отвечает только за fixed routing, state transitions, read-only constraints и content-free metrics. В `advance_qa_orchestration` нельзя передавать Evidence Packet, prompt, model output, source text, logs, paths или произвольную причину.
+QA Router is responsible only for fixed routing, state transitions, read-only constraints, and content-free metrics. `advance_qa_orchestration` must not receive an Evidence Packet, prompt, model output, source text, logs, paths, or an arbitrary reason.
 
-## Требования
+## Requirements
 
 - Python 3.12+;
 - [`uv`](https://docs.astral.sh/uv/);
-- MCP-клиент, поддерживающий STDIO;
-- POSIX-система: macOS или Linux.
+- an MCP client that supports STDIO;
+- a POSIX system: macOS or Linux.
 
-## Установка
+## Installation
 
 ```bash
 git clone https://github.com/Rbkmen/qa-router-mcp.git
@@ -114,22 +124,22 @@ uv run pytest -q
 uv run ruff check .
 ```
 
-Подключи `scripts/qa-router-mcp` как STDIO MCP-сервер. Launcher сначала использует `.venv` проекта, затем активный `VIRTUAL_ENV` или установленный `qa-router-mcp` из `PATH`; отдельный фоновый процесс не требуется.
+Connect `scripts/qa-router-mcp` as a STDIO MCP server. The launcher first uses the project's `.venv`, then the active `VIRTUAL_ENV`, or an installed `qa-router-mcp` from `PATH`; no separate background process is required.
 
-Пример для Codex:
+Example for Codex:
 
 ```bash
 codex mcp add qa-router -- \
   /absolute/path/to/qa-router-mcp/scripts/qa-router-mcp
 ```
 
-Другие варианты подключения описаны в [client guides](docs/clients/).
+Other connection options are described in the [client guides](docs/clients/).
 
-## Конфигурация
+## Configuration
 
-По умолчанию метрики записываются в `$HOME/.qa-router/metrics.jsonl`.
+By default, metrics are written to `$HOME/.qa-router/metrics.jsonl`.
 
-| Переменная | Значение по умолчанию |
+| Variable | Default |
 |---|---:|
 | `QA_ROUTER_DATA_DIR` | `$HOME/.qa-router` |
 | `QA_ROUTER_METRICS_RETENTION_DAYS` | `30` |
@@ -137,32 +147,32 @@ codex mcp add qa-router -- \
 | `QA_ROUTER_ORCHESTRATION_TTL_SECONDS` | `1800` |
 | `QA_ROUTER_ORCHESTRATION_MAX_SESSIONS` | `100` |
 
-## Метрики
+## Metrics
 
-`record_qa_task_outcome` принимает task type, outcome, counters CodeGraph/source MCP, findings, repeated reads, deep-analysis measurements и content-free orchestration counters. Для orchestrated Sol-ветки `deep_model=gpt-5.6-sol` и `deep_reasoning=high` обязательны; duration и token measurements остаются optional:
+`record_qa_task_outcome` accepts the task type, outcome, CodeGraph/source-MCP counters, findings, repeated reads, deep-analysis measurements, and content-free orchestration counters. For an orchestrated Sol branch, `deep_model=gpt-5.6-sol` and `deep_reasoning=high` are required; duration and token measurements remain optional:
 
 - `orchestration_used`;
 - `luna_calls`, `terra_calls`, `sol_calls`;
 - `orchestration_steps_completed`, `orchestration_retries`.
 
-Для orchestrated-задачи используй `run_id` из `start_qa_orchestration`; сам opaque идентификатор не записывается в JSONL-метрику.
+For an orchestrated task, use the `run_id` returned by `start_qa_orchestration`; the opaque identifier itself is not written to the JSONL metric.
 
-Значения неотрицательные и согласованные. JSONL не содержит issue keys, путей, исходного текста, кода, логов, prompts или ответов моделей. Отчёт можно получить через MCP или локально:
+Values must be non-negative and internally consistent. JSONL contains no issue keys, paths, source text, code, logs, prompts, or model responses. The report is available through MCP or locally:
 
 ```bash
 uv run qa-router-report
 uv run qa-router-report --days 30
 ```
 
-## Клиенты и правила
+## Clients and rules
 
 - [Codex](docs/clients/codex.md)
 - [Claude Code](docs/clients/claude-code.md)
 - [Cursor](docs/clients/cursor.md)
 - [Generic MCP client](docs/clients/generic-mcp.md)
-- [Общая routing policy](docs/ROUTING_POLICY.md)
-- [Шаблоны client rules](client-rules/)
+- [Shared routing policy](docs/ROUTING_POLICY.md)
+- [Client-rule templates](client-rules/)
 
-## Разработка
+## Development
 
-См. [CONTRIBUTING.md](CONTRIBUTING.md). Любое изменение публичного MCP-контракта должно сопровождаться тестом точного tool surface и проверкой, что evidence, решения и внешние записи остаются у primary host.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Any change to the public MCP contract must include an exact tool-surface test and a check that evidence, decisions, and external writes remain with the primary host.

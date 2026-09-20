@@ -1,13 +1,13 @@
 # QA Router usage
 
-Когда доступен MCP-сервер `qa-router`, используй его как детерминированный QA-routing helper.
+When the `qa-router` MCP server is available, use it as a deterministic QA-routing helper.
 
-- Получай evidence, запускай model stages, анализируй задачу, формируй findings, принимай финальное QA-решение и выполняй любые изменения или external writes в Claude Code.
-- Для implementation-aware ревью вызови `start_qa_orchestration`, на Luna выбери fixed bundle или compatibility profile, а затем `prepare_review_route` для каждой роли: `pr_test_analyzer`, `code_reviewer`, `security_reviewer`, `silent_failure_hunter`, `code_explorer`, `typescript_reviewer` или `react_reviewer`.
-- Fixed bundles: `ordinary_mr`, `widget`, `security`, `autotest`, `requirements`; порядок приходит из Router и не изменяется host. `code_explorer` отображается как `Faraday — Evidence Investigator`; это внутреннее имя роли, не внешний сервис.
-- Используй `gpt-5.6-luna/max` для triage, `gpt-5.6-terra/medium` для primary review каждой роли и synthesis, optional `gpt-5.6-sol/high` для read-only deep analysis. После каждой Terra-роли передавай её `completed_profile`; Sol и synthesis начинаются только после последней роли. Через `advance_qa_orchestration` передавай только structured signals.
-- `get_qa_orchestration` используй для чтения состояния и next action. Evidence, prompts и model outputs не передавай Router.
-- Используй route только как focus/checklist. Сам проверь diff, callers, contracts, runtime evidence и unverified gaps.
-- После `completed`, `partial` или `blocked` один раз вызови `record_qa_task_outcome` с counters без issue keys, source text, code, logs или paths; для orchestration передай opaque `run_id`.
-- `get_metrics_report` используй только для aggregate read-only metrics.
-- Не добавляй persistent QA memory, source cache или скрытые tool calls.
+- Obtain evidence, run model stages, analyze the task, produce findings, make the final QA decision, and perform any changes or external writes in Claude Code.
+- For an implementation-aware review, call `start_qa_orchestration`, select a fixed bundle or compatibility profile during Luna triage, and then call `prepare_review_route` for each role: `pr_test_analyzer`, `code_reviewer`, `security_reviewer`, `silent_failure_hunter`, `code_explorer`, `typescript_reviewer`, or `react_reviewer`.
+- Fixed bundles are `ordinary_mr`, `widget`, `security`, `autotest`, and `requirements`; the order comes from the router and must not be changed by the host. `code_explorer` is displayed as `Faraday — Evidence Investigator`; this is an internal role name, not an external service.
+- Use `gpt-5.6-luna/max` for triage, `gpt-5.6-terra/medium` for primary review of every role and for synthesis, and optional `gpt-5.6-sol/high` for read-only deep analysis. After each Terra role, pass its `completed_profile`; Sol and synthesis start only after the last role. Pass only structured signals to `advance_qa_orchestration`.
+- Use `get_qa_orchestration` to read state and the next action. Do not pass evidence, prompts, or model outputs to the router.
+- Use the route only as a focus/checklist. Independently verify the diff, callers, contracts, runtime evidence, and unverified gaps.
+- After `completed`, `partial`, or `blocked`, call `record_qa_task_outcome` once with counters and no issue keys, source text, code, logs, or paths; for orchestration, pass the opaque `run_id`.
+- Use `get_metrics_report` only for aggregate read-only metrics.
+- Do not add persistent QA memory, a source cache, or hidden tool calls.

@@ -1,41 +1,41 @@
 # QA Router Policy
 
-Эта policy client-neutral. **Primary host** — Codex, Claude Code, Cursor или другой MCP-клиент — остаётся главным оркестратором и владельцем решений.
+This policy is client-neutral. The **primary host** — Codex, Claude Code, Cursor, or another MCP client — remains the main orchestrator and decision owner.
 
 ## Responsibility boundary
 
-Primary host owns:
+The primary host owns:
 
-- task classification и получение authoritative sources;
-- requirements, diff, code, contract, log и runtime analysis;
-- запуск model stages по фиксированной policy и валидацию ответов;
-- findings, severity, coverage, release/readiness judgment и финальный ответ;
-- CodeGraph и source-MCP calls;
-- code/file changes и все записи во внешние системы.
+- task classification and retrieval of authoritative sources;
+- requirements, diff, code, contract, log, and runtime analysis;
+- launching model stages under the fixed policy and validating their responses;
+- findings, severity, coverage, release/readiness judgment, and the final response;
+- CodeGraph and source-MCP calls;
+- code/file changes and all writes to external systems.
 
-QA Router owns only deterministic profile routing, content-free orchestration state and aggregate metrics. Router не принимает evidence, prompts или model outputs и не выполняет autonomous writes.
+QA Router owns only deterministic profile routing, content-free orchestration state, and aggregate metrics. The router does not accept evidence, prompts, or model outputs and does not perform autonomous writes.
 
 ## Model policy
 
-| Стадия | Model | Reasoning | Ответственность |
+| Stage | Model | Reasoning | Responsibility |
 |---|---|---|---|
-| Triage | `gpt-5.6-luna` | `max` | Выбор fixed review bundle или compatibility profile и выявление evidence gaps |
-| Primary review | `gpt-5.6-terra` | `medium` | Последовательное implementation-aware ревью выбранных профилей |
-| Deep escalation | `gpt-5.6-sol` | `high` | Опциональная read-only проверка сложного или рискованного случая |
-| Synthesis | `gpt-5.6-terra` | `medium` | Сведение результата после проверки host |
+| Triage | `gpt-5.6-luna` | `max` | Select a fixed review bundle or compatibility profile and identify evidence gaps |
+| Primary review | `gpt-5.6-terra` | `medium` | Perform sequential implementation-aware review of the selected profiles |
+| Deep escalation | `gpt-5.6-sol` | `high` | Optional read-only check for a complex or high-risk case |
+| Synthesis | `gpt-5.6-terra` | `medium` | Consolidate the result after host validation |
 
-Router только возвращает следующую policy и transition constraints. Primary host запускает модели в своей среде, проверяет findings и сам принимает финальное решение.
+The router returns only the next policy and transition constraints. The primary host runs the models in its own environment, validates findings, and makes the final decision.
 
 ## Orchestration flow
 
-1. Host вызывает `start_qa_orchestration(task_type)` и получает `run_id`, Luna/max и next action.
-2. После triage host передаёт `advance_qa_orchestration` с одним fixed bundle или одним из семи `ReviewAgent` profiles.
-3. Для bundle host запускает Terra по одному профилю в возвращённом порядке и после каждой роли передаёт её идентификатор в `completed_profile`; Router не пропускает роль и не принимает произвольный порядок.
-4. После последнего Terra profile host либо идёт напрямую в Terra synthesis, либо передаёт fixed `reason_code` и получает optional Sol/high.
-5. После Sol host возвращается к Terra synthesis.
-6. После synthesis состояние становится `awaiting_host_outcome`; host один раз вызывает `record_qa_task_outcome` с тем же `run_id` и статусом `completed`, `partial` или `blocked`. Router переводит сессию в финальный статус.
+1. The host calls `start_qa_orchestration(task_type)` and receives a `run_id`, Luna/max, and the next action.
+2. After triage, the host calls `advance_qa_orchestration` with one fixed bundle or one of the seven `ReviewAgent` profiles.
+3. For a bundle, the host runs Terra once per profile in the returned order and passes the role identifier as `completed_profile` after each stage; the router does not skip roles or accept an arbitrary order.
+4. After the last Terra profile, the host either goes directly to Terra synthesis or supplies one fixed `reason_code` and receives optional Sol/high.
+5. After Sol, the host returns to Terra synthesis.
+6. After synthesis, the state becomes `awaiting_host_outcome`; the host calls `record_qa_task_outcome` once with the same `run_id` and a status of `completed`, `partial`, or `blocked`. The router moves the session to its final status.
 
-Разрешённые переходы:
+Allowed transitions:
 
 ```text
 Luna triage → Terra profile[1] → ... → Terra profile[N]
@@ -43,9 +43,9 @@ Luna triage → Terra profile[1] → ... → Terra profile[N]
                                          Terra synthesis → awaiting host outcome
 ```
 
-Сессии content-free, in-memory, с TTL `1800` секунд и лимитом `100` активных сессий по умолчанию; общий cache bounded, поэтому старые terminal-сессии могут быть вытеснены при создании новых. Unknown run, expired session, illegal/repeated transition и invalid signal отклоняются без изменения состояния. После рестарта host начинает новую сессию.
+Sessions are content-free and in memory, with a default TTL of `1800` seconds and a default limit of `100` active sessions. The shared cache is bounded, so older terminal sessions may be evicted when new sessions are created. Unknown runs, expired sessions, illegal or repeated transitions, and invalid signals are rejected without changing state. After a restart, the host starts a new session.
 
-Обычный status flow для `ordinary_mr`:
+Normal status flow for `ordinary_mr`:
 
 ```text
 Luna / Max → Ordinary MR Review
@@ -56,9 +56,19 @@ Terra / Medium → Synthesis
 Host → Final QA outcome
 ```
 
-`Sol / High → Deep read-only review` появляется только после последнего Terra profile и при одном fixed `reason_code`, затем возвращает поток к Terra synthesis.
+`Sol / High → Deep read-only review` appears only after the last Terra profile and only with one fixed `reason_code`; the flow then returns to Terra synthesis.
 
-## Fixed bundles и имена профилей
+## Visual workflow
+
+### Normal MR review
+
+![QA Route normal MR review](assets/qa-route-normal-review.png)
+
+### Deep review escalation
+
+![QA Route deep review](assets/qa-route-deep-review.png)
+
+## Fixed bundles and profile names
 
 | Bundle | Ordered profiles |
 |---|---|
@@ -78,39 +88,39 @@ Host → Final QA outcome
 | `typescript_reviewer` | `TypeScript Reviewer` |
 | `react_reviewer` | `React Reviewer` |
 
-Faraday — внутреннее отображаемое имя `code_explorer`. Это не отдельный внешний агент, сервис, package или model. Router возвращает только фиксированный идентификатор и порядок, а host запускает Terra для каждой роли.
+Faraday is the internal display name for `code_explorer`. It is not a separate external agent, service, package, or model. The router returns only the fixed identifier and order; the host runs Terra for each role.
 
 ## Review profiles
 
-Используй наиболее узкий подходящий профиль:
+Use the narrowest profile that matches the task:
 
-- `pr_test_analyzer` — test intent, branch coverage, missing regression protection;
-- `code_reviewer` — changed surface, caller impact, contracts and failure paths;
-- `security_reviewer` — auth, authorization, validation, secrets and data exposure;
-- `silent_failure_hunter` — swallowed errors, fallback paths, false success and observability;
-- `code_explorer` — dependency map, callers, data flow and affected surface;
-- `typescript_reviewer` — TypeScript types, async boundaries, serialization and build safety;
-- `react_reviewer` — React state, effects, rendering, props and user-visible behavior.
+- `pr_test_analyzer` — test intent, branch coverage, and missing regression protection;
+- `code_reviewer` — changed surface, caller impact, contracts, and failure paths;
+- `security_reviewer` — authentication, authorization, validation, secrets, and data exposure;
+- `silent_failure_hunter` — swallowed errors, fallback paths, false success, and observability;
+- `code_explorer` — dependency map, callers, data flow, and affected surface;
+- `typescript_reviewer` — TypeScript types, async boundaries, serialization, and build safety;
+- `react_reviewer` — React state, effects, rendering, props, and user-visible behavior.
 
-Каждое ревью должно отделять confirmed findings от hypotheses и unverified runtime/release facts. Пустой или неизвестный profile отклоняется до формирования route.
+Every review must separate confirmed findings from hypotheses and unverified runtime or release facts. An empty or unknown profile is rejected before a route is built.
 
 ## Metrics contract
 
-`record_qa_task_outcome` принимает только content-free поля:
+`record_qa_task_outcome` accepts only content-free fields:
 
 - `task_type`, `outcome`;
 - CodeGraph/source call counters;
-- identified/confirmed/rejected findings и repeated source reads;
-- `deep_model=gpt-5.6-sol` и `deep_reasoning=high` для orchestrated Sol-ветки; duration и token measurements optional;
-- `orchestration_used`, `luna_calls`, `terra_calls`, `sol_calls`, `orchestration_steps_completed`, `orchestration_retries`.
+- identified, confirmed, and rejected findings plus repeated source reads;
+- `deep_model=gpt-5.6-sol` and `deep_reasoning=high` for an orchestrated Sol branch; duration and token measurements are optional;
+- `orchestration_used`, `luna_calls`, `terra_calls`, `sol_calls`, `orchestration_steps_completed`, and `orchestration_retries`.
 
-При `orchestration_used=true` поле `run_id` обязательно. Оно используется только для связывания финального outcome и aggregate counters с in-memory сессией, проверяется относительно выбранной ветки и не сохраняется в JSONL.
+When `orchestration_used=true`, `run_id` is required. It is used only to associate the final outcome and aggregate counters with the in-memory session, is checked against the selected branch, and is not persisted in JSONL.
 
-Orchestration counters неотрицательны и не принимаются как положительные, если orchestration не использовался. Не отправляй issue keys, titles, paths, source text, code, logs, screenshots или generated content. `get_metrics_report(days)` возвращает только агрегаты и data-quality counters.
+Orchestration counters must be non-negative and are not accepted as positive when orchestration was not used. Do not send issue keys, titles, paths, source text, code, logs, screenshots, or generated content. `get_metrics_report(days)` returns aggregates and data-quality counters only.
 
 ## MCP tools
 
-Router должен публиковать ровно:
+The router must publish exactly:
 
 - `prepare_review_route`;
 - `start_qa_orchestration`;
@@ -119,8 +129,8 @@ Router должен публиковать ровно:
 - `record_qa_task_outcome`;
 - `get_metrics_report`.
 
-`read_only=true` и `host_owns_decisions=true` должны сохраняться во всех orchestration states. Не добавляй tool, который генерирует текст, принимает evidence, меняет внешний state, выбирает модель за host или скрыто вызывает другой агент.
+`read_only=true` and `host_owns_decisions=true` must be preserved in every orchestration state. Do not add a tool that generates text, accepts evidence, changes external state, selects a model for the host, or silently calls another agent.
 
 ## Persistence and safety
 
-Сервис не хранит task content, conversation history, source cache или persistent QA memory. При добавлении поля сначала проверь, что его можно агрегировать без раскрытия источника и что финальное решение по-прежнему принимает primary host.
+The service does not store task content, conversation history, a source cache, or persistent QA memory. Before adding a field, verify that it can be aggregated without exposing its source and that the primary host still makes the final decision.

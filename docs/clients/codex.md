@@ -1,23 +1,23 @@
 # Codex setup
 
-Codex подключает QA Router как локальный STDIO MCP-сервер. Launcher использует `.venv` проекта, активный `VIRTUAL_ENV` или установленный `qa-router-mcp` из `PATH`.
+Codex connects QA Router as a local STDIO MCP server. The launcher uses the project's `.venv`, the active `VIRTUAL_ENV`, or an installed `qa-router-mcp` from `PATH`.
 
-## Подключение
+## Connection
 
-Из каталога репозитория получи абсолютный путь:
+From the repository directory, get the absolute path:
 
 ```bash
 pwd
 ```
 
-Добавь сервер:
+Add the server:
 
 ```bash
 codex mcp add qa-router -- \
   /absolute/path/to/qa-router-mcp/scripts/qa-router-mcp
 ```
 
-Или добавь в `$HOME/.codex/config.toml`:
+Or add it to `$HOME/.codex/config.toml`:
 
 ```toml
 [mcp_servers.qa-router]
@@ -27,16 +27,16 @@ startup_timeout_sec = 30
 tool_timeout_sec = 120
 ```
 
-Проверь регистрацию командой `codex mcp list` и перезапусти Codex.
+Verify the registration with `codex mcp list` and restart Codex.
 
-## Инструкции host agent
+## Host-agent instructions
 
-Добавь правила из [`client-rules/generic/QA_ROUTER_INSTRUCTIONS.md`](../../client-rules/generic/QA_ROUTER_INSTRUCTIONS.md) в persistent project instructions или адаптируй их под свои Codex rules. Не устанавливай отдельный routing skill: достаточно MCP-сервера и этих инструкций.
+Add the rules from [`client-rules/generic/QA_ROUTER_INSTRUCTIONS.md`](../../client-rules/generic/QA_ROUTER_INSTRUCTIONS.md) to persistent project instructions, or adapt them to your Codex rules. Do not install a separate routing skill: the MCP server and these instructions are sufficient.
 
-Primary Codex остаётся host и владельцем evidence, решений и внешних действий. Для orchestration используй шесть tools: `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `prepare_review_route`, `record_qa_task_outcome` и `get_metrics_report`.
+Primary Codex remains the host and owner of evidence, decisions, and external actions. Use the six tools for orchestration: `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `prepare_review_route`, `record_qa_task_outcome`, and `get_metrics_report`.
 
-Model policy host-owned: `gpt-5.6-luna/max` делает triage, `gpt-5.6-terra/medium` — primary review и synthesis, а optional `gpt-5.6-sol/high` — read-only deep analysis. Передавай Router только структурированные сигналы; prompts, evidence и model outputs остаются в Codex.
+The model policy is host-owned: `gpt-5.6-luna/max` performs triage, `gpt-5.6-terra/medium` performs primary review and synthesis, and optional `gpt-5.6-sol/high` performs read-only deep analysis. Send the router only structured signals; prompts, evidence, and model outputs remain in Codex.
 
-На Luna выбирай fixed bundle или один compatibility profile. Для обычного MR bundle `ordinary_mr` порядок такой: `code_explorer` (`Faraday — Evidence Investigator`) → `code_reviewer` (`Code Reviewer`) → `pr_test_analyzer` (`Test Analyzer`). После каждой Terra-роли передавай её идентификатор в `completed_profile`; synthesis или Sol доступны только после последней роли. Faraday — внутреннее имя профиля, не отдельный внешний сервис или model. Статусы показывай как `Luna / Max` → `Terra / Medium` по ролям → `Terra / Medium` synthesis → `Host` final outcome; передавай исходный `run_id` в финальный `record_qa_task_outcome`.
+During Luna triage, select a fixed bundle or one compatibility profile. For the ordinary MR bundle, the order is `code_explorer` (`Faraday — Evidence Investigator`) → `code_reviewer` (`Code Reviewer`) → `pr_test_analyzer` (`Test Analyzer`). After every Terra role, pass its identifier as `completed_profile`; synthesis or Sol is available only after the last role. Faraday is an internal profile name, not a separate external service or model. Show statuses as `Luna / Max` → `Terra / Medium` per role → `Terra / Medium` synthesis → `Host` final outcome; pass the original `run_id` to the final `record_qa_task_outcome`.
 
 Reference: [official Codex MCP documentation](https://developers.openai.com/codex/mcp).

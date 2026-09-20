@@ -1,10 +1,10 @@
 # Cursor setup
 
-Cursor подключает QA Router через `mcp.json`. Используй `$HOME/.cursor/mcp.json` для всех проектов или `.cursor/mcp.json` для одного проекта.
+Cursor connects QA Router through `mcp.json`. Use `$HOME/.cursor/mcp.json` for all projects or `.cursor/mcp.json` for one project.
 
-## Подключение
+## Connection
 
-Создай или объедини конфигурацию, не затирая существующие серверы:
+Create or merge the configuration without overwriting existing servers:
 
 ```json
 {
@@ -17,9 +17,9 @@ Cursor подключает QA Router через `mcp.json`. Используй 
 }
 ```
 
-Перезапусти Cursor и проверь, что доступны ровно шесть инструментов QA Router.
+Restart Cursor and verify that exactly six QA Router tools are available.
 
-## Инструкции host agent
+## Host-agent instructions
 
 ```bash
 mkdir -p /absolute/path/to/your-project/.cursor/rules
@@ -27,6 +27,6 @@ cp /absolute/path/to/qa-router-mcp/client-rules/cursor/qa-router.mdc \
   /absolute/path/to/your-project/.cursor/rules/qa-router.mdc
 ```
 
-Правило заставляет Cursor Agent получать evidence, выполнять model stages и принимать QA-решения самостоятельно. Используй `start_qa_orchestration` → Luna выбирает fixed bundle или profile → `advance_qa_orchestration` → `get_qa_orchestration`, а `prepare_review_route` — для каждой роли в фиксированном порядке, а не как отдельный внешний агент. Для `ordinary_mr` порядок: `Faraday — Evidence Investigator` → `Code Reviewer` → `Test Analyzer`; после каждой роли передавай её `completed_profile`, а Sol/synthesis запускай только после последней. Policy: Luna/max для triage, Terra/medium для primary/synthesis и optional Sol/high для read-only escalation. Финальный `record_qa_task_outcome` получает исходный `run_id`.
+The rule makes Cursor Agent obtain evidence, run model stages, and make QA decisions independently. Use `start_qa_orchestration` → Luna selects a fixed bundle or profile → `advance_qa_orchestration` → `get_qa_orchestration`; use `prepare_review_route` for every role in the fixed order, not as a separate external agent. For `ordinary_mr`, the order is `Faraday — Evidence Investigator` → `Code Reviewer` → `Test Analyzer`; after every role, pass its `completed_profile`, and start Sol or synthesis only after the last role. Policy: Luna/max for triage, Terra/medium for primary review and synthesis, and optional Sol/high for read-only escalation. The final `record_qa_task_outcome` receives the original `run_id`.
 
-References: [official Cursor MCP documentation](https://docs.cursor.com/context/model-context-protocol) и [Cursor Rules documentation](https://cursor.com/docs/rules).
+References: [official Cursor MCP documentation](https://docs.cursor.com/context/model-context-protocol) and [Cursor Rules documentation](https://cursor.com/docs/rules).

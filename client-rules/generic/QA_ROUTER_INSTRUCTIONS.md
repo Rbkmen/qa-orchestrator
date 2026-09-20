@@ -1,30 +1,29 @@
 # QA Router host-agent instructions
 
-Используй `qa-router` как детерминированный helper для QA-профиля и обезличенных task metrics. Primary host agent остаётся единственным владельцем evidence, анализа, решений и внешних действий.
+Use `qa-router` as a deterministic helper for QA profiles and anonymized task metrics. The primary host agent remains the sole owner of evidence, analysis, decisions, and external actions.
 
 ## Review routing
 
-- Для implementation-aware QA начни с `start_qa_orchestration`. На Luna выбери один fixed bundle или один compatibility profile и вызови `prepare_review_route` для каждого выбранного профиля:
-  `pr_test_analyzer`, `code_reviewer`, `security_reviewer`, `silent_failure_hunter`, `code_explorer`, `typescript_reviewer` или `react_reviewer`.
-- Доступные bundles: `ordinary_mr` (`code_explorer` → `code_reviewer` → `pr_test_analyzer`), `widget` (`code_explorer` → `react_reviewer` → `typescript_reviewer` → `pr_test_analyzer`), `security` (`code_explorer` → `security_reviewer` → `silent_failure_hunter`), `autotest` (`code_reviewer` → `pr_test_analyzer` → `typescript_reviewer`) и `requirements` (`code_explorer` → `code_reviewer`). Не меняй порядок и не передавай собственный список.
-- Отображаемые имена ролей: `Faraday — Evidence Investigator` = `code_explorer`, `Code Reviewer`, `Test Analyzer`, `Security Reviewer`, `Silent Failure Hunter`, `TypeScript Reviewer`, `React Reviewer`. Faraday — внутреннее имя роли, не внешний сервис или отдельная model.
-- Используй возвращённые `focus`, `required_sections`, `constraints` и `escalation_signals` как рабочий checklist.
-- Выполняй stages по policy: `gpt-5.6-luna/max` для triage, `gpt-5.6-terra/medium` для primary review каждой роли в порядке bundle и synthesis, optional `gpt-5.6-sol/high` для read-only deep analysis. Показывай host status: `Luna / Max → Ordinary MR Review` → `Terra / Medium` по каждой роли → `Terra / Medium → Synthesis` → `Host → Final QA outcome`; при escalation добавляй `Sol / High → Deep read-only review` только после последней роли. После каждой стадии вызывай `advance_qa_orchestration` с structured signal, для каждого Terra profile передавай `completed_profile`, а `get_qa_orchestration` используй для next action.
-- Сам получи Jira/MR/TestRail/monitoring/code evidence, проверь diff и отдели confirmed findings от hypotheses и unverified runtime/release facts.
-- Всегда сохраняй итоговый формат: Findings, Changes, Manual Test Plan, Open Questions / Could Not Verify.
-- Route и orchestration states помечены `read_only=true` и `host_owns_decisions=true`; не трактуй Router как автономного агента и не делегируй ему external writes.
+- For an implementation-aware QA review, start with `start_qa_orchestration`. During Luna triage, select one fixed bundle or one compatibility profile, then call `prepare_review_route` for each selected profile: `pr_test_analyzer`, `code_reviewer`, `security_reviewer`, `silent_failure_hunter`, `code_explorer`, `typescript_reviewer`, or `react_reviewer`.
+- Available bundles are `ordinary_mr` (`code_explorer` → `code_reviewer` → `pr_test_analyzer`), `widget` (`code_explorer` → `react_reviewer` → `typescript_reviewer` → `pr_test_analyzer`), `security` (`code_explorer` → `security_reviewer` → `silent_failure_hunter`), `autotest` (`code_reviewer` → `pr_test_analyzer` → `typescript_reviewer`), and `requirements` (`code_explorer` → `code_reviewer`). Do not change the order or submit a custom list.
+- Role display names are `Faraday — Evidence Investigator` = `code_explorer`, `Code Reviewer`, `Test Analyzer`, `Security Reviewer`, `Silent Failure Hunter`, `TypeScript Reviewer`, and `React Reviewer`. Faraday is an internal role name, not an external service or separate model.
+- Use the returned `focus`, `required_sections`, `constraints`, and `escalation_signals` as the working checklist.
+- Run stages under the policy: `gpt-5.6-luna/max` for triage, `gpt-5.6-terra/medium` for primary review of every role in bundle order and for synthesis, and optional `gpt-5.6-sol/high` for read-only deep analysis. Show host status as `Luna / Max → Ordinary MR Review` → `Terra / Medium` for each role → `Terra / Medium → Synthesis` → `Host → Final QA outcome`; on escalation, add `Sol / High → Deep read-only review` only after the last role. After every stage, call `advance_qa_orchestration` with a structured signal; for each Terra profile, pass `completed_profile`; use `get_qa_orchestration` for the next action.
+- Obtain Jira, MR, TestRail, monitoring, and code evidence yourself, inspect the diff, and separate confirmed findings from hypotheses and unverified runtime or release facts.
+- Always keep the final format: Findings, Changes, Manual Test Plan, Open Questions / Could Not Verify.
+- Routes and orchestration states are marked `read_only=true` and `host_owns_decisions=true`; do not treat the router as an autonomous agent or delegate external writes to it.
 
 ## Optional deep analysis
 
-Для трудного cross-repository reasoning, debugging, security/payment/fraud-sensitive анализа или high-blast-radius edge cases host может запросить optional Sol/high escalation фиксированным `reason_code`. Проверь ответ самостоятельно и не создавай вторую эскалацию автоматически.
+For difficult cross-repository reasoning, debugging, security/payment/fraud-sensitive analysis, or high-blast-radius edge cases, the host may request an optional Sol/high escalation with one fixed `reason_code`. Validate the response yourself and do not create a second escalation automatically.
 
 ## Metrics
 
-- После каждого `completed`, `partial` или `blocked` QA task один раз вызови `record_qa_task_outcome`; для orchestration передай `run_id` из сессии, для обычной задачи оставь его пустым.
-- Передавай только `task_type`, `outcome`, counters вызовов, findings, repeated reads и измеримые `deep_*`/token counters. Для orchestrated Sol обязательно указывай `deep_model=gpt-5.6-sol` и `deep_reasoning=high`.
-- Никогда не передавай issue keys, titles, paths, source text, code, logs, screenshots, prompts или ответы ревью.
-- `get_metrics_report(days)` используй только для агрегированного read-only отчёта.
+- After each QA task with status `completed`, `partial`, or `blocked`, call `record_qa_task_outcome` exactly once; for orchestration, pass the session `run_id`, and for a regular task omit it.
+- Send only `task_type`, `outcome`, call counters, findings counters, repeated reads, and measurable `deep_*`/token counters. For an orchestrated Sol branch, `deep_model=gpt-5.6-sol` and `deep_reasoning=high` are required.
+- Never send issue keys, titles, paths, source text, code, logs, screenshots, prompts, or review responses.
+- Use `get_metrics_report(days)` only for an aggregate read-only report.
 
-Router публикует ровно шесть tools: `prepare_review_route`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `record_qa_task_outcome`, `get_metrics_report`.
+The router publishes exactly six tools: `prepare_review_route`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `record_qa_task_outcome`, and `get_metrics_report`.
 
-Не добавляй persistent QA memory, source cache, learning layer или скрытые вызовы инструментов.
+Do not add persistent QA memory, a source cache, a learning layer, or hidden tool calls.
