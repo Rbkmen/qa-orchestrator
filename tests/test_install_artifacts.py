@@ -69,6 +69,7 @@ def test_operational_artifacts_describe_host_orchestration():
         "gpt-5.6-luna",
         "gpt-5.6-terra",
         "gpt-5.6-sol",
+        "speed=1.0",
         "host_owns_decisions",
     )
     forbidden = (

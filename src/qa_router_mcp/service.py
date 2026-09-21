@@ -80,7 +80,7 @@ class RouterService:
         codegraph_response_tokens: int | None = None,
         source_mcp_response_tokens: int | None = None,
         avoided_source_read_tokens: int | None = None,
-        orchestration_used: bool = False,
+        orchestration_used: bool | None = None,
         luna_calls: int = 0,
         terra_calls: int = 0,
         sol_calls: int = 0,
@@ -88,6 +88,8 @@ class RouterService:
         orchestration_retries: int = 0,
         run_id: str | None = None,
     ) -> QaTaskOutcomeReceipt:
+        if orchestration_used is None:
+            orchestration_used = run_id is not None
         event: dict[str, object] = {
             "task_type": task_type,
             "outcome": outcome,

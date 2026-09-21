@@ -24,7 +24,7 @@ QA Router owns only deterministic profile routing, content-free orchestration st
 | Deep escalation | `gpt-5.6-sol` | `high` | Optional read-only check for a complex or high-risk case |
 | Synthesis | `gpt-5.6-terra` | `medium` | Consolidate the result after host validation |
 
-The router returns only the next policy and transition constraints. The primary host runs the models in its own environment, validates findings, and makes the final decision.
+The router returns only the next policy and transition constraints. Every policy includes the fixed `speed=1.0`; the primary host must preserve it when running the selected model. The primary host runs the models in its own environment, validates findings, and makes the final decision. The router does not invoke or throttle a provider itself.
 
 ## Orchestration flow
 
@@ -114,7 +114,7 @@ Every review must separate confirmed findings from hypotheses and unverified run
 - `deep_model=gpt-5.6-sol` and `deep_reasoning=high` for an orchestrated Sol branch; duration and token measurements are optional;
 - `orchestration_used`, `luna_calls`, `terra_calls`, `sol_calls`, `orchestration_steps_completed`, and `orchestration_retries`.
 
-When `orchestration_used=true`, `run_id` is required. It is used only to associate the final outcome and aggregate counters with the in-memory session, is checked against the selected branch, and is not persisted in JSONL.
+When `run_id` is present, the outcome is treated as orchestrated automatically; `orchestration_used=true` may also be sent explicitly, while an explicit false value is rejected. The opaque identifier is used only to associate the final outcome and aggregate counters with the in-memory session, is checked against the selected branch, and is not persisted in JSONL.
 
 Orchestration counters must be non-negative and are not accepted as positive when orchestration was not used. Do not send issue keys, titles, paths, source text, code, logs, screenshots, or generated content. `get_metrics_report(days)` returns aggregates and data-quality counters only.
 

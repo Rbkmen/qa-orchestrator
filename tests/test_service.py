@@ -198,7 +198,7 @@ def test_metrics_reject_completed_orchestration_without_required_stages(tmp_path
         )
 
 
-def test_service_records_orchestration_counters(tmp_path):
+def test_service_infers_orchestration_from_run_id_and_records_counters(tmp_path):
     service = RouterService.from_settings(data_dir=tmp_path)
     started = service.start_qa_orchestration("ordinary_review")
     primary = service.advance_qa_orchestration(
@@ -234,7 +234,6 @@ def test_service_records_orchestration_counters(tmp_path):
         findings_confirmed=0,
         findings_rejected=0,
         repeated_source_reads=0,
-        orchestration_used=True,
         deep_analysis_used=False,
         luna_calls=1,
         terra_calls=2,

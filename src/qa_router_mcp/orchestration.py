@@ -49,6 +49,7 @@ class ModelPolicy(BaseModel):
 
     model: OrchestrationModel
     reasoning: Literal["medium", "high", "max"]
+    speed: Literal[1.0] = 1.0
 
 
 MODEL_POLICIES = MappingProxyType(
@@ -122,6 +123,8 @@ class AdvanceQaOrchestrationRequest(BaseModel):
         if self.completed_step is OrchestrationStep.TERRA_PRIMARY_REVIEW:
             if self.status == "completed" and self.completed_profile is None:
                 raise ValueError("completed_profile is required after Terra primary review")
+            if self.status != "completed" and self.completed_profile is not None:
+                raise ValueError("completed_profile requires a completed Terra primary review")
         elif self.completed_profile is not None:
             raise ValueError("completed_profile may only be supplied after Terra primary review")
 

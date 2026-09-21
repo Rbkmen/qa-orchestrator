@@ -7,6 +7,7 @@ from qa_router_mcp.contracts import ReviewAgent, ReviewBundle
 from qa_router_mcp.orchestration import (
     MODEL_POLICIES,
     AdvanceQaOrchestrationRequest,
+    ModelPolicy,
     OrchestrationModel,
     OrchestrationReason,
     OrchestrationStatus,
@@ -30,6 +31,13 @@ def test_model_policy_assigns_requested_models_and_reasoning():
         OrchestrationStep.SOL_DEEP_REVIEW,
         OrchestrationStep.TERRA_SYNTHESIS,
     }
+
+
+def test_model_policy_pins_unit_speed():
+    assert {policy.speed for policy in MODEL_POLICIES.values()} == {1.0}
+
+    with pytest.raises(ValidationError):
+        ModelPolicy(model=OrchestrationModel.TERRA, reasoning="medium", speed=1.5)
 
 
 def test_orchestration_session_rejects_disabled_ownership_flags():
@@ -103,6 +111,16 @@ def test_completed_profile_is_rejected_outside_terra():
             completed_step=OrchestrationStep.LUNA_TRIAGE,
             status="completed",
             selected_profile=ReviewAgent.CODE_REVIEWER,
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+        )
+
+
+def test_partial_terra_rejects_ignored_completed_profile():
+    with pytest.raises(ValidationError, match="completed_profile"):
+        AdvanceQaOrchestrationRequest(
+            run_id="qar-0123456789abcdef0123456789abcdef",
+            completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
+            status="partial",
             completed_profile=ReviewAgent.CODE_REVIEWER,
         )
 

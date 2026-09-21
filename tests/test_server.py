@@ -55,6 +55,7 @@ async def test_orchestration_tools_return_no_evidence_fields(tmp_path):
     assert payload["model_policy"] == {
         "model": "gpt-5.6-luna",
         "reasoning": "max",
+        "speed": 1.0,
     }
     assert payload["read_only"] is True
     assert payload["host_owns_decisions"] is True
@@ -182,7 +183,6 @@ async def test_orchestration_tools_complete_each_bundle(tmp_path, bundle: Review
                 "findings_confirmed": 0,
                 "findings_rejected": 0,
                 "repeated_source_reads": 0,
-                "orchestration_used": True,
                 "luna_calls": 1,
                 "terra_calls": len(REVIEW_BUNDLES[bundle]) + 1,
                 "sol_calls": 0,

@@ -82,7 +82,7 @@ def build_server(service: RouterService) -> FastMCP:
         codegraph_response_tokens: int | None = None,
         source_mcp_response_tokens: int | None = None,
         avoided_source_read_tokens: int | None = None,
-        orchestration_used: bool = False,
+        orchestration_used: bool | None = None,
         luna_calls: int = 0,
         terra_calls: int = 0,
         sol_calls: int = 0,

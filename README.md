@@ -11,6 +11,7 @@ QA Router MCP is a small deterministic FastMCP service for host-owned QA reviews
    - `gpt-5.6-terra` + `medium` — primary review of every profile in the fixed order;
    - optional `gpt-5.6-sol` + `high` — read-only deep analysis for one fixed reason;
    - `gpt-5.6-terra` + `medium` — synthesis.
+   Every returned model policy includes `speed=1.0`; the host must keep this value for the selected stage.
 4. The host validates findings, runtime evidence, and limitations, then calls `record_qa_task_outcome` once. For an orchestrated task it passes the same `run_id` so the router can close the session.
 
 The router does not call models, choose severity or release readiness, or perform external writes.
@@ -87,7 +88,7 @@ Luna/max → Terra/profile[1] → ... → Terra/profile[N]
 
 Sessions are kept in process memory only. The default TTL is 1,800 seconds and the maximum is 100 active sessions; the shared cache is also bounded, so older terminal sessions may be evicted when capacity is needed. Repeating the final call is idempotent while its session is retained. After a restart, the host starts a new session. `read_only=true` and `host_owns_decisions=true` are part of every state.
 
-After synthesis, the session waits for the final host outcome. A call to `record_qa_task_outcome` with `orchestration_used=true` must include the `run_id` of the current session; the router associates counters with the actual branch and moves it to `completed`, `partial`, or `blocked`. For a session stopped at an intermediate stage, first pass `partial` or `blocked` to `advance_qa_orchestration`. Repeating the exact same call for the same `run_id` is idempotent; a changed payload is rejected as a conflict. For a regular task without orchestration, omit `run_id`.
+After synthesis, the session waits for the final host outcome. A call to `record_qa_task_outcome` with the `run_id` of the current session is treated as orchestrated automatically; `orchestration_used=true` may be sent explicitly, but must not contradict the `run_id`. The router associates counters with the actual branch and moves it to `completed`, `partial`, or `blocked`. For a session stopped at an intermediate stage, first pass `partial` or `blocked` to `advance_qa_orchestration`. Repeating the exact same call for the same `run_id` is idempotent; a changed payload is rejected as a conflict. For a regular task without orchestration, omit `run_id`.
 
 ### Review profiles
 
