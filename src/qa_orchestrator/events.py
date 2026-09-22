@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -148,8 +149,7 @@ class JsonEventSink:
     def _locked_events(self) -> Iterator[list[dict[str, object]]]:
         if self.path is None:
             raise OSError("metrics path is unavailable")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.parent.chmod(0o700)
+        _prepare_metrics_directory(self.path.parent)
         with _locked_path(self.path, LOCK_EX):
             try:
                 with self.path.open(encoding="utf-8", errors="replace") as metrics:
@@ -185,6 +185,18 @@ def read_metrics_lines(path: Path) -> list[str]:
             return metrics.read().splitlines()
     except FileNotFoundError:
         return []
+
+
+def _prepare_metrics_directory(path: Path) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=False, mode=0o700)
+    except FileExistsError:
+        if path.is_symlink() or not path.is_dir():
+            raise OSError("metrics directory must be a real directory")
+        if stat.S_IMODE(path.stat().st_mode) & 0o077:
+            raise OSError("metrics directory must be private")
+        return
+    path.chmod(0o700)
 
 
 @contextmanager

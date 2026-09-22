@@ -79,12 +79,36 @@ def test_reading_metrics_does_not_create_a_lock_file(tmp_path):
 
 @pytest.mark.skipif(os.name == "nt", reason="metrics permissions use POSIX modes")
 def test_metrics_storage_uses_restricted_permissions(tmp_path):
-    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    data_dir = tmp_path / "metrics"
+    service = OrchestratorService.from_settings(data_dir=data_dir)
 
     _record_minimal_outcome(service)
 
-    assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o700
-    assert stat.S_IMODE((tmp_path / "metrics.jsonl").stat().st_mode) == 0o600
+    assert stat.S_IMODE(data_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((data_dir / "metrics.jsonl").stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="metrics permissions use POSIX modes")
+def test_metrics_do_not_change_existing_shared_data_dir_permissions(tmp_path):
+    data_dir = tmp_path / "shared"
+    data_dir.mkdir()
+    data_dir.chmod(0o755)
+    service = OrchestratorService.from_settings(data_dir=data_dir)
+
+    receipt = service.record_qa_task_outcome(
+        task_type="ordinary_review",
+        outcome="completed",
+        codegraph_calls=0,
+        source_mcp_calls=0,
+        findings_identified=0,
+        findings_confirmed=0,
+        findings_rejected=0,
+        repeated_source_reads=0,
+    )
+
+    assert receipt.status == "unavailable"
+    assert stat.S_IMODE(data_dir.stat().st_mode) == 0o755
+    assert not (data_dir / "metrics.jsonl").exists()
 
 
 def test_concurrent_metrics_writers_preserve_each_event(tmp_path):
