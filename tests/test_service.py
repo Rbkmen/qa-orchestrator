@@ -199,6 +199,81 @@ def test_metrics_reject_completed_orchestration_without_required_stages(tmp_path
         )
 
 
+def test_metrics_explain_missing_orchestration_counters(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review")
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "luna_calls must be >= 1; "
+            "terra_calls must be >= 2; "
+            "orchestration_steps_completed must be >= 3"
+        ),
+    ):
+        service.record_qa_task_outcome(
+            task_type="ordinary_review",
+            outcome="completed",
+            codegraph_calls=0,
+            source_mcp_calls=0,
+            findings_identified=0,
+            findings_confirmed=0,
+            findings_rejected=0,
+            repeated_source_reads=0,
+            run_id=started.run_id,
+        )
+
+
+def test_metrics_explain_bundle_specific_orchestration_counters(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review")
+    current = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            status="completed",
+            selected_bundle=ReviewBundle.AUTOTEST,
+        )
+    )
+
+    for profile in REVIEW_BUNDLES[ReviewBundle.AUTOTEST]:
+        current = service.advance_qa_orchestration(
+            AdvanceQaOrchestrationRequest(
+                run_id=started.run_id,
+                completed_step=current.current_step,
+                status="completed",
+                completed_profile=profile,
+            )
+        )
+    service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=current.current_step,
+            status="completed",
+        )
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="terra_calls must be >= 4; orchestration_steps_completed must be >= 5",
+    ):
+        service.record_qa_task_outcome(
+            task_type="ordinary_review",
+            outcome="completed",
+            codegraph_calls=0,
+            source_mcp_calls=0,
+            findings_identified=0,
+            findings_confirmed=0,
+            findings_rejected=0,
+            repeated_source_reads=0,
+            luna_calls=1,
+            terra_calls=2,
+            sol_calls=0,
+            orchestration_steps_completed=3,
+            run_id=started.run_id,
+        )
+
+
 def test_service_infers_orchestration_from_run_id_and_records_counters(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
     started = service.start_qa_orchestration("ordinary_review")

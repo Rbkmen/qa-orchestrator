@@ -46,7 +46,11 @@ def build_server(service: OrchestratorService) -> FastMCP:
         needs_deep_analysis: bool = False,
         reason_code: OrchestrationReason | None = None,
     ) -> QaOrchestrationSession:
-        """Advance one validated, content-free orchestration transition."""
+        """Advance one validated, content-free orchestration transition.
+
+        Send risk_signals together with the final completed_profile call of
+        Terra primary review, before advancing to synthesis.
+        """
         return service.advance_qa_orchestration(
             AdvanceQaOrchestrationRequest(
                 run_id=run_id,
@@ -105,7 +109,13 @@ def build_server(service: OrchestratorService) -> FastMCP:
         orchestration_retries: int = 0,
         run_id: str | None = None,
     ) -> QaTaskOutcomeReceipt:
-        """Record one content-free outcome owned by the host QA agent."""
+        """Record one content-free outcome owned by the host QA agent.
+
+        When run_id is supplied, include the orchestration stage counters. For
+        a completed bundle with N Terra profiles, the minimum is one Luna
+        call, N+1 Terra calls, and N+2 completed steps, plus one Sol call and
+        one additional step when deep review ran.
+        """
         return service.record_qa_task_outcome(
             task_type=task_type,
             outcome=outcome,

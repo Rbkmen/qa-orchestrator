@@ -99,12 +99,20 @@ def test_deep_reason_requires_fixed_reason_code():
 def test_risk_signals_are_final_terra_only_and_replace_manual_deep_request():
     signals = DeepReviewSignals(high_risk_domain=True, evidence_uncertain=True)
 
-    with pytest.raises(ValidationError, match="completed Terra primary review"):
+    with pytest.raises(ValidationError, match="final Terra primary profile"):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
             completed_step=OrchestrationStep.LUNA_TRIAGE,
             status="completed",
             selected_profile=ReviewAgent.CODE_REVIEWER,
+            risk_signals=signals,
+        )
+
+    with pytest.raises(ValidationError, match="final Terra primary profile"):
+        AdvanceQaOrchestrationRequest(
+            run_id="qar-0123456789abcdef0123456789abcdef",
+            completed_step=OrchestrationStep.TERRA_SYNTHESIS,
+            status="completed",
             risk_signals=signals,
         )
 
@@ -116,6 +124,16 @@ def test_risk_signals_are_final_terra_only_and_replace_manual_deep_request():
             completed_profile=ReviewAgent.CODE_REVIEWER,
             risk_signals=signals,
             needs_deep_analysis=True,
+        )
+
+
+def test_risk_signals_require_a_completed_profile():
+    with pytest.raises(ValidationError, match="completed_profile"):
+        AdvanceQaOrchestrationRequest(
+            run_id="qar-0123456789abcdef0123456789abcdef",
+            completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
+            status="completed",
+            risk_signals=DeepReviewSignals(cross_system_scope=True),
         )
 
 

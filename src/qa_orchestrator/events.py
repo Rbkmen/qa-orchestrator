@@ -347,6 +347,44 @@ def valid_qa_task_metrics(event: dict[str, object]) -> bool:
     ]
 
 
+def qa_task_metric_errors(event: dict[str, object]) -> list[str]:
+    """Return actionable explanations for the common metric invariants."""
+    errors: list[str] = []
+
+    if event.get("orchestration_used") is True and event.get("outcome") == "completed":
+        for field, minimum in (
+            ("luna_calls", 1),
+            ("terra_calls", 2),
+            ("orchestration_steps_completed", 3),
+        ):
+            value = event.get(field, 0)
+            if type(value) is int and value < minimum:
+                errors.append(f"{field} must be >= {minimum}")
+
+    if (
+        type(event.get("findings_confirmed")) is int
+        and type(event.get("findings_rejected")) is int
+        and type(event.get("findings_identified")) is int
+        and event["findings_confirmed"] + event["findings_rejected"]
+        > event["findings_identified"]
+    ):
+        errors.append("findings_confirmed + findings_rejected must be <= findings_identified")
+
+    if (
+        type(event.get("repeated_source_reads")) is int
+        and type(event.get("source_mcp_calls")) is int
+        and event["repeated_source_reads"] > event["source_mcp_calls"]
+    ):
+        errors.append("repeated_source_reads must be <= source_mcp_calls")
+
+    if event.get("orchestration_used") is True and (
+        (event.get("sol_calls", 0) > 0) != (event.get("deep_analysis_used") is True)
+    ):
+        errors.append("sol_calls must be positive exactly when deep_analysis_used is true")
+
+    return errors or ["one or more metric values have an invalid type or value"]
+
+
 def _parse_events(metrics: IO[str]) -> list[dict[str, object]]:
     events: list[dict[str, object]] = []
     for line in metrics:

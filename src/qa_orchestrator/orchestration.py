@@ -217,7 +217,9 @@ class AdvanceQaOrchestrationRequest(BaseModel):
                 self.completed_step is not OrchestrationStep.TERRA_PRIMARY_REVIEW
                 or self.status != "completed"
             ):
-                raise ValueError("risk signals require a completed Terra primary review")
+                raise ValueError(
+                    "risk signals must be sent with the final Terra primary profile"
+                )
             if self.needs_deep_analysis or self.reason_code is not None:
                 raise ValueError("risk signals cannot be combined with a manual deep request")
 
@@ -500,7 +502,9 @@ class QaOrchestrator:
             if request.needs_deep_analysis and not is_last_profile:
                 raise OrchestrationError("deep analysis requires the final review profile")
             if request.risk_signals is not None and not is_last_profile:
-                raise OrchestrationError("risk signals require the final review profile")
+                raise OrchestrationError(
+                    "risk signals must be sent with the final Terra primary profile"
+                )
 
             completed_profiles = [*session.completed_profiles, expected_profile]
             if not is_last_profile:

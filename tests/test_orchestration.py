@@ -226,6 +226,35 @@ def test_structured_signals_can_explicitly_skip_sol():
     assert session.deep_assessment.should_escalate is False
 
 
+def test_structured_signals_are_sent_with_the_final_bundle_profile():
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review")
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.LUNA_TRIAGE,
+        status="completed",
+        selected_bundle=ReviewBundle.AUTOTEST,
+    )
+
+    profiles = REVIEW_BUNDLES[ReviewBundle.AUTOTEST]
+    for index, profile in enumerate(profiles):
+        session = orchestrator.advance(
+            run_id=session.run_id,
+            completed_step=session.current_step,
+            status="completed",
+            completed_profile=profile,
+            risk_signals=(
+                DeepReviewSignals(cross_system_scope=True)
+                if index == len(profiles) - 1
+                else None
+            ),
+        )
+
+    assert session.current_step is OrchestrationStep.TERRA_SYNTHESIS
+    assert session.deep_assessment is not None
+    assert session.deep_assessment.should_escalate is False
+
+
 @pytest.mark.parametrize("profile", list(ReviewAgent))
 def test_all_review_profiles_are_retained_after_triage(profile: ReviewAgent):
     orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)

@@ -126,7 +126,7 @@ Advances one valid state transition using structured, content-free signals only:
 - step status: `completed`, `partial`, or `blocked`;
 - exactly one selected fixed bundle or one `ReviewAgent` after Luna triage;
 - `completed_profile` after each completed Terra primary profile; the orchestrator requires the current profile and the fixed bundle order;
-- `risk_signals` after the final Terra primary profile; the orchestrator applies the fixed deep-review rules and returns a content-free assessment;
+- `risk_signals` in the transition that completes the final Terra primary profile; the orchestrator applies the fixed deep-review rules and returns a content-free assessment;
 - `needs_deep_analysis=true` plus one fixed reason code remains available for compatibility;
 - optional reason code from a fixed enum such as `evidence_gap`, `cross_repository`, `security_sensitive`, `payment_sensitive`, `root_cause`, or `high_blast_radius` on the compatibility path.
 

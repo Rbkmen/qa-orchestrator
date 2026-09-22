@@ -11,7 +11,12 @@ from qa_orchestrator.contracts import (
     ReviewAgent,
     ReviewRoute,
 )
-from qa_orchestrator.events import EventSink, JsonEventSink, valid_qa_task_metrics
+from qa_orchestrator.events import (
+    EventSink,
+    JsonEventSink,
+    qa_task_metric_errors,
+    valid_qa_task_metrics,
+)
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
     OrchestrationModel,
@@ -148,7 +153,10 @@ class OrchestratorService:
             if orchestration_used or value != 0:
                 event[field] = value
         if not valid_qa_task_metrics(event):
-            raise ValueError("QA task metrics are inconsistent")
+            raise ValueError(
+                "QA task metrics are inconsistent: "
+                + "; ".join(qa_task_metric_errors(event))
+            )
         if orchestration_used and run_id is None:
             raise ValueError("run_id is required when orchestration_used is true")
         if run_id is not None and not orchestration_used:
@@ -163,11 +171,20 @@ class OrchestratorService:
                 if event["task_type"] != session.task_type:
                     raise ValueError("task_type does not match run_id")
             if not valid_qa_task_metrics(event):
-                raise ValueError("QA task metrics are inconsistent")
+                raise ValueError(
+                    "QA task metrics are inconsistent: "
+                    + "; ".join(qa_task_metric_errors(event))
+                )
             fingerprint = _outcome_fingerprint(event)
             if run_id is not None:
-                if not self._valid_orchestration_metrics(event, session, outcome):
-                    raise ValueError("QA task metrics are inconsistent")
+                orchestration_errors = self._orchestration_metric_errors(
+                    event, session, outcome
+                )
+                if orchestration_errors:
+                    raise ValueError(
+                        "QA task metrics are inconsistent: "
+                        + "; ".join(orchestration_errors)
+                    )
                 if session.status in {
                     OrchestrationStatus.COMPLETED,
                     OrchestrationStatus.PARTIAL,
@@ -191,37 +208,42 @@ class OrchestratorService:
             return receipt
 
     @staticmethod
-    def _valid_orchestration_metrics(
+    def _orchestration_metric_errors(
         event: dict[str, object],
         session: QaOrchestrationSession,
         outcome: QaTaskOutcome,
-    ) -> bool:
+    ) -> list[str]:
+        errors: list[str] = []
         expected_recommended, expected_reasons = OrchestratorService._deep_escalation_metrics(session)
         if (
             event.get("deep_escalation_recommended") is not expected_recommended
             or event.get("deep_escalation_reason_codes") != expected_reasons
         ):
-            return False
+            errors.append("deep escalation metadata does not match the orchestration state")
         deep_branch_used = session.deep_reason_code is not None
         if (event["sol_calls"] > 0) != deep_branch_used:
-            return False
+            errors.append("sol_calls does not match the deep-review branch")
         if deep_branch_used and (
             event.get("deep_model") != OrchestrationModel.SOL.value
             or event.get("deep_reasoning") != "high"
         ):
-            return False
+            errors.append("deep_model and deep_reasoning must describe the Sol stage")
         if outcome != "completed":
-            return True
+            return errors
 
         required_terra_calls = len(session.review_profiles) + 1
         required_steps = len(session.review_profiles) + 2 + int(deep_branch_used)
-        return (
-            event["deep_analysis_used"] is deep_branch_used
-            and event["luna_calls"] >= 1
-            and event["terra_calls"] >= required_terra_calls
-            and event["sol_calls"] >= int(deep_branch_used)
-            and event["orchestration_steps_completed"] >= required_steps
-        )
+        if event["deep_analysis_used"] is not deep_branch_used:
+            errors.append(f"deep_analysis_used must be {deep_branch_used}")
+        if event["luna_calls"] < 1:
+            errors.append("luna_calls must be >= 1")
+        if event["terra_calls"] < required_terra_calls:
+            errors.append(f"terra_calls must be >= {required_terra_calls}")
+        if event["sol_calls"] < int(deep_branch_used):
+            errors.append(f"sol_calls must be >= {int(deep_branch_used)}")
+        if event["orchestration_steps_completed"] < required_steps:
+            errors.append(f"orchestration_steps_completed must be >= {required_steps}")
+        return errors
 
     @staticmethod
     def _deep_escalation_metrics(

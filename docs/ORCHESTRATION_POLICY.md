@@ -32,7 +32,7 @@ The orchestrator returns only the next policy and transition constraints. Every 
 1. The host calls `start_qa_orchestration(task_type)` and receives a `run_id`, Luna/max, and the next action.
 2. After triage, the host calls `advance_qa_orchestration` with one fixed bundle or one of the seven `ReviewAgent` profiles.
 3. For a bundle, the host runs Terra once per profile in the returned order and passes the role identifier as `completed_profile` after each stage; the orchestrator does not skip roles or accept an arbitrary order.
-4. After the last Terra profile, the host supplies structured `risk_signals`; the orchestrator applies the fixed deep-review rules and either goes directly to Terra synthesis or returns optional Sol/high with the derived reason codes.
+4. In the same transition that completes the last Terra profile, the host may supply structured `risk_signals`; the orchestrator applies the fixed deep-review rules and either goes directly to Terra synthesis or returns optional Sol/high with the derived reason codes. Do not send `risk_signals` on the later synthesis transition.
 5. After Sol, the host returns to Terra synthesis.
 6. After synthesis, the state becomes `awaiting_host_outcome`; the host calls `record_qa_task_outcome` once with the same `run_id` and a status of `completed`, `partial`, or `blocked`. The orchestrator moves the session to its final status.
 
@@ -155,6 +155,7 @@ Every review must separate confirmed findings from hypotheses and unverified run
 - identified, confirmed, and rejected findings plus repeated source reads;
 - `deep_model=gpt-5.6-sol` and `deep_reasoning=high` for an orchestrated Sol branch; duration and token measurements are optional;
 - `orchestration_used`, `luna_calls`, `terra_calls`, `sol_calls`, `orchestration_steps_completed`, and `orchestration_retries`.
+- For a completed bundle with `N` Terra profiles, the minimum counters are `luna_calls=1`, `terra_calls=N+1`, and `orchestration_steps_completed=N+2`; add one Sol call and one step when deep review ran.
 - `deep_escalation_recommended` and fixed `deep_escalation_reason_codes` for orchestrated tasks.
 - optional per-stage token counters: `luna_input_tokens`, `luna_output_tokens`, `terra_primary_input_tokens`, `terra_primary_output_tokens`, `deep_input_tokens`, `deep_output_tokens`, `terra_synthesis_input_tokens`, and `terra_synthesis_output_tokens`;
 - optional scope counters: `evidence_packet_tokens`, `merge_requests_count`, and `repositories_count`;

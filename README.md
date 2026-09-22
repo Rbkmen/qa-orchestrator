@@ -53,7 +53,7 @@ Terra / Medium → Synthesis
 Host → Final QA outcome
 ```
 
-After the final primary-review role, the host sends boolean `risk_signals`. The orchestrator inserts `Sol / High → Deep read-only review` before synthesis when one of the fixed escalation rules matches. It returns the matched rules and fixed reason codes as `deep_assessment`; raw evidence never enters the orchestrator.
+With the final primary-review role, the host may send boolean `risk_signals` in the same `advance_qa_orchestration` call as the final `completed_profile`. The orchestrator inserts `Sol / High → Deep read-only review` before synthesis when one of the fixed escalation rules matches. Do not send `risk_signals` on the later synthesis transition. It returns the matched rules and fixed reason codes as `deep_assessment`; raw evidence never enters the orchestrator.
 
 Deep-review rules:
 
@@ -173,6 +173,8 @@ By default, metrics are written to `$HOME/.qa-orchestrator/metrics.jsonl`.
 For an orchestrated task, use the `run_id` returned by `start_qa_orchestration`; the opaque identifier itself is not written to the JSONL metric.
 
 Values must be non-negative and internally consistent. JSONL contains no issue keys, paths, source text, code, logs, prompts, or model responses. The report is available through MCP or locally:
+
+For a completed bundle with `N` Terra profiles, the minimum orchestration counters are `luna_calls=1`, `terra_calls=N+1` (primary profiles plus synthesis), `sol_calls=0`, and `orchestration_steps_completed=N+2`. If the Sol branch runs, use `sol_calls=1` and add one to `orchestration_steps_completed`.
 
 ```bash
 uv run qa-orchestrator-report
