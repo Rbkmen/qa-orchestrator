@@ -1,4 +1,7 @@
+from typing import Annotated, Literal
+
 from fastmcp import FastMCP
+from pydantic import AfterValidator, Field
 
 from qa_orchestrator.config import Settings
 from qa_orchestrator.contracts import (
@@ -17,34 +20,69 @@ from qa_orchestrator.orchestration import (
     OrchestrationStep,
     QaOrchestrationSession,
 )
-from qa_orchestrator.report import summarize_events
+from qa_orchestrator.report import MetricsReport, summarize_events
 from qa_orchestrator.service import OrchestratorService
+
+READ_ONLY_TOOL_ANNOTATIONS = {
+    "readOnlyHint": True,
+    "idempotentHint": True,
+    "openWorldHint": False,
+}
+STATE_TOOL_ANNOTATIONS = {
+    "readOnlyHint": False,
+    "destructiveHint": False,
+    "idempotentHint": False,
+    "openWorldHint": False,
+}
+RunId = Annotated[str, Field(pattern=r"^qar-[0-9a-f]{32}$")]
+NonNegativeInt = Annotated[int, Field(ge=0)]
+SolModel = Literal["gpt-5.6-sol"]
+SolReasoning = Literal["high"]
+
+
+def _validate_positive_days(value: int) -> int:
+    if value < 1:
+        raise ValueError("days must be positive")
+    return value
+
+
+PositiveDays = Annotated[
+    int,
+    AfterValidator(_validate_positive_days),
+    Field(json_schema_extra={"minimum": 1}),
+]
 
 
 def build_server(service: OrchestratorService) -> FastMCP:
     mcp = FastMCP(name="qa-orchestrator")
 
-    @mcp.tool
+    @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def prepare_review_route(agent_profile: ReviewAgent) -> ReviewRoute:
         """Return deterministic instructions for one read-only QA review profile."""
         return service.prepare_review_route(agent_profile)
 
-    @mcp.tool
+    @mcp.tool(annotations=STATE_TOOL_ANNOTATIONS)
     def start_qa_orchestration(task_type: QaTaskType) -> QaOrchestrationSession:
         """Start a content-free, host-owned QA orchestration session."""
         return service.start_qa_orchestration(task_type)
 
-    @mcp.tool
+    @mcp.tool(annotations=STATE_TOOL_ANNOTATIONS)
     def advance_qa_orchestration(
-        run_id: str,
+        run_id: RunId,
         completed_step: OrchestrationStep,
         status: QaTaskOutcome,
         selected_bundle: ReviewBundle | None = None,
         selected_profile: ReviewAgent | None = None,
         completed_profile: ReviewAgent | None = None,
         risk_signals: DeepReviewSignals | None = None,
-        needs_deep_analysis: bool = False,
-        reason_code: OrchestrationReason | None = None,
+        needs_deep_analysis: Annotated[
+            bool,
+            Field(description="Legacy compatibility input; prefer risk_signals."),
+        ] = False,
+        reason_code: Annotated[
+            OrchestrationReason | None,
+            Field(description="Legacy compatibility input; prefer risk_signals."),
+        ] = None,
     ) -> QaOrchestrationSession:
         """Advance one validated, content-free orchestration transition.
 
@@ -65,49 +103,49 @@ def build_server(service: OrchestratorService) -> FastMCP:
             )
         )
 
-    @mcp.tool
-    def get_qa_orchestration(run_id: str) -> QaOrchestrationSession:
+    @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
+    def get_qa_orchestration(run_id: RunId) -> QaOrchestrationSession:
         """Read the current content-free orchestration state."""
         return service.get_qa_orchestration(run_id)
 
-    @mcp.tool
+    @mcp.tool(annotations=STATE_TOOL_ANNOTATIONS)
     def record_qa_task_outcome(
         task_type: QaTaskType,
         outcome: QaTaskOutcome,
-        codegraph_calls: int,
-        source_mcp_calls: int,
-        findings_identified: int,
-        findings_confirmed: int,
-        findings_rejected: int,
-        repeated_source_reads: int,
+        codegraph_calls: NonNegativeInt,
+        source_mcp_calls: NonNegativeInt,
+        findings_identified: NonNegativeInt,
+        findings_confirmed: NonNegativeInt,
+        findings_rejected: NonNegativeInt,
+        repeated_source_reads: NonNegativeInt,
         deep_analysis_used: bool = False,
-        deep_model: str | None = None,
-        deep_reasoning: str | None = None,
-        deep_duration_ms: int | None = None,
-        deep_input_tokens: int | None = None,
-        deep_output_tokens: int | None = None,
-        deep_findings_identified: int | None = None,
-        deep_findings_new_confirmed: int | None = None,
-        deep_findings_rejected: int | None = None,
-        luna_input_tokens: int | None = None,
-        luna_output_tokens: int | None = None,
-        terra_primary_input_tokens: int | None = None,
-        terra_primary_output_tokens: int | None = None,
-        terra_synthesis_input_tokens: int | None = None,
-        terra_synthesis_output_tokens: int | None = None,
-        evidence_packet_tokens: int | None = None,
-        merge_requests_count: int | None = None,
-        repositories_count: int | None = None,
-        codegraph_response_tokens: int | None = None,
-        source_mcp_response_tokens: int | None = None,
-        avoided_source_read_tokens: int | None = None,
+        deep_model: SolModel | None = None,
+        deep_reasoning: SolReasoning | None = None,
+        deep_duration_ms: NonNegativeInt | None = None,
+        deep_input_tokens: NonNegativeInt | None = None,
+        deep_output_tokens: NonNegativeInt | None = None,
+        deep_findings_identified: NonNegativeInt | None = None,
+        deep_findings_new_confirmed: NonNegativeInt | None = None,
+        deep_findings_rejected: NonNegativeInt | None = None,
+        luna_input_tokens: NonNegativeInt | None = None,
+        luna_output_tokens: NonNegativeInt | None = None,
+        terra_primary_input_tokens: NonNegativeInt | None = None,
+        terra_primary_output_tokens: NonNegativeInt | None = None,
+        terra_synthesis_input_tokens: NonNegativeInt | None = None,
+        terra_synthesis_output_tokens: NonNegativeInt | None = None,
+        evidence_packet_tokens: NonNegativeInt | None = None,
+        merge_requests_count: NonNegativeInt | None = None,
+        repositories_count: NonNegativeInt | None = None,
+        codegraph_response_tokens: NonNegativeInt | None = None,
+        source_mcp_response_tokens: NonNegativeInt | None = None,
+        avoided_source_read_tokens: NonNegativeInt | None = None,
         orchestration_used: bool | None = None,
-        luna_calls: int = 0,
-        terra_calls: int = 0,
-        sol_calls: int = 0,
-        orchestration_steps_completed: int = 0,
-        orchestration_retries: int = 0,
-        run_id: str | None = None,
+        luna_calls: NonNegativeInt = 0,
+        terra_calls: NonNegativeInt = 0,
+        sol_calls: NonNegativeInt = 0,
+        orchestration_steps_completed: NonNegativeInt = 0,
+        orchestration_retries: NonNegativeInt = 0,
+        run_id: RunId | None = None,
     ) -> QaTaskOutcomeReceipt:
         """Record one content-free outcome owned by the host QA agent.
 
@@ -155,8 +193,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
             run_id=run_id,
         )
 
-    @mcp.tool
-    def get_metrics_report(days: int = 7) -> dict[str, object]:
+    @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
+    def get_metrics_report(days: PositiveDays = 7) -> MetricsReport:
         """Read content-free QA task metrics for a positive time window."""
         if days < 1:
             raise ValueError("days must be positive")
@@ -164,7 +202,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
             lines = read_metrics_lines(service.settings.metrics_path)
         except OSError as exc:
             raise RuntimeError("metrics_unavailable") from exc
-        return summarize_events(lines, days=days)
+        return MetricsReport.model_validate(summarize_events(lines, days=days))
 
     return mcp
 

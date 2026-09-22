@@ -153,7 +153,7 @@ Every review must separate confirmed findings from hypotheses and unverified run
 - `task_type`, `outcome`;
 - CodeGraph/source call counters;
 - identified, confirmed, and rejected findings plus repeated source reads;
-- `deep_model=gpt-5.6-sol` and `deep_reasoning=high` for an orchestrated Sol branch; duration and token measurements are optional;
+- `deep_model=gpt-5.6-sol` and `deep_reasoning=high` after an orchestrated Sol branch actually runs; if escalation is selected but the task stops before Sol starts, use `sol_calls=0` and omit those fields. Duration and token measurements are optional;
 - `orchestration_used`, `luna_calls`, `terra_calls`, `sol_calls`, `orchestration_steps_completed`, and `orchestration_retries`.
 - For a completed bundle with `N` Terra profiles, the minimum counters are `luna_calls=1`, `terra_calls=N+1`, and `orchestration_steps_completed=N+2`; add one Sol call and one step when deep review ran.
 - `deep_escalation_recommended` and fixed `deep_escalation_reason_codes` for orchestrated tasks.

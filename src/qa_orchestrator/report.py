@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 from os import environ
 from pathlib import Path
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from qa_orchestrator.events import (
     DEEP_VALUE_COUNTERS,
     MODEL_TOKEN_COUNTERS,
@@ -15,6 +17,96 @@ from qa_orchestrator.events import (
     read_metrics_lines,
     valid_qa_task_metrics,
 )
+
+
+class _StrictReportModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class DeepEscalationReport(_StrictReportModel):
+    recommended_tasks: int
+    by_reason: dict[str, int]
+
+
+class ModelTokenTotals(_StrictReportModel):
+    input: int
+    output: int
+
+
+class ModelTokensReport(_StrictReportModel):
+    luna: ModelTokenTotals
+    terra_primary: ModelTokenTotals
+    sol: ModelTokenTotals
+    terra_synthesis: ModelTokenTotals
+    complete_measurement_tasks: int
+
+
+class ScopeReport(_StrictReportModel):
+    evidence_packet_tokens: int
+    merge_requests: int
+    repositories: int
+
+
+class DeepValueReport(_StrictReportModel):
+    measurement_tasks: int
+    identified: int
+    new_confirmed: int
+    rejected: int
+
+
+class CodeGraphReport(_StrictReportModel):
+    tasks: int
+    calls: int
+    response_tokens: int
+    avoided_source_read_tokens: int
+    estimated_source_token_savings_pct: float | None
+
+
+class OrchestrationReport(_StrictReportModel):
+    tasks: int
+    luna_calls: int
+    terra_calls: int
+    sol_calls: int
+    steps_completed: int
+    retries: int
+
+
+class QaTasksReport(_StrictReportModel):
+    events: int
+    outcomes: dict[str, int]
+    by_task_type: dict[str, int]
+    codegraph_calls: int
+    source_mcp_calls: int
+    deep_tasks: int
+    deep_escalation: DeepEscalationReport
+    deep_by_model: dict[str, int]
+    deep_by_reasoning: dict[str, int]
+    deep_duration_ms: int
+    deep_input_tokens: int
+    deep_output_tokens: int
+    model_tokens: ModelTokensReport
+    scope: ScopeReport
+    deep_value: DeepValueReport
+    findings_identified: int
+    findings_confirmed: int
+    findings_rejected: int
+    repeated_source_reads: int
+    codegraph: CodeGraphReport
+    source_mcp_response_tokens: int
+    complete_token_measurement_tasks: int
+    orchestration: OrchestrationReport
+
+
+class DataQualityReport(_StrictReportModel):
+    task_events: int
+    complete_token_measurement_rate: float | None
+    complete_model_token_measurement_rate: float | None
+
+
+class MetricsReport(_StrictReportModel):
+    period_days: int = Field(ge=1)
+    qa_tasks: QaTasksReport
+    data_quality: DataQualityReport
 
 
 def summarize_events(lines: Iterable[str], days: int = 7) -> dict[str, object]:

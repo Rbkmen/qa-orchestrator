@@ -8,6 +8,16 @@ from qa_orchestrator.server import build_server
 from qa_orchestrator.service import OrchestratorService
 
 
+def _schema_contains_const(schema, value):
+    if schema.get("const") == value:
+        return True
+    return any(
+        _schema_contains_const(branch, value)
+        for branch_name in ("anyOf", "oneOf", "allOf")
+        for branch in schema.get(branch_name, [])
+    )
+
+
 @pytest.mark.asyncio
 async def test_server_exposes_six_tools(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
@@ -23,6 +33,59 @@ async def test_server_exposes_six_tools(tmp_path):
         "advance_qa_orchestration",
         "get_qa_orchestration",
     }
+
+
+@pytest.mark.asyncio
+async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+
+    async with Client(build_server(service)) as client:
+        tools = {tool.name: tool for tool in await client.list_tools()}
+
+    for name in (
+        "prepare_review_route",
+        "get_qa_orchestration",
+        "get_metrics_report",
+    ):
+        annotations = tools[name].annotations
+        assert annotations is not None
+        assert annotations.readOnlyHint is True
+        assert annotations.idempotentHint is True
+        assert annotations.openWorldHint is False
+
+    for name in (
+        "start_qa_orchestration",
+        "advance_qa_orchestration",
+        "record_qa_task_outcome",
+    ):
+        annotations = tools[name].annotations
+        assert annotations is not None
+        assert annotations.readOnlyHint is False
+        assert annotations.openWorldHint is False
+
+    run_id_schema = tools["get_qa_orchestration"].inputSchema["properties"]["run_id"]
+    assert run_id_schema["pattern"] == r"^qar-[0-9a-f]{32}$"
+    assert (
+        tools["get_metrics_report"].inputSchema["properties"]["days"]["minimum"] == 1
+    )
+    assert (
+        tools["record_qa_task_outcome"].inputSchema["properties"]["codegraph_calls"][
+            "minimum"
+        ]
+        == 0
+    )
+    assert _schema_contains_const(
+        tools["record_qa_task_outcome"].inputSchema["properties"]["deep_model"],
+        "gpt-5.6-sol",
+    )
+    assert _schema_contains_const(
+        tools["record_qa_task_outcome"].inputSchema["properties"]["deep_reasoning"],
+        "high",
+    )
+
+    report_schema = tools["get_metrics_report"].outputSchema
+    assert report_schema["properties"]["qa_tasks"]["additionalProperties"] is False
+    assert report_schema["properties"]["data_quality"]["additionalProperties"] is False
 
 
 @pytest.mark.asyncio

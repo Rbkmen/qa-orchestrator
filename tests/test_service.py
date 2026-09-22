@@ -103,6 +103,30 @@ def test_service_rejects_inconsistent_task_outcome(tmp_path):
         )
 
 
+@pytest.mark.parametrize("missing_field", ["deep_model", "deep_reasoning"])
+def test_service_requires_deep_metadata(tmp_path, missing_field):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    deep_metadata = {
+        "deep_model": "gpt-5.6-sol",
+        "deep_reasoning": "high",
+    }
+    deep_metadata.pop(missing_field)
+
+    with pytest.raises(ValueError, match="QA task metrics are inconsistent"):
+        service.record_qa_task_outcome(
+            task_type="ordinary_review",
+            outcome="completed",
+            codegraph_calls=0,
+            source_mcp_calls=0,
+            findings_identified=0,
+            findings_confirmed=0,
+            findings_rejected=0,
+            repeated_source_reads=0,
+            deep_analysis_used=True,
+            **deep_metadata,
+        )
+
+
 def test_service_rejects_unapproved_deep_model(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
@@ -661,6 +685,61 @@ def test_service_rejects_metrics_from_wrong_orchestration_branch(tmp_path):
             orchestration_steps_completed=1,
             run_id=started.run_id,
         )
+
+
+@pytest.mark.parametrize("terminal_outcome", ["partial", "blocked"])
+def test_service_records_terminal_outcome_before_sol_starts(
+    tmp_path, terminal_outcome
+):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review")
+    primary = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            status="completed",
+            selected_profile="code_reviewer",
+        )
+    )
+    deep = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=primary.current_step,
+            status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+            risk_signals=DeepReviewSignals(
+                high_risk_domain=True,
+                evidence_uncertain=True,
+            ),
+        )
+    )
+    terminal = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=deep.current_step,
+            status=terminal_outcome,
+        )
+    )
+
+    assert terminal.status.value == terminal_outcome
+    receipt = service.record_qa_task_outcome(
+        task_type="ordinary_review",
+        outcome=terminal_outcome,
+        codegraph_calls=0,
+        source_mcp_calls=0,
+        findings_identified=0,
+        findings_confirmed=0,
+        findings_rejected=0,
+        repeated_source_reads=0,
+        orchestration_used=True,
+        luna_calls=1,
+        terra_calls=1,
+        sol_calls=0,
+        orchestration_steps_completed=2,
+        run_id=started.run_id,
+    )
+
+    assert receipt.status == "recorded"
 
 
 def test_service_does_not_duplicate_finalized_orchestration_metric(tmp_path):

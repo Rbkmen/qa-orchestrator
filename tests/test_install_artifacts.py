@@ -10,6 +10,38 @@ from fastmcp.client.transports import StdioTransport
 
 ROOT = Path(__file__).parents[1]
 LAUNCHER = ROOT / "scripts/qa-orchestrator"
+CLIENT_RULE_FILES = tuple(
+    sorted(
+        path
+        for pattern in ("*.md", "*.mdc")
+        for path in (ROOT / "client-rules").rglob(pattern)
+    )
+)
+CLIENT_RULE_CONTRACT = {
+    "orchestration entry": (r"\bstart_qa_orchestration\b",),
+    "route preparation": (r"\bprepare_review_route\b",),
+    "state read": (r"\bget_qa_orchestration\b",),
+    "content-free metrics": (r"\brecord_qa_task_outcome\b",),
+    "single route selection": (r"exactly one.*(?:bundle|profile)",),
+    "Luna policy": (r"gpt-5\.6-luna", r"luna/max"),
+    "Terra policy": (r"gpt-5\.6-terra", r"terra/medium"),
+    "Sol policy": (r"gpt-5\.6-sol", r"sol/high"),
+    "fixed speed": (r"speed=1\.0",),
+    "risk signals": (r"\brisk_signals\b",),
+    "completed profile": (r"\bcompleted_profile\b",),
+    "read-only boundary": (r"read_only=true",),
+    "host-owned decisions": (r"host_owns_decisions=true",),
+    "host-owned evidence": (
+        r"host owns evidence",
+        r"owns evidence.*(?:decisions|external writes)",
+        r"owner of evidence",
+    ),
+    "no raw orchestration input": (
+        r"do not pass evidence, prompts, or model outputs",
+        r"pass no raw evidence.*model output",
+        r"does not accept evidence, prompts, or model outputs",
+    ),
+}
 
 
 def test_launcher_is_executable_valid_shell():
@@ -31,6 +63,23 @@ def test_launcher_forwards_metrics_overrides():
     assert 'QA_ORCHESTRATOR_METRICS_MAX_EVENTS="${QA_ORCHESTRATOR_METRICS_MAX_EVENTS:-10000}"' in content
     assert 'QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS="${QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS:-1800}"' in content
     assert 'QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS="${QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS:-100}"' in content
+
+
+def test_client_rule_templates_preserve_orchestration_contract():
+    assert CLIENT_RULE_FILES
+
+    for artifact in CLIENT_RULE_FILES:
+        text = artifact.read_text(encoding="utf-8")
+        missing = [
+            label
+            for label, alternatives in CLIENT_RULE_CONTRACT.items()
+            if not any(
+                re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+                for pattern in alternatives
+            )
+        ]
+
+        assert not missing, f"{artifact.relative_to(ROOT)} is missing: {', '.join(missing)}"
 
 
 def test_ci_uses_immutable_action_refs_and_builds_wheel():

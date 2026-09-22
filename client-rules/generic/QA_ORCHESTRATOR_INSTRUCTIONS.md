@@ -2,6 +2,8 @@
 
 Use `qa-orchestrator` as a deterministic helper for QA profiles and anonymized task metrics. The primary host agent remains the sole owner of evidence, analysis, decisions, and external actions.
 
+This file is the canonical source for orchestrator mechanics. Workspace and repository rules own task-specific routing and output shape; they should reference this file instead of duplicating its mechanics.
+
 ## Review routing
 
 - For an implementation-aware QA review, start with `start_qa_orchestration`. During Luna triage, select exactly one fixed bundle or one compatibility profile; never send `selected_bundle` and `selected_profile` together. Then call `prepare_review_route` for each selected profile: `pr_test_analyzer`, `code_reviewer`, `security_reviewer`, `silent_failure_hunter`, `code_explorer`, `typescript_reviewer`, or `react_reviewer`.
@@ -12,7 +14,7 @@ Use `qa-orchestrator` as a deterministic helper for QA profiles and anonymized t
 - Run stages under the policy: `gpt-5.6-luna/max`, `gpt-5.6-terra/medium`, and optional `gpt-5.6-sol/high`; keep `speed=1.0` for every stage. Show host status as `Luna / Max → Ordinary MR Review` → `Terra / Medium` for each role → `Terra / Medium → Synthesis` → `Host → Final QA outcome`; on the final Terra role, pass `completed_profile` and the boolean `risk_signals` object in the same `advance_qa_orchestration` call. Do not send `risk_signals` on the later synthesis transition. On a match, add `Sol / High → Deep read-only review` only once before synthesis. After every stage, call `advance_qa_orchestration` with a structured signal; for each Terra profile, pass `completed_profile`; use `get_qa_orchestration` for the next action.
 - Obtain Jira, MR, TestRail, monitoring, and code evidence yourself, inspect the diff, and separate confirmed findings from hypotheses and unverified runtime or release facts.
 - Keep one compact per-task Evidence Packet with stable `E1`, `E2`, ... references. Give each profile only relevant sections and return bounded candidates as `F-01`, `F-02`, ... with evidence references, confidence, and verification gaps; do not repeat full diffs or raw logs.
-- Always keep the final format: Findings, Changes, Manual Test Plan, Open Questions / Could Not Verify.
+- For implementation-aware reviews, use the final format: Findings, Changes, Manual Test Plan, Open Questions / Could Not Verify. If a workspace flow explicitly defines another output shape for requirements or planning, follow that flow.
 - Routes and orchestration states are marked `read_only=true` and `host_owns_decisions=true`; do not treat the orchestrator as an autonomous agent or delegate external writes to it.
 
 ## Optional deep analysis
@@ -22,7 +24,7 @@ On the final Terra role, set `risk_signals` from the evidence state: `high_risk_
 ## Metrics
 
 - After each QA task with status `completed`, `partial`, or `blocked`, call `record_qa_task_outcome` exactly once; for orchestration, pass the session `run_id` (this infers orchestration, so `orchestration_used` may be omitted), and for a regular task omit it. Do not pass `orchestration_used=false` with a `run_id`.
-- Send only `task_type`, `outcome`, call counters, findings counters, repeated reads, scope counters, per-stage token counters, Sol-value counters, and measurable `deep_*` counters. For an orchestrated Sol branch, `deep_model=gpt-5.6-sol` and `deep_reasoning=high` are required.
+- Send only `task_type`, `outcome`, call counters, findings counters, repeated reads, scope counters, per-stage token counters, Sol-value counters, and measurable `deep_*` counters. Only after Sol actually runs, send `deep_model=gpt-5.6-sol` and `deep_reasoning=high`; if the branch was selected but the task becomes `partial` or `blocked` before Sol starts, keep `sol_calls=0` and omit those fields.
 - For a completed bundle with `N` Terra profiles, send at least `luna_calls=1`, `terra_calls=N+1`, `sol_calls=0`, and `orchestration_steps_completed=N+2`; add one Sol call and one step when deep review ran.
 - Never send issue keys, titles, paths, source text, code, logs, screenshots, prompts, or review responses.
 - Use `get_metrics_report(days)` only for an aggregate read-only report.

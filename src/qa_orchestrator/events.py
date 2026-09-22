@@ -250,6 +250,8 @@ def valid_qa_task_metrics(event: dict[str, object]) -> bool:
     deep_used = event.get("deep_analysis_used")
     if type(deep_used) is not bool:
         return False
+    if deep_used and not {"deep_model", "deep_reasoning"} <= event.keys():
+        return False
     orchestration_used = event.get("orchestration_used", False)
     if type(orchestration_used) is not bool:
         return False
@@ -288,6 +290,8 @@ def valid_qa_task_metrics(event: dict[str, object]) -> bool:
         or event["deep_reasoning"] not in DEEP_REASONING
     ):
         return False
+    if deep_used and event["deep_reasoning"] != "high":
+        return False
     if any(
         field in event and (type(event[field]) is not int or event[field] < 0)
         for field in ("deep_duration_ms", "deep_input_tokens", "deep_output_tokens")
@@ -320,6 +324,8 @@ def valid_qa_task_metrics(event: dict[str, object]) -> bool:
         field in event and (type(event[field]) is not int or event[field] < 0)
         for field in ORCHESTRATION_COUNTERS
     ):
+        return False
+    if orchestration_used and not ORCHESTRATION_COUNTERS <= event.keys():
         return False
     if not orchestration_used and any(
         event.get(field, 0) > 0 for field in ORCHESTRATION_COUNTERS

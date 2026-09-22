@@ -156,3 +156,27 @@ def test_report_aggregates_orchestration_counters():
         "steps_completed": 4,
         "retries": 0,
     }
+
+
+def test_report_skips_incomplete_orchestration_event_without_crashing():
+    line = json.dumps(
+        {
+            "schema_version": 1,
+            "event_type": "qa_task_outcome",
+            "timestamp": datetime.now(UTC).isoformat(),
+            "task_type": "ordinary_review",
+            "outcome": "completed",
+            "deep_analysis_used": False,
+            "codegraph_calls": 0,
+            "source_mcp_calls": 0,
+            "findings_identified": 0,
+            "findings_confirmed": 0,
+            "findings_rejected": 0,
+            "repeated_source_reads": 0,
+            "orchestration_used": True,
+        }
+    )
+
+    report = summarize_events([line])
+
+    assert report["qa_tasks"]["events"] == 0

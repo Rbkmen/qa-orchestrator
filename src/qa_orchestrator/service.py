@@ -220,10 +220,11 @@ class OrchestratorService:
             or event.get("deep_escalation_reason_codes") != expected_reasons
         ):
             errors.append("deep escalation metadata does not match the orchestration state")
-        deep_branch_used = session.deep_reason_code is not None
-        if (event["sol_calls"] > 0) != deep_branch_used:
+        deep_branch_selected = session.deep_reason_code is not None
+        sol_was_used = event["sol_calls"] > 0
+        if sol_was_used and not deep_branch_selected:
             errors.append("sol_calls does not match the deep-review branch")
-        if deep_branch_used and (
+        if sol_was_used and (
             event.get("deep_model") != OrchestrationModel.SOL.value
             or event.get("deep_reasoning") != "high"
         ):
@@ -232,15 +233,15 @@ class OrchestratorService:
             return errors
 
         required_terra_calls = len(session.review_profiles) + 1
-        required_steps = len(session.review_profiles) + 2 + int(deep_branch_used)
-        if event["deep_analysis_used"] is not deep_branch_used:
-            errors.append(f"deep_analysis_used must be {deep_branch_used}")
+        required_steps = len(session.review_profiles) + 2 + int(deep_branch_selected)
+        if event["deep_analysis_used"] is not deep_branch_selected:
+            errors.append(f"deep_analysis_used must be {deep_branch_selected}")
         if event["luna_calls"] < 1:
             errors.append("luna_calls must be >= 1")
         if event["terra_calls"] < required_terra_calls:
             errors.append(f"terra_calls must be >= {required_terra_calls}")
-        if event["sol_calls"] < int(deep_branch_used):
-            errors.append(f"sol_calls must be >= {int(deep_branch_used)}")
+        if event["sol_calls"] < int(deep_branch_selected):
+            errors.append(f"sol_calls must be >= {int(deep_branch_selected)}")
         if event["orchestration_steps_completed"] < required_steps:
             errors.append(f"orchestration_steps_completed must be >= {required_steps}")
         return errors

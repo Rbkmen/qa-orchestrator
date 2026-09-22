@@ -162,7 +162,7 @@ By default, metrics are written to `$HOME/.qa-orchestrator/metrics.jsonl`.
 
 ## Metrics
 
-`record_qa_task_outcome` accepts the task type, outcome, CodeGraph/source-MCP counters, findings, repeated reads, deep-analysis measurements, and content-free orchestration counters. For an orchestrated Sol branch, `deep_model=gpt-5.6-sol` and `deep_reasoning=high` are required; duration and token measurements remain optional:
+`record_qa_task_outcome` accepts the task type, outcome, CodeGraph/source-MCP counters, findings, repeated reads, deep-analysis measurements, and content-free orchestration counters. After Sol actually runs, `deep_model=gpt-5.6-sol` and `deep_reasoning=high` are required; if escalation was selected but the task stops before Sol starts, use `sol_calls=0` and omit those fields. Duration and token measurements remain optional:
 
 - `orchestration_used`;
 - `luna_calls`, `terra_calls`, `sol_calls`;

@@ -33,6 +33,8 @@ Verify the registration with `codex mcp list` and restart Codex.
 
 Add the rules from [`client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md`](../../client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md) to persistent project instructions, or adapt them to your Codex rules. Do not install a separate routing skill: the MCP server and these instructions are sufficient.
 
+The linked generic file is canonical for orchestration mechanics. Workspace and repository rules should add only task-specific routing, safety, and output requirements.
+
 Primary Codex remains the host and owner of evidence, decisions, and external actions. Use the six tools for orchestration: `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `prepare_review_route`, `record_qa_task_outcome`, and `get_metrics_report`.
 
 The model policy is host-owned: `gpt-5.6-luna/max` performs triage, `gpt-5.6-terra/medium` performs primary review and synthesis, and optional `gpt-5.6-sol/high` performs read-only deep analysis. Keep `speed=1.0` for every stage. Send the orchestrator only structured signals; prompts, evidence, and model outputs remain in Codex.
