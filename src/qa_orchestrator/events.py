@@ -43,6 +43,20 @@ MODEL_TOKEN_COUNTERS = {
     "terra_synthesis_input_tokens",
     "terra_synthesis_output_tokens",
 }
+STAGE_CALL_COUNTERS = {
+    "triage_calls",
+    "primary_review_calls",
+    "deep_review_calls",
+    "synthesis_calls",
+}
+STAGE_TOKEN_COUNTERS = {
+    "triage_input_tokens",
+    "triage_output_tokens",
+    "primary_review_input_tokens",
+    "primary_review_output_tokens",
+    "synthesis_input_tokens",
+    "synthesis_output_tokens",
+}
 SCOPE_COUNTERS = {
     "evidence_packet_tokens",
     "merge_requests_count",
@@ -53,15 +67,23 @@ DEEP_VALUE_COUNTERS = {
     "deep_findings_new_confirmed",
     "deep_findings_rejected",
 }
-ORCHESTRATION_COUNTERS = {
+LEGACY_MODEL_CALL_COUNTERS = {
     "luna_calls",
     "terra_calls",
     "sol_calls",
+}
+LEGACY_MODEL_COUNTERS = MODEL_TOKEN_COUNTERS | LEGACY_MODEL_CALL_COUNTERS
+SHARED_ORCHESTRATION_COUNTERS = {
     "orchestration_steps_completed",
     "orchestration_retries",
 }
+ORCHESTRATION_COUNTERS = LEGACY_MODEL_CALL_COUNTERS | SHARED_ORCHESTRATION_COUNTERS
+V2_ORCHESTRATION_COUNTERS = STAGE_CALL_COUNTERS | SHARED_ORCHESTRATION_COUNTERS
 DEEP_REASONING = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
-DEEP_MODELS = {"gpt-5.6-sol"}
+DEEP_MODELS_BY_SCHEMA = {
+    1: {"gpt-5.6-sol"},
+    2: {"gpt-6-sol"},
+}
 DEEP_ESCALATION_REASON_CODES = {
     "evidence_gap",
     "cross_repository",
@@ -92,6 +114,8 @@ EVENT_FIELDS = {
     *QA_TASK_COUNTERS,
     *QA_TASK_TOKEN_COUNTERS,
     *MODEL_TOKEN_COUNTERS,
+    *STAGE_CALL_COUNTERS,
+    *STAGE_TOKEN_COUNTERS,
     *SCOPE_COUNTERS,
     *DEEP_VALUE_COUNTERS,
     *ORCHESTRATION_COUNTERS,
@@ -131,6 +155,8 @@ class JsonEventSink:
             *QA_TASK_COUNTERS,
             *QA_TASK_TOKEN_COUNTERS,
             *MODEL_TOKEN_COUNTERS,
+            *STAGE_CALL_COUNTERS,
+            *STAGE_TOKEN_COUNTERS,
             *SCOPE_COUNTERS,
             *DEEP_VALUE_COUNTERS,
             *ORCHESTRATION_COUNTERS,
@@ -138,7 +164,7 @@ class JsonEventSink:
         payload = {key: event[key] for key in fields if key in event}
         payload.update(
             {
-                "schema_version": 1,
+                "schema_version": event["schema_version"],
                 "event_type": "qa_task_outcome",
                 "timestamp": datetime.now(UTC).isoformat(),
             }
@@ -243,9 +269,23 @@ def _atomic_write_events(path: Path, events: list[dict[str, object]]) -> None:
 
 
 def valid_qa_task_metrics(event: dict[str, object]) -> bool:
-    if event.get("task_type") not in QA_TASK_TYPES or event.get("outcome") not in QA_TASK_OUTCOMES:
+    schema_version = event.get("schema_version", 1)
+    if type(schema_version) is not int or schema_version not in {1, 2}:
+        return False
+    task_type = event.get("task_type")
+    outcome = event.get("outcome")
+    if (
+        not isinstance(task_type, str)
+        or task_type not in QA_TASK_TYPES
+        or not isinstance(outcome, str)
+        or outcome not in QA_TASK_OUTCOMES
+    ):
         return False
     if set(event) - EVENT_FIELDS:
+        return False
+    if schema_version == 1 and (STAGE_CALL_COUNTERS | STAGE_TOKEN_COUNTERS) & event.keys():
+        return False
+    if schema_version == 2 and LEGACY_MODEL_COUNTERS & event.keys():
         return False
     deep_used = event.get("deep_analysis_used")
     if type(deep_used) is not bool:
@@ -281,7 +321,7 @@ def valid_qa_task_metrics(event: dict[str, object]) -> bool:
     if "deep_model" in event and (
         not deep_used
         or not isinstance(event["deep_model"], str)
-        or event["deep_model"] not in DEEP_MODELS
+        or event["deep_model"] not in DEEP_MODELS_BY_SCHEMA[schema_version]
     ):
         return False
     if "deep_reasoning" in event and (
@@ -311,7 +351,13 @@ def valid_qa_task_metrics(event: dict[str, object]) -> bool:
         return False
     if any(
         field in event and (type(event[field]) is not int or event[field] < 0)
-        for field in (*MODEL_TOKEN_COUNTERS, *SCOPE_COUNTERS, *DEEP_VALUE_COUNTERS)
+        for field in (
+            *MODEL_TOKEN_COUNTERS,
+            *STAGE_CALL_COUNTERS,
+            *STAGE_TOKEN_COUNTERS,
+            *SCOPE_COUNTERS,
+            *DEEP_VALUE_COUNTERS,
+        )
     ):
         return False
     if not deep_used and any(event.get(field, 0) > 0 for field in DEEP_VALUE_COUNTERS):
@@ -320,25 +366,44 @@ def valid_qa_task_metrics(event: dict[str, object]) -> bool:
         "deep_findings_rejected", 0
     ) > event.get("deep_findings_identified", 0):
         return False
+    orchestration_counters = (
+        ORCHESTRATION_COUNTERS if schema_version == 1 else V2_ORCHESTRATION_COUNTERS
+    )
     if any(
         field in event and (type(event[field]) is not int or event[field] < 0)
-        for field in ORCHESTRATION_COUNTERS
+        for field in orchestration_counters
     ):
         return False
-    if orchestration_used and not ORCHESTRATION_COUNTERS <= event.keys():
+    if orchestration_used and not orchestration_counters <= event.keys():
         return False
     if not orchestration_used and any(
-        event.get(field, 0) > 0 for field in ORCHESTRATION_COUNTERS
+        event.get(field, 0) > 0 for field in orchestration_counters
     ):
         return False
-    if orchestration_used and (event.get("sol_calls", 0) > 0) != deep_used:
-        return False
-    if orchestration_used and event["outcome"] == "completed" and (
-        event["luna_calls"] < 1
-        or event["terra_calls"] < 2
-        or event["orchestration_steps_completed"] < 3
-    ):
-        return False
+    if schema_version == 1:
+        if orchestration_used and (event.get("sol_calls", 0) > 0) != deep_used:
+            return False
+        if orchestration_used and event["outcome"] == "completed" and (
+            event["luna_calls"] < 1
+            or event["terra_calls"] < 2
+            or event["orchestration_steps_completed"] < 3
+        ):
+            return False
+    else:
+        deep_calls = event.get("deep_review_calls", 0)
+        if orchestration_used and (deep_calls > 0) != deep_used:
+            return False
+        if orchestration_used and event["outcome"] == "completed" and (
+            event["triage_calls"] < 1
+            or event["primary_review_calls"] < 1
+            or event["synthesis_calls"] < 1
+            or event["orchestration_steps_completed"] < 3
+        ):
+            return False
+        if orchestration_used and event["outcome"] == "completed" and deep_used and (
+            event["orchestration_steps_completed"] < 4
+        ):
+            return False
     if event["codegraph_calls"] == 0 and any(
         event.get(field, 0) > 0
         for field in ("codegraph_response_tokens", "avoided_source_read_tokens")
@@ -358,11 +423,21 @@ def qa_task_metric_errors(event: dict[str, object]) -> list[str]:
     errors: list[str] = []
 
     if event.get("orchestration_used") is True and event.get("outcome") == "completed":
-        for field, minimum in (
-            ("luna_calls", 1),
-            ("terra_calls", 2),
-            ("orchestration_steps_completed", 3),
-        ):
+        fields = (
+            (
+                ("luna_calls", 1),
+                ("terra_calls", 2),
+                ("orchestration_steps_completed", 3),
+            )
+            if event.get("schema_version", 1) == 1
+            else (
+                ("triage_calls", 1),
+                ("primary_review_calls", 1),
+                ("synthesis_calls", 1),
+                ("orchestration_steps_completed", 3),
+            )
+        )
+        for field, minimum in fields:
             value = event.get(field, 0)
             if type(value) is int and value < minimum:
                 errors.append(f"{field} must be >= {minimum}")
@@ -383,10 +458,17 @@ def qa_task_metric_errors(event: dict[str, object]) -> list[str]:
     ):
         errors.append("repeated_source_reads must be <= source_mcp_calls")
 
-    if event.get("orchestration_used") is True and (
-        (event.get("sol_calls", 0) > 0) != (event.get("deep_analysis_used") is True)
-    ):
-        errors.append("sol_calls must be positive exactly when deep_analysis_used is true")
+    if event.get("orchestration_used") is True:
+        deep_calls_field = (
+            "sol_calls" if event.get("schema_version", 1) == 1 else "deep_review_calls"
+        )
+        deep_calls = event.get(deep_calls_field, 0)
+        if type(deep_calls) is not int or deep_calls < 0:
+            errors.append(f"{deep_calls_field} must be a non-negative integer")
+        elif (deep_calls > 0) != (event.get("deep_analysis_used") is True):
+            errors.append(
+                f"{deep_calls_field} must be positive exactly when deep_analysis_used is true"
+            )
 
     return errors or ["one or more metric values have an invalid type or value"]
 

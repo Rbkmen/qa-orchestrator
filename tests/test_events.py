@@ -7,8 +7,204 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from qa_orchestrator.config import Settings
-from qa_orchestrator.events import read_metrics_lines
+from qa_orchestrator.events import read_metrics_lines, valid_qa_task_metrics
 from qa_orchestrator.service import OrchestratorService
+
+
+def _valid_v2_orchestration_event(**updates):
+    event = {
+        "schema_version": 2,
+        "task_type": "ordinary_review",
+        "outcome": "completed",
+        "deep_analysis_used": False,
+        "orchestration_used": True,
+        "codegraph_calls": 0,
+        "source_mcp_calls": 0,
+        "findings_identified": 0,
+        "findings_confirmed": 0,
+        "findings_rejected": 0,
+        "repeated_source_reads": 0,
+        "triage_calls": 1,
+        "primary_review_calls": 3,
+        "deep_review_calls": 0,
+        "synthesis_calls": 1,
+        "orchestration_steps_completed": 5,
+        "orchestration_retries": 0,
+    }
+    event.update(updates)
+    return event
+
+
+def test_v2_completed_orchestration_accepts_stage_counters():
+    assert valid_qa_task_metrics(_valid_v2_orchestration_event())
+
+
+@pytest.mark.parametrize("schema_version", [True, 3, 0, "2"])
+def test_metrics_reject_unsupported_schema_versions(schema_version):
+    assert not valid_qa_task_metrics(
+        _valid_v2_orchestration_event(schema_version=schema_version)
+    )
+
+
+@pytest.mark.parametrize("field,value", [("task_type", []), ("outcome", {})])
+def test_metrics_reject_unhashable_task_and_outcome_values(field, value):
+    assert not valid_qa_task_metrics(_valid_v2_orchestration_event(**{field: value}))
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["triage_calls", "primary_review_calls", "deep_review_calls", "synthesis_calls"],
+)
+@pytest.mark.parametrize("value", [-1, True])
+def test_v2_rejects_invalid_stage_call_counters(field, value):
+    assert not valid_qa_task_metrics(_valid_v2_orchestration_event(**{field: value}))
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "triage_input_tokens",
+        "triage_output_tokens",
+        "primary_review_input_tokens",
+        "primary_review_output_tokens",
+        "synthesis_input_tokens",
+        "synthesis_output_tokens",
+    ],
+)
+@pytest.mark.parametrize("value", [-1, True])
+def test_v2_rejects_invalid_stage_token_counters(field, value):
+    assert not valid_qa_task_metrics(_valid_v2_orchestration_event(**{field: value}))
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "luna_calls",
+        "terra_calls",
+        "sol_calls",
+        "luna_input_tokens",
+        "luna_output_tokens",
+        "terra_primary_input_tokens",
+        "terra_primary_output_tokens",
+        "terra_synthesis_input_tokens",
+        "terra_synthesis_output_tokens",
+    ],
+)
+def test_v2_rejects_legacy_model_counters(field):
+    assert not valid_qa_task_metrics(_valid_v2_orchestration_event(**{field: 1}))
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "triage_calls",
+        "primary_review_calls",
+        "deep_review_calls",
+        "synthesis_calls",
+        "triage_input_tokens",
+        "triage_output_tokens",
+        "primary_review_input_tokens",
+        "primary_review_output_tokens",
+        "synthesis_input_tokens",
+        "synthesis_output_tokens",
+    ],
+)
+def test_v1_rejects_v2_stage_counters(field):
+    event = _valid_v2_orchestration_event(schema_version=1)
+    for stage_field in (
+        "triage_calls",
+        "primary_review_calls",
+        "deep_review_calls",
+        "synthesis_calls",
+    ):
+        event.pop(stage_field)
+    event.update(luna_calls=1, terra_calls=4, sol_calls=0)
+    event[field] = 0
+
+    assert not valid_qa_task_metrics(event)
+
+
+def test_v1_legacy_event_without_schema_version_remains_valid():
+    event = _valid_v2_orchestration_event()
+    event.pop("schema_version")
+    for field in (
+        "triage_calls",
+        "primary_review_calls",
+        "deep_review_calls",
+        "synthesis_calls",
+    ):
+        event.pop(field)
+    event.update(
+        luna_calls=1,
+        terra_calls=4,
+        sol_calls=0,
+    )
+
+    assert valid_qa_task_metrics(event)
+
+
+def test_v1_history_keeps_legacy_deep_model_attribution():
+    event = _valid_v2_orchestration_event(
+        deep_analysis_used=True,
+        deep_model="gpt-5.6-sol",
+        deep_reasoning="high",
+        deep_review_calls=1,
+    )
+    event.pop("schema_version")
+    for field in (
+        "triage_calls",
+        "primary_review_calls",
+        "deep_review_calls",
+        "synthesis_calls",
+    ):
+        event.pop(field)
+    event.update(luna_calls=1, terra_calls=4, sol_calls=1)
+
+    assert valid_qa_task_metrics(event)
+
+
+def test_v2_deep_review_requires_selected_branch_model_and_reasoning():
+    event = _valid_v2_orchestration_event(
+        deep_analysis_used=True,
+        deep_review_calls=1,
+        deep_model="gpt-6-sol",
+        deep_reasoning="high",
+        synthesis_calls=1,
+        orchestration_steps_completed=6,
+    )
+
+    assert valid_qa_task_metrics(event)
+    # This is a call count within the selected branch, not a boolean encoded as 1.
+    assert valid_qa_task_metrics({**event, "deep_review_calls": 2})
+    assert not valid_qa_task_metrics({**event, "deep_review_calls": 0})
+    assert not valid_qa_task_metrics({**event, "deep_model": "gpt-5.6-sol"})
+    assert not valid_qa_task_metrics({**event, "deep_reasoning": "medium"})
+
+
+@pytest.mark.parametrize("outcome", ["partial", "blocked"])
+def test_v2_incomplete_orchestration_may_stop_before_synthesis(outcome):
+    event = _valid_v2_orchestration_event(
+        outcome=outcome,
+        triage_calls=1,
+        primary_review_calls=0,
+        synthesis_calls=0,
+        orchestration_steps_completed=1,
+    )
+
+    assert valid_qa_task_metrics(event)
+
+
+def test_v2_non_orchestrated_event_rejects_stage_calls():
+    event = _valid_v2_orchestration_event(
+        orchestration_used=False,
+        triage_calls=0,
+        primary_review_calls=1,
+        deep_review_calls=0,
+        synthesis_calls=0,
+        orchestration_steps_completed=0,
+    )
+
+    assert not valid_qa_task_metrics(event)
 
 
 def _record_minimal_outcome(service: OrchestratorService) -> None:

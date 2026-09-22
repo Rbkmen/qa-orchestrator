@@ -36,7 +36,7 @@ STATE_TOOL_ANNOTATIONS = {
 }
 RunId = Annotated[str, Field(pattern=r"^qar-[0-9a-f]{32}$")]
 NonNegativeInt = Annotated[int, Field(ge=0)]
-SolModel = Literal["gpt-5.6-sol"]
+SolModel = Literal["gpt-6-sol"]
 SolReasoning = Literal["high"]
 
 
@@ -87,7 +87,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
         """Advance one validated, content-free orchestration transition.
 
         Send risk_signals together with the final completed_profile call of
-        Terra primary review, before advancing to synthesis.
+        primary review, before advancing to synthesis.
         """
         return service.advance_qa_orchestration(
             AdvanceQaOrchestrationRequest(
@@ -127,12 +127,12 @@ def build_server(service: OrchestratorService) -> FastMCP:
         deep_findings_identified: NonNegativeInt | None = None,
         deep_findings_new_confirmed: NonNegativeInt | None = None,
         deep_findings_rejected: NonNegativeInt | None = None,
-        luna_input_tokens: NonNegativeInt | None = None,
-        luna_output_tokens: NonNegativeInt | None = None,
-        terra_primary_input_tokens: NonNegativeInt | None = None,
-        terra_primary_output_tokens: NonNegativeInt | None = None,
-        terra_synthesis_input_tokens: NonNegativeInt | None = None,
-        terra_synthesis_output_tokens: NonNegativeInt | None = None,
+        triage_input_tokens: NonNegativeInt | None = None,
+        triage_output_tokens: NonNegativeInt | None = None,
+        primary_review_input_tokens: NonNegativeInt | None = None,
+        primary_review_output_tokens: NonNegativeInt | None = None,
+        synthesis_input_tokens: NonNegativeInt | None = None,
+        synthesis_output_tokens: NonNegativeInt | None = None,
         evidence_packet_tokens: NonNegativeInt | None = None,
         merge_requests_count: NonNegativeInt | None = None,
         repositories_count: NonNegativeInt | None = None,
@@ -140,9 +140,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
         source_mcp_response_tokens: NonNegativeInt | None = None,
         avoided_source_read_tokens: NonNegativeInt | None = None,
         orchestration_used: bool | None = None,
-        luna_calls: NonNegativeInt = 0,
-        terra_calls: NonNegativeInt = 0,
-        sol_calls: NonNegativeInt = 0,
+        triage_calls: NonNegativeInt = 0,
+        primary_review_calls: NonNegativeInt = 0,
+        deep_review_calls: NonNegativeInt = 0,
+        synthesis_calls: NonNegativeInt = 0,
         orchestration_steps_completed: NonNegativeInt = 0,
         orchestration_retries: NonNegativeInt = 0,
         run_id: RunId | None = None,
@@ -150,9 +151,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
         """Record one content-free outcome owned by the host QA agent.
 
         When run_id is supplied, include the orchestration stage counters. For
-        a completed bundle with N Terra profiles, the minimum is one Luna
-        call, N+1 Terra calls, and N+2 completed steps, plus one Sol call and
-        one additional step when deep review ran.
+        a completed bundle with N primary-review profiles, the minimum is one
+        triage call, N primary-review calls, one synthesis call, and N+2
+        completed steps, plus one deep-review call and one additional step
+        when deep review ran.
         """
         return service.record_qa_task_outcome(
             task_type=task_type,
@@ -172,12 +174,12 @@ def build_server(service: OrchestratorService) -> FastMCP:
             deep_findings_identified=deep_findings_identified,
             deep_findings_new_confirmed=deep_findings_new_confirmed,
             deep_findings_rejected=deep_findings_rejected,
-            luna_input_tokens=luna_input_tokens,
-            luna_output_tokens=luna_output_tokens,
-            terra_primary_input_tokens=terra_primary_input_tokens,
-            terra_primary_output_tokens=terra_primary_output_tokens,
-            terra_synthesis_input_tokens=terra_synthesis_input_tokens,
-            terra_synthesis_output_tokens=terra_synthesis_output_tokens,
+            triage_input_tokens=triage_input_tokens,
+            triage_output_tokens=triage_output_tokens,
+            primary_review_input_tokens=primary_review_input_tokens,
+            primary_review_output_tokens=primary_review_output_tokens,
+            synthesis_input_tokens=synthesis_input_tokens,
+            synthesis_output_tokens=synthesis_output_tokens,
             evidence_packet_tokens=evidence_packet_tokens,
             merge_requests_count=merge_requests_count,
             repositories_count=repositories_count,
@@ -185,9 +187,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
             source_mcp_response_tokens=source_mcp_response_tokens,
             avoided_source_read_tokens=avoided_source_read_tokens,
             orchestration_used=orchestration_used,
-            luna_calls=luna_calls,
-            terra_calls=terra_calls,
-            sol_calls=sol_calls,
+            triage_calls=triage_calls,
+            primary_review_calls=primary_review_calls,
+            deep_review_calls=deep_review_calls,
+            synthesis_calls=synthesis_calls,
             orchestration_steps_completed=orchestration_steps_completed,
             orchestration_retries=orchestration_retries,
             run_id=run_id,

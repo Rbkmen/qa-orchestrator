@@ -85,12 +85,12 @@ class OrchestratorService:
         deep_findings_identified: int | None = None,
         deep_findings_new_confirmed: int | None = None,
         deep_findings_rejected: int | None = None,
-        luna_input_tokens: int | None = None,
-        luna_output_tokens: int | None = None,
-        terra_primary_input_tokens: int | None = None,
-        terra_primary_output_tokens: int | None = None,
-        terra_synthesis_input_tokens: int | None = None,
-        terra_synthesis_output_tokens: int | None = None,
+        triage_input_tokens: int | None = None,
+        triage_output_tokens: int | None = None,
+        primary_review_input_tokens: int | None = None,
+        primary_review_output_tokens: int | None = None,
+        synthesis_input_tokens: int | None = None,
+        synthesis_output_tokens: int | None = None,
         evidence_packet_tokens: int | None = None,
         merge_requests_count: int | None = None,
         repositories_count: int | None = None,
@@ -98,9 +98,10 @@ class OrchestratorService:
         source_mcp_response_tokens: int | None = None,
         avoided_source_read_tokens: int | None = None,
         orchestration_used: bool | None = None,
-        luna_calls: int = 0,
-        terra_calls: int = 0,
-        sol_calls: int = 0,
+        triage_calls: int = 0,
+        primary_review_calls: int = 0,
+        deep_review_calls: int = 0,
+        synthesis_calls: int = 0,
         orchestration_steps_completed: int = 0,
         orchestration_retries: int = 0,
         run_id: str | None = None,
@@ -108,6 +109,7 @@ class OrchestratorService:
         if orchestration_used is None:
             orchestration_used = run_id is not None
         event: dict[str, object] = {
+            "schema_version": 2,
             "task_type": task_type,
             "outcome": outcome,
             "deep_analysis_used": deep_analysis_used,
@@ -128,12 +130,12 @@ class OrchestratorService:
             ("deep_findings_identified", deep_findings_identified),
             ("deep_findings_new_confirmed", deep_findings_new_confirmed),
             ("deep_findings_rejected", deep_findings_rejected),
-            ("luna_input_tokens", luna_input_tokens),
-            ("luna_output_tokens", luna_output_tokens),
-            ("terra_primary_input_tokens", terra_primary_input_tokens),
-            ("terra_primary_output_tokens", terra_primary_output_tokens),
-            ("terra_synthesis_input_tokens", terra_synthesis_input_tokens),
-            ("terra_synthesis_output_tokens", terra_synthesis_output_tokens),
+            ("triage_input_tokens", triage_input_tokens),
+            ("triage_output_tokens", triage_output_tokens),
+            ("primary_review_input_tokens", primary_review_input_tokens),
+            ("primary_review_output_tokens", primary_review_output_tokens),
+            ("synthesis_input_tokens", synthesis_input_tokens),
+            ("synthesis_output_tokens", synthesis_output_tokens),
             ("evidence_packet_tokens", evidence_packet_tokens),
             ("merge_requests_count", merge_requests_count),
             ("repositories_count", repositories_count),
@@ -144,9 +146,10 @@ class OrchestratorService:
             if value is not None:
                 event[field] = value
         for field, value in (
-            ("luna_calls", luna_calls),
-            ("terra_calls", terra_calls),
-            ("sol_calls", sol_calls),
+            ("triage_calls", triage_calls),
+            ("primary_review_calls", primary_review_calls),
+            ("deep_review_calls", deep_review_calls),
+            ("synthesis_calls", synthesis_calls),
             ("orchestration_steps_completed", orchestration_steps_completed),
             ("orchestration_retries", orchestration_retries),
         ):
@@ -221,27 +224,29 @@ class OrchestratorService:
         ):
             errors.append("deep escalation metadata does not match the orchestration state")
         deep_branch_selected = session.deep_reason_code is not None
-        sol_was_used = event["sol_calls"] > 0
-        if sol_was_used and not deep_branch_selected:
-            errors.append("sol_calls does not match the deep-review branch")
-        if sol_was_used and (
+        deep_review_was_used = event["deep_review_calls"] > 0
+        if deep_review_was_used and not deep_branch_selected:
+            errors.append("deep_review_calls does not match the deep-review branch")
+        if deep_review_was_used and (
             event.get("deep_model") != OrchestrationModel.SOL.value
             or event.get("deep_reasoning") != "high"
         ):
-            errors.append("deep_model and deep_reasoning must describe the Sol stage")
+            errors.append("deep_model and deep_reasoning must describe the GPT-6 Sol stage")
         if outcome != "completed":
             return errors
 
-        required_terra_calls = len(session.review_profiles) + 1
+        required_primary_calls = len(session.review_profiles)
         required_steps = len(session.review_profiles) + 2 + int(deep_branch_selected)
         if event["deep_analysis_used"] is not deep_branch_selected:
             errors.append(f"deep_analysis_used must be {deep_branch_selected}")
-        if event["luna_calls"] < 1:
-            errors.append("luna_calls must be >= 1")
-        if event["terra_calls"] < required_terra_calls:
-            errors.append(f"terra_calls must be >= {required_terra_calls}")
-        if event["sol_calls"] < int(deep_branch_selected):
-            errors.append(f"sol_calls must be >= {int(deep_branch_selected)}")
+        if event["triage_calls"] < 1:
+            errors.append("triage_calls must be >= 1")
+        if event["primary_review_calls"] < required_primary_calls:
+            errors.append(f"primary_review_calls must be >= {required_primary_calls}")
+        if event["synthesis_calls"] < 1:
+            errors.append("synthesis_calls must be >= 1")
+        if event["deep_review_calls"] < int(deep_branch_selected):
+            errors.append(f"deep_review_calls must be >= {int(deep_branch_selected)}")
         if event["orchestration_steps_completed"] < required_steps:
             errors.append(f"orchestration_steps_completed must be >= {required_steps}")
         return errors

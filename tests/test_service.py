@@ -31,7 +31,7 @@ def test_service_exposes_fixed_profiles_and_bundles(tmp_path):
     assert session.allowed_bundles == list(ReviewBundle)
     assert session.selected_bundle is None
     assert session.review_profiles == []
-    assert session.model_policy.model.value == "gpt-5.6-luna"
+    assert session.model_policy.model.value == "gpt-6-luna"
     assert session.model_policy.reasoning == "max"
     assert service.prepare_review_route(ReviewAgent.CODE_EXPLORER).display_name == (
         "Faraday — Evidence Investigator"
@@ -75,7 +75,7 @@ def test_service_records_content_free_task_outcome(tmp_path):
         findings_rejected=1,
         repeated_source_reads=1,
         deep_analysis_used=True,
-        deep_model="gpt-5.6-sol",
+        deep_model="gpt-6-sol",
         deep_reasoning="high",
         deep_duration_ms=1200,
     )
@@ -83,7 +83,7 @@ def test_service_records_content_free_task_outcome(tmp_path):
     assert receipt.status == "recorded"
     event = json.loads((tmp_path / "metrics.jsonl").read_text(encoding="utf-8"))
     assert event["event_type"] == "qa_task_outcome"
-    assert event["deep_model"] == "gpt-5.6-sol"
+    assert event["deep_model"] == "gpt-6-sol"
     assert "legacy_metric" not in event
 
 
@@ -107,7 +107,7 @@ def test_service_rejects_inconsistent_task_outcome(tmp_path):
 def test_service_requires_deep_metadata(tmp_path, missing_field):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
     deep_metadata = {
-        "deep_model": "gpt-5.6-sol",
+        "deep_model": "gpt-6-sol",
         "deep_reasoning": "high",
     }
     deep_metadata.pop(missing_field)
@@ -127,7 +127,27 @@ def test_service_requires_deep_metadata(tmp_path, missing_field):
         )
 
 
-def test_service_rejects_unapproved_deep_model(tmp_path):
+def test_service_rejects_non_high_deep_reasoning(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+
+    with pytest.raises(ValueError, match="QA task metrics are inconsistent"):
+        service.record_qa_task_outcome(
+            task_type="ordinary_review",
+            outcome="partial",
+            codegraph_calls=0,
+            source_mcp_calls=0,
+            findings_identified=0,
+            findings_confirmed=0,
+            findings_rejected=0,
+            repeated_source_reads=0,
+            deep_analysis_used=True,
+            deep_model="gpt-6-sol",
+            deep_reasoning="medium",
+        )
+
+
+@pytest.mark.parametrize("deep_model", ["gpt-5.6-sol", "secret/path-or-issue-key"])
+def test_service_rejects_unapproved_deep_model(tmp_path, deep_model):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     with pytest.raises(ValueError, match="QA task metrics are inconsistent"):
@@ -141,7 +161,7 @@ def test_service_rejects_unapproved_deep_model(tmp_path):
             findings_rejected=0,
             repeated_source_reads=0,
             deep_analysis_used=True,
-            deep_model="secret/path-or-issue-key",
+            deep_model=deep_model,
             deep_reasoning="high",
         )
 
@@ -177,11 +197,11 @@ def test_metrics_reject_negative_orchestration_counter(tmp_path):
             findings_rejected=0,
             repeated_source_reads=0,
             orchestration_used=True,
-            luna_calls=-1,
+            triage_calls=-1,
         )
 
 
-def test_metrics_reject_sol_calls_without_deep_analysis(tmp_path):
+def test_metrics_reject_deep_review_calls_without_deep_analysis(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     with pytest.raises(ValueError, match="QA task metrics are inconsistent"):
@@ -195,10 +215,54 @@ def test_metrics_reject_sol_calls_without_deep_analysis(tmp_path):
             findings_rejected=0,
             repeated_source_reads=0,
             orchestration_used=True,
-            luna_calls=1,
-            terra_calls=1,
-            sol_calls=1,
+            triage_calls=1,
+            primary_review_calls=1,
+            deep_review_calls=1,
+            synthesis_calls=0,
             orchestration_steps_completed=2,
+        )
+
+
+def test_metrics_reject_non_integer_deep_review_calls_without_crashing(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+
+    with pytest.raises(ValueError, match="QA task metrics are inconsistent"):
+        service.record_qa_task_outcome(
+            task_type="ordinary_review",
+            outcome="partial",
+            codegraph_calls=0,
+            source_mcp_calls=0,
+            findings_identified=0,
+            findings_confirmed=0,
+            findings_rejected=0,
+            repeated_source_reads=0,
+            orchestration_used=True,
+            deep_review_calls="invalid",
+        )
+
+
+def test_metrics_reject_deep_analysis_without_deep_review_call(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+
+    with pytest.raises(ValueError, match="QA task metrics are inconsistent"):
+        service.record_qa_task_outcome(
+            task_type="ordinary_review",
+            outcome="partial",
+            codegraph_calls=0,
+            source_mcp_calls=0,
+            findings_identified=0,
+            findings_confirmed=0,
+            findings_rejected=0,
+            repeated_source_reads=0,
+            orchestration_used=True,
+            deep_analysis_used=True,
+            deep_model="gpt-6-sol",
+            deep_reasoning="high",
+            triage_calls=1,
+            primary_review_calls=0,
+            deep_review_calls=0,
+            synthesis_calls=0,
+            orchestration_steps_completed=1,
         )
 
 
@@ -216,9 +280,10 @@ def test_metrics_reject_completed_orchestration_without_required_stages(tmp_path
             findings_rejected=0,
             repeated_source_reads=0,
             orchestration_used=True,
-            luna_calls=1,
-            terra_calls=1,
-            sol_calls=0,
+            triage_calls=1,
+            primary_review_calls=0,
+            deep_review_calls=0,
+            synthesis_calls=0,
             orchestration_steps_completed=2,
         )
 
@@ -230,8 +295,9 @@ def test_metrics_explain_missing_orchestration_counters(tmp_path):
     with pytest.raises(
         ValueError,
         match=(
-            "luna_calls must be >= 1; "
-            "terra_calls must be >= 2; "
+            "triage_calls must be >= 1; "
+            "primary_review_calls must be >= 1; "
+            "synthesis_calls must be >= 1; "
             "orchestration_steps_completed must be >= 3"
         ),
     ):
@@ -279,7 +345,7 @@ def test_metrics_explain_bundle_specific_orchestration_counters(tmp_path):
 
     with pytest.raises(
         ValueError,
-        match="terra_calls must be >= 4; orchestration_steps_completed must be >= 5",
+        match="primary_review_calls must be >= 3; orchestration_steps_completed must be >= 5",
     ):
         service.record_qa_task_outcome(
             task_type="ordinary_review",
@@ -290,9 +356,10 @@ def test_metrics_explain_bundle_specific_orchestration_counters(tmp_path):
             findings_confirmed=0,
             findings_rejected=0,
             repeated_source_reads=0,
-            luna_calls=1,
-            terra_calls=2,
-            sol_calls=0,
+            triage_calls=1,
+            primary_review_calls=2,
+            deep_review_calls=0,
+            synthesis_calls=1,
             orchestration_steps_completed=3,
             run_id=started.run_id,
         )
@@ -335,9 +402,10 @@ def test_service_infers_orchestration_from_run_id_and_records_counters(tmp_path)
         findings_rejected=0,
         repeated_source_reads=0,
         deep_analysis_used=False,
-        luna_calls=1,
-        terra_calls=2,
-        sol_calls=0,
+        triage_calls=1,
+        primary_review_calls=1,
+        deep_review_calls=0,
+        synthesis_calls=1,
         orchestration_steps_completed=3,
         orchestration_retries=0,
         run_id=started.run_id,
@@ -348,7 +416,9 @@ def test_service_infers_orchestration_from_run_id_and_records_counters(tmp_path)
     assert service.get_qa_orchestration(started.run_id).outcome_recorded is True
     event = json.loads((tmp_path / "metrics.jsonl").read_text(encoding="utf-8"))
     assert event["orchestration_used"] is True
-    assert event["terra_calls"] == 2
+    assert event["schema_version"] == 2
+    assert event["primary_review_calls"] == 1
+    assert event["synthesis_calls"] == 1
 
 
 @pytest.mark.parametrize(
@@ -383,9 +453,10 @@ def test_service_marks_terminal_action_after_recording_outcome(
         findings_rejected=0,
         repeated_source_reads=0,
         orchestration_used=True,
-        luna_calls=1,
-        terra_calls=0,
-        sol_calls=0,
+        triage_calls=1,
+        primary_review_calls=0,
+        deep_review_calls=0,
+        synthesis_calls=0,
         orchestration_steps_completed=1,
         run_id=stopped.run_id,
     )
@@ -435,9 +506,10 @@ def test_service_rejects_outcome_with_mismatched_task_type(tmp_path):
             findings_rejected=0,
             repeated_source_reads=0,
             orchestration_used=True,
-            luna_calls=1,
-            terra_calls=2,
-            sol_calls=0,
+            triage_calls=1,
+            primary_review_calls=1,
+            deep_review_calls=0,
+            synthesis_calls=1,
             orchestration_steps_completed=3,
             orchestration_retries=0,
             run_id=started.run_id,
@@ -495,9 +567,10 @@ def test_service_records_deep_orchestration_counters(tmp_path):
             repeated_source_reads=0,
             deep_analysis_used=True,
             orchestration_used=True,
-            luna_calls=1,
-            terra_calls=2,
-            sol_calls=1,
+            triage_calls=1,
+            primary_review_calls=1,
+            deep_review_calls=1,
+            synthesis_calls=1,
             orchestration_steps_completed=4,
             run_id=started.run_id,
         )
@@ -512,12 +585,13 @@ def test_service_records_deep_orchestration_counters(tmp_path):
         findings_rejected=0,
         repeated_source_reads=0,
         deep_analysis_used=True,
-        deep_model="gpt-5.6-sol",
+        deep_model="gpt-6-sol",
         deep_reasoning="high",
         orchestration_used=True,
-        luna_calls=1,
-        terra_calls=2,
-        sol_calls=1,
+        triage_calls=1,
+        primary_review_calls=1,
+        deep_review_calls=1,
+        synthesis_calls=1,
         orchestration_steps_completed=4,
         run_id=started.run_id,
     )
@@ -574,12 +648,13 @@ def test_service_records_deep_escalation_decision_and_reasons(tmp_path):
         findings_rejected=0,
         repeated_source_reads=0,
         deep_analysis_used=True,
-        deep_model="gpt-5.6-sol",
+        deep_model="gpt-6-sol",
         deep_reasoning="high",
         orchestration_used=True,
-        luna_calls=1,
-        terra_calls=2,
-        sol_calls=1,
+        triage_calls=1,
+        primary_review_calls=1,
+        deep_review_calls=1,
+        synthesis_calls=1,
         orchestration_steps_completed=4,
         run_id=started.run_id,
     )
@@ -606,19 +681,19 @@ def test_service_records_stage_tokens_scope_and_deep_value_metrics(tmp_path):
         findings_rejected=1,
         repeated_source_reads=0,
         deep_analysis_used=True,
-        deep_model="gpt-5.6-sol",
+        deep_model="gpt-6-sol",
         deep_reasoning="high",
         deep_input_tokens=30,
         deep_output_tokens=20,
         deep_findings_identified=2,
         deep_findings_new_confirmed=1,
         deep_findings_rejected=1,
-        luna_input_tokens=100,
-        luna_output_tokens=25,
-        terra_primary_input_tokens=240,
-        terra_primary_output_tokens=80,
-        terra_synthesis_input_tokens=120,
-        terra_synthesis_output_tokens=40,
+        triage_input_tokens=100,
+        triage_output_tokens=25,
+        primary_review_input_tokens=240,
+        primary_review_output_tokens=80,
+        synthesis_input_tokens=120,
+        synthesis_output_tokens=40,
         evidence_packet_tokens=180,
         merge_requests_count=2,
         repositories_count=2,
@@ -627,9 +702,10 @@ def test_service_records_stage_tokens_scope_and_deep_value_metrics(tmp_path):
     assert receipt.status == "recorded"
     event = json.loads((tmp_path / "metrics.jsonl").read_text(encoding="utf-8"))
 
-    assert event["luna_input_tokens"] == 100
-    assert event["terra_primary_output_tokens"] == 80
-    assert event["terra_synthesis_input_tokens"] == 120
+    assert event["schema_version"] == 2
+    assert event["triage_input_tokens"] == 100
+    assert event["primary_review_output_tokens"] == 80
+    assert event["synthesis_input_tokens"] == 120
     assert event["evidence_packet_tokens"] == 180
     assert event["merge_requests_count"] == 2
     assert event["repositories_count"] == 2
@@ -676,12 +752,13 @@ def test_service_rejects_metrics_from_wrong_orchestration_branch(tmp_path):
             findings_rejected=0,
             repeated_source_reads=0,
             deep_analysis_used=True,
-            deep_model="gpt-5.6-sol",
+            deep_model="gpt-6-sol",
             deep_reasoning="high",
             orchestration_used=True,
-            luna_calls=1,
-            terra_calls=0,
-            sol_calls=1,
+            triage_calls=1,
+            primary_review_calls=0,
+            deep_review_calls=1,
+            synthesis_calls=0,
             orchestration_steps_completed=1,
             run_id=started.run_id,
         )
@@ -732,9 +809,10 @@ def test_service_records_terminal_outcome_before_sol_starts(
         findings_rejected=0,
         repeated_source_reads=0,
         orchestration_used=True,
-        luna_calls=1,
-        terra_calls=1,
-        sol_calls=0,
+        triage_calls=1,
+        primary_review_calls=1,
+        deep_review_calls=0,
+        synthesis_calls=0,
         orchestration_steps_completed=2,
         run_id=started.run_id,
     )
@@ -778,9 +856,10 @@ def test_service_does_not_duplicate_finalized_orchestration_metric(tmp_path):
         "findings_rejected": 0,
         "repeated_source_reads": 0,
         "orchestration_used": True,
-        "luna_calls": 1,
-        "terra_calls": 2,
-        "sol_calls": 0,
+        "triage_calls": 1,
+        "primary_review_calls": 1,
+        "deep_review_calls": 0,
+        "synthesis_calls": 1,
         "orchestration_steps_completed": 3,
         "orchestration_retries": 0,
         "run_id": started.run_id,
@@ -830,9 +909,10 @@ def test_service_rejects_conflicting_finalized_orchestration_payload(tmp_path):
         "findings_rejected": 0,
         "repeated_source_reads": 0,
         "orchestration_used": True,
-        "luna_calls": 1,
-        "terra_calls": 2,
-        "sol_calls": 0,
+        "triage_calls": 1,
+        "primary_review_calls": 1,
+        "deep_review_calls": 0,
+        "synthesis_calls": 1,
         "orchestration_steps_completed": 3,
         "orchestration_retries": 0,
         "run_id": started.run_id,

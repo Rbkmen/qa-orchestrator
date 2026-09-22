@@ -5,12 +5,12 @@ QA Orchestrator is a small deterministic FastMCP service for host-owned QA revie
 ## How it works
 
 1. The primary host obtains authoritative evidence from the required systems and classifies the QA task.
-2. The host calls `start_qa_orchestration`. The orchestrator creates a content-free session and returns the first step: Luna with `max` reasoning.
+2. The host calls `start_qa_orchestration`. The orchestrator creates a content-free session and returns the first step: GPT-6 Luna with `max` reasoning.
 3. The host runs each stage in its configured model environment and sends the orchestrator only a structured signal after each stage:
-   - `gpt-5.6-luna` + `max` — triage and selection of one fixed review bundle or one compatibility profile;
-   - `gpt-5.6-terra` + `medium` — primary review of every profile in the fixed order;
-   - optional `gpt-5.6-sol` + `high` — one read-only deep analysis selected by fixed risk signals;
-   - `gpt-5.6-terra` + `medium` — synthesis.
+   - `gpt-6-luna` + `max` — triage and selection of one fixed review bundle or one compatibility profile;
+   - `gpt-6-sol` + `medium` — primary review of every profile in the fixed order;
+   - optional `gpt-6-sol` + `high` — one read-only deep analysis selected by fixed risk signals;
+   - `gpt-6-sol` + `medium` — synthesis.
    Every returned model policy includes `speed=1.0`; the host must keep this value for the selected stage.
 4. The host validates findings, runtime evidence, and limitations, then calls `record_qa_task_outcome` once. For an orchestrated task it passes the same `run_id` so the orchestrator can close the session.
 
@@ -18,7 +18,7 @@ The orchestrator does not call models, choose severity or release readiness, or 
 
 ### Bundles and profile names
 
-Luna selects one fixed bundle or one compatibility profile. Terra executes bundle profiles sequentially. After every role, the host sends `completed_profile`, and the orchestrator returns `current_profile` and `completed_profiles`. Sol or synthesis is available only after the final role.
+Luna selects one fixed bundle or one compatibility profile. Sol executes bundle profiles sequentially. After every role, the host sends `completed_profile`, and the orchestrator returns `current_profile` and `completed_profiles`. Deep review or synthesis is available only after the final role. The transition identifiers `terra_primary_review` and `terra_synthesis` remain stable; choose the model from the returned `model_policy`, never from the step name.
 
 | Bundle | Profile order |
 |---|---|
@@ -46,14 +46,14 @@ Normal status flow:
 
 ```text
 Luna / Max → Ordinary MR Review
-Terra / Medium → Faraday — Evidence Investigator
-Terra / Medium → Code Reviewer
-Terra / Medium → Test Analyzer
-Terra / Medium → Synthesis
+Sol / Medium → Faraday — Evidence Investigator
+Sol / Medium → Code Reviewer
+Sol / Medium → Test Analyzer
+Sol / Medium → Synthesis
 Host → Final QA outcome
 ```
 
-With the final primary-review role, the host may send boolean `risk_signals` in the same `advance_qa_orchestration` call as the final `completed_profile`. The orchestrator inserts `Sol / High → Deep read-only review` before synthesis when one of the fixed escalation rules matches. Do not send `risk_signals` on the later synthesis transition. It returns the matched rules and fixed reason codes as `deep_assessment`; raw evidence never enters the orchestrator.
+With the final primary-review role, the host may send boolean `risk_signals` in the same `advance_qa_orchestration` call as the final `completed_profile`. The orchestrator inserts `Sol / High → Deep read-only review` before synthesis when one of the fixed escalation rules matches, then returns to Sol / Medium synthesis. Do not send `risk_signals` on the later synthesis transition. It returns the matched rules and fixed reason codes as `deep_assessment`; raw evidence never enters the orchestrator.
 
 Deep-review rules:
 
@@ -67,15 +67,11 @@ For low-risk, narrow reviews, Luna may select one compatibility profile instead 
 
 Keep one compact per-task Evidence Packet with stable evidence references (`E1`, `E2`, ...) and bounded finding candidates (`F-01`, `F-02`, ...). Do not repeat the full diff or raw logs in every model stage.
 
-## Visual workflow
+## QA Orchestrator at a glance
 
-### Normal MR review
+### Workflow and anonymized stage metrics
 
-![QA Orchestrator normal MR review](docs/assets/qa-orchestrator-normal-review.png)
-
-### Deep review escalation
-
-![QA Orchestrator deep review](docs/assets/qa-orchestrator-deep-review.png)
+![Futuristic cyber-console diagram showing the GPT-6 Luna and Sol workflow, optional read-only deep review, and content-free v1 and v2 metrics](docs/assets/qa-orchestrator-stage-metrics-v9.png)
 
 ## MCP interface
 
@@ -93,9 +89,9 @@ The service publishes exactly six tools:
 Bundle orchestration flow:
 
 ```text
-Luna/max → Terra/profile[1] → ... → Terra/profile[N]
+Luna/max → Sol/profile[1] → ... → Sol/profile[N]
                                       ↘ optional Sol/high ↗
-                                           Terra synthesis → host outcome
+                                           Sol synthesis → host outcome
 ```
 
 Sessions are kept in process memory only. The default TTL is 1,800 seconds and the maximum is 100 active sessions; the shared cache is also bounded, so older terminal sessions may be evicted when capacity is needed. Repeating the final call is idempotent while its session is retained. After a restart, the host starts a new session. `read_only=true` and `host_owns_decisions=true` are part of every state.
@@ -162,19 +158,15 @@ By default, metrics are written to `$HOME/.qa-orchestrator/metrics.jsonl`.
 
 ## Metrics
 
-`record_qa_task_outcome` accepts the task type, outcome, CodeGraph/source-MCP counters, findings, repeated reads, deep-analysis measurements, and content-free orchestration counters. After Sol actually runs, `deep_model=gpt-5.6-sol` and `deep_reasoning=high` are required; if escalation was selected but the task stops before Sol starts, use `sol_calls=0` and omit those fields. Duration and token measurements remain optional:
+New `record_qa_task_outcome` events use schema v2; the service assigns the version. Send stage call counters `triage_calls`, `primary_review_calls`, `deep_review_calls`, and `synthesis_calls`, plus shared `orchestration_steps_completed` and `orchestration_retries`. For a completed bundle with `N` profiles, report at least one triage call, `N` primary-review calls, one synthesis call, and `N+2` completed steps. If deep review ran, report its actual call count (at least one) and one additional step. A selected deep branch that stops before the deep review has `deep_review_calls=0` and omits deep model metadata.
 
-- `orchestration_used`;
-- `luna_calls`, `terra_calls`, `sol_calls`;
-- `orchestration_steps_completed`, `orchestration_retries`.
-- `deep_escalation_recommended`, `deep_escalation_reason_codes`.
-- optional per-stage model token counters, Evidence Packet token count, merge-request/repository counts, and Sol-value counters.
+When the deep review runs, send `deep_model=gpt-6-sol` and `deep_reasoning=high`. Stage token measurements are optional: `triage_input_tokens`, `triage_output_tokens`, `primary_review_input_tokens`, `primary_review_output_tokens`, `synthesis_input_tokens`, and `synthesis_output_tokens`; deep-review tokens use `deep_input_tokens` and `deep_output_tokens`. Evidence Packet token count, merge-request/repository counts, and deep-analysis finding counters are also optional. Do not send model-family call/token fields for new events.
 
 For an orchestrated task, use the `run_id` returned by `start_qa_orchestration`; the opaque identifier itself is not written to the JSONL metric.
 
 Values must be non-negative and internally consistent. JSONL contains no issue keys, paths, source text, code, logs, prompts, or model responses. The report is available through MCP or locally:
 
-For a completed bundle with `N` Terra profiles, the minimum orchestration counters are `luna_calls=1`, `terra_calls=N+1` (primary profiles plus synthesis), `sol_calls=0`, and `orchestration_steps_completed=N+2`. If the Sol branch runs, use `sol_calls=1` and add one to `orchestration_steps_completed`.
+Schema-v1 rows already stored remain readable. Their model-family totals stay in the legacy report fields; schema-v2 stage totals appear separately as `stage_calls` and `stage_tokens`. The report keeps exact deep-model IDs and combines shared task totals across versions. Incomplete v2 token measurements contribute known token values but not to the complete-measurement count.
 
 ```bash
 uv run qa-orchestrator-report

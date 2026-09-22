@@ -17,15 +17,20 @@ from qa_orchestrator.orchestration import (
 )
 
 
-def test_model_policy_assigns_requested_models_and_reasoning():
-    assert MODEL_POLICIES[OrchestrationStep.LUNA_TRIAGE].model == OrchestrationModel.LUNA
-    assert MODEL_POLICIES[OrchestrationStep.LUNA_TRIAGE].reasoning == "max"
-    assert MODEL_POLICIES[OrchestrationStep.TERRA_PRIMARY_REVIEW].model == OrchestrationModel.TERRA
-    assert MODEL_POLICIES[OrchestrationStep.TERRA_PRIMARY_REVIEW].reasoning == "medium"
-    assert MODEL_POLICIES[OrchestrationStep.SOL_DEEP_REVIEW].model == OrchestrationModel.SOL
-    assert MODEL_POLICIES[OrchestrationStep.SOL_DEEP_REVIEW].reasoning == "high"
-    assert MODEL_POLICIES[OrchestrationStep.TERRA_SYNTHESIS].model == OrchestrationModel.TERRA
-    assert MODEL_POLICIES[OrchestrationStep.TERRA_SYNTHESIS].reasoning == "medium"
+@pytest.mark.parametrize(
+    ("step", "model", "reasoning"),
+    [
+        (OrchestrationStep.LUNA_TRIAGE, "gpt-6-luna", "max"),
+        (OrchestrationStep.TERRA_PRIMARY_REVIEW, "gpt-6-sol", "medium"),
+        (OrchestrationStep.SOL_DEEP_REVIEW, "gpt-6-sol", "high"),
+        (OrchestrationStep.TERRA_SYNTHESIS, "gpt-6-sol", "medium"),
+    ],
+)
+def test_model_policy_assigns_requested_models_and_reasoning(step, model, reasoning):
+    policy = MODEL_POLICIES[step]
+    assert policy.model.value == model
+    assert policy.reasoning == reasoning
+    assert policy.speed == 1.0
     assert set(MODEL_POLICIES) == {
         OrchestrationStep.LUNA_TRIAGE,
         OrchestrationStep.TERRA_PRIMARY_REVIEW,
@@ -38,7 +43,7 @@ def test_model_policy_pins_unit_speed():
     assert {policy.speed for policy in MODEL_POLICIES.values()} == {1.0}
 
     with pytest.raises(ValidationError):
-        ModelPolicy(model=OrchestrationModel.TERRA, reasoning="medium", speed=1.5)
+        ModelPolicy(model=OrchestrationModel.SOL, reasoning="medium", speed=1.5)
 
 
 def test_orchestration_session_rejects_disabled_ownership_flags():

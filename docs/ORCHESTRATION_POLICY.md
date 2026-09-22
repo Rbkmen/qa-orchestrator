@@ -20,29 +20,31 @@ QA Orchestrator owns only deterministic profile routing, content-free orchestrat
 
 | Stage | Model | Reasoning | Responsibility |
 |---|---|---|---|
-| Triage | `gpt-5.6-luna` | `max` | Select a fixed review bundle or compatibility profile and identify evidence gaps |
-| Primary review | `gpt-5.6-terra` | `medium` | Perform sequential implementation-aware review of the selected profiles |
-| Deep escalation | `gpt-5.6-sol` | `high` | Optional read-only check for a complex or high-risk case |
-| Synthesis | `gpt-5.6-terra` | `medium` | Consolidate the result after host validation |
+| Triage | `gpt-6-luna` | `max` | Select a fixed review bundle or compatibility profile and identify evidence gaps |
+| Primary review | `gpt-6-sol` | `medium` | Perform sequential implementation-aware review of the selected profiles |
+| Deep escalation | `gpt-6-sol` | `high` | Optional read-only check for a complex or high-risk case |
+| Synthesis | `gpt-6-sol` | `medium` | Consolidate the result after host validation |
 
 The orchestrator returns only the next policy and transition constraints. Every policy includes the fixed `speed=1.0`; the primary host must preserve it when running the selected model. The primary host runs the models in its own environment, validates findings, and makes the final decision. The orchestrator does not invoke or throttle a provider itself.
 
 ## Orchestration flow
 
-1. The host calls `start_qa_orchestration(task_type)` and receives a `run_id`, Luna/max, and the next action.
+1. The host calls `start_qa_orchestration(task_type)` and receives a `run_id`, GPT-6 Luna/max, and the next action.
 2. After triage, the host calls `advance_qa_orchestration` with one fixed bundle or one of the seven `ReviewAgent` profiles.
-3. For a bundle, the host runs Terra once per profile in the returned order and passes the role identifier as `completed_profile` after each stage; the orchestrator does not skip roles or accept an arbitrary order.
-4. In the same transition that completes the last Terra profile, the host may supply structured `risk_signals`; the orchestrator applies the fixed deep-review rules and either goes directly to Terra synthesis or returns optional Sol/high with the derived reason codes. Do not send `risk_signals` on the later synthesis transition.
-5. After Sol, the host returns to Terra synthesis.
+3. For a bundle, the host runs GPT-6 Sol once per profile in the returned order and passes the role identifier as `completed_profile` after each stage; the orchestrator does not skip roles or accept an arbitrary order.
+4. In the same transition that completes the last primary-review profile, the host may supply structured `risk_signals`; the orchestrator applies the fixed deep-review rules and either goes directly to GPT-6 Sol synthesis or returns optional GPT-6 Sol/high with the derived reason codes. Do not send `risk_signals` on the later synthesis transition.
+5. After deep review, the host returns to GPT-6 Sol synthesis.
 6. After synthesis, the state becomes `awaiting_host_outcome`; the host calls `record_qa_task_outcome` once with the same `run_id` and a status of `completed`, `partial`, or `blocked`. The orchestrator moves the session to its final status.
 
 Allowed transitions:
 
 ```text
-Luna triage → Terra profile[1] → ... → Terra profile[N]
+Luna triage → Sol profile[1] → ... → Sol profile[N]
                                       ↘ Sol deep review ↗
-                                         Terra synthesis → awaiting host outcome
+                                         Sol synthesis → awaiting host outcome
 ```
+
+The `terra_primary_review` and `terra_synthesis` transition identifiers are retained for compatibility. They are not model selectors: use the returned `model_policy` (`gpt-6-sol` for both stages).
 
 Sessions are content-free and in memory, with a default TTL of `1800` seconds and a default limit of `100` active sessions. The shared cache is bounded, so older terminal sessions may be evicted when new sessions are created. Unknown runs, expired sessions, illegal or repeated transitions, and invalid signals are rejected without changing state. After a restart, the host starts a new session.
 
@@ -50,14 +52,14 @@ Normal status flow for `ordinary_mr`:
 
 ```text
 Luna / Max → Ordinary MR Review
-Terra / Medium → Faraday — Evidence Investigator
-Terra / Medium → Code Reviewer
-Terra / Medium → Test Analyzer
-Terra / Medium → Synthesis
+Sol / Medium → Faraday — Evidence Investigator
+Sol / Medium → Code Reviewer
+Sol / Medium → Test Analyzer
+Sol / Medium → Synthesis
 Host → Final QA outcome
 ```
 
-`Sol / High → Deep read-only review` appears only after the last Terra profile and only when the fixed signal rules match; the flow then returns to Terra synthesis.
+`Sol / High → Deep read-only review` appears only after the last Sol primary-review profile and only when the fixed signal rules match; the flow then returns to Sol synthesis.
 
 ### Adaptive profile selection
 
@@ -78,7 +80,7 @@ The host keeps one per-task Evidence Packet and gives each profile only the rele
 
 ### Deterministic deep-review decision
 
-The host sends only boolean, content-free signals after the final Terra profile:
+The host sends only boolean, content-free signals after the final primary-review profile:
 
 ```json
 {
@@ -130,7 +132,7 @@ The returned `deep_assessment` contains `should_escalate`, matched fixed rules, 
 | `typescript_reviewer` | `TypeScript Reviewer` |
 | `react_reviewer` | `React Reviewer` |
 
-Faraday is the internal display name for `code_explorer`. It is not a separate external agent, service, package, or model. The orchestrator returns only the fixed identifier and order; the host runs Terra for each role.
+Faraday is the internal display name for `code_explorer`. It is not a separate external agent, service, package, or model. The orchestrator returns only the fixed identifier and order; the host runs GPT-6 Sol for each role.
 
 ## Review profiles
 
@@ -148,22 +150,22 @@ Every review must separate confirmed findings from hypotheses and unverified run
 
 ## Metrics contract
 
-`record_qa_task_outcome` accepts only content-free fields:
+New `record_qa_task_outcome` events use schema v2, assigned by the service. They accept only content-free fields:
 
 - `task_type`, `outcome`;
 - CodeGraph/source call counters;
 - identified, confirmed, and rejected findings plus repeated source reads;
-- `deep_model=gpt-5.6-sol` and `deep_reasoning=high` after an orchestrated Sol branch actually runs; if escalation is selected but the task stops before Sol starts, use `sol_calls=0` and omit those fields. Duration and token measurements are optional;
-- `orchestration_used`, `luna_calls`, `terra_calls`, `sol_calls`, `orchestration_steps_completed`, and `orchestration_retries`.
-- For a completed bundle with `N` Terra profiles, the minimum counters are `luna_calls=1`, `terra_calls=N+1`, and `orchestration_steps_completed=N+2`; add one Sol call and one step when deep review ran.
+- `deep_model=gpt-6-sol` and `deep_reasoning=high` after deep review actually runs; if the task stops before that step, use `deep_review_calls=0` and omit those fields. Duration and token measurements are optional;
+- stage calls: `triage_calls`, `primary_review_calls`, `deep_review_calls`, and `synthesis_calls`; shared `orchestration_steps_completed` and `orchestration_retries`;
+- optional stage tokens: `triage_input_tokens`, `triage_output_tokens`, `primary_review_input_tokens`, `primary_review_output_tokens`, `synthesis_input_tokens`, and `synthesis_output_tokens`; deep-review tokens remain `deep_input_tokens` and `deep_output_tokens`.
+- For a completed bundle with `N` primary-review profiles, the minimum counters are one triage call, `N` primary-review calls, one synthesis call, and `N+2` completed steps; when deep review ran, report its actual call count (at least one) and add one step.
 - `deep_escalation_recommended` and fixed `deep_escalation_reason_codes` for orchestrated tasks.
-- optional per-stage token counters: `luna_input_tokens`, `luna_output_tokens`, `terra_primary_input_tokens`, `terra_primary_output_tokens`, `deep_input_tokens`, `deep_output_tokens`, `terra_synthesis_input_tokens`, and `terra_synthesis_output_tokens`;
 - optional scope counters: `evidence_packet_tokens`, `merge_requests_count`, and `repositories_count`;
 - optional Sol-value counters: `deep_findings_identified`, `deep_findings_new_confirmed`, and `deep_findings_rejected`.
 
 When `run_id` is present, the outcome is treated as orchestrated automatically; `orchestration_used=true` may also be sent explicitly, while an explicit false value is rejected. The opaque identifier is used only to associate the final outcome and aggregate counters with the in-memory session, is checked against the selected branch, and is not persisted in JSONL.
 
-Orchestration counters must be non-negative and are not accepted as positive when orchestration was not used. Do not send issue keys, titles, paths, source text, code, logs, screenshots, or generated content. `get_metrics_report(days)` returns aggregates and data-quality counters only.
+V1 rows already stored remain readable. Legacy model-family totals remain separate from v2 stage totals, which the report exposes as `stage_calls` and `stage_tokens`; shared task totals span both versions. Incomplete stage-token measurements contribute known values but do not count as complete. Do not send issue keys, titles, paths, source text, code, logs, screenshots, or generated content. `get_metrics_report(days)` returns aggregates and data-quality counters only.
 
 ## MCP tools
 

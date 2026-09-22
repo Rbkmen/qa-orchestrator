@@ -21,7 +21,7 @@ def test_normal_flow_skips_sol():
     session = orchestrator.start("ordinary_review")
 
     assert session.current_step is OrchestrationStep.LUNA_TRIAGE
-    assert session.model_policy.model.value == "gpt-5.6-luna"
+    assert session.model_policy.model.value == "gpt-6-luna"
     assert session.model_policy.reasoning == "max"
 
     session = orchestrator.advance(
@@ -142,7 +142,7 @@ def test_concurrent_starts_respect_active_session_limit():
     assert sum(results) == 1
 
 
-def test_deep_flow_uses_sol_then_returns_to_terra():
+def test_deep_flow_uses_sol_then_returns_to_sol_synthesis():
     orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
     session = orchestrator.start("ordinary_review")
     session = orchestrator.advance(
@@ -161,7 +161,7 @@ def test_deep_flow_uses_sol_then_returns_to_terra():
     )
 
     assert session.current_step is OrchestrationStep.SOL_DEEP_REVIEW
-    assert session.model_policy.model.value == "gpt-5.6-sol"
+    assert session.model_policy.model.value == "gpt-6-sol"
     assert session.model_policy.reasoning == "high"
 
     session = orchestrator.advance(
@@ -274,7 +274,7 @@ def test_all_review_profiles_are_retained_after_triage(profile: ReviewAgent):
     assert session.completed_profiles == []
     assert session.current_step is OrchestrationStep.TERRA_PRIMARY_REVIEW
     assert session.model_policy.model is not None
-    assert session.model_policy.model.value == "gpt-5.6-terra"
+    assert session.model_policy.model.value == "gpt-6-sol"
     assert session.model_policy.reasoning == "medium"
 
 
@@ -296,7 +296,7 @@ def test_fixed_bundle_order_is_retained_after_triage(bundle: ReviewBundle):
     assert session.current_profile is REVIEW_BUNDLES[bundle][0]
     assert session.completed_profiles == []
     assert session.current_step is OrchestrationStep.TERRA_PRIMARY_REVIEW
-    assert session.model_policy.model.value == "gpt-5.6-terra"
+    assert session.model_policy.model.value == "gpt-6-sol"
     assert session.model_policy.reasoning == "medium"
 
 
@@ -381,7 +381,7 @@ def test_every_fixed_bundle_completes_normal_flow(bundle: ReviewBundle):
         )
 
     assert session.current_step is OrchestrationStep.TERRA_SYNTHESIS
-    assert session.model_policy.model.value == "gpt-5.6-terra"
+    assert session.model_policy.model.value == "gpt-6-sol"
     assert session.model_policy.reasoning == "medium"
 
     session = orchestrator.advance(
@@ -424,7 +424,7 @@ def test_every_fixed_bundle_can_escalate_after_final_profile(bundle: ReviewBundl
     )
 
     assert session.current_step is OrchestrationStep.SOL_DEEP_REVIEW
-    assert session.model_policy.model.value == "gpt-5.6-sol"
+    assert session.model_policy.model.value == "gpt-6-sol"
     assert session.model_policy.reasoning == "high"
 
     session = orchestrator.advance(

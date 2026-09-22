@@ -42,6 +42,10 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     async with Client(build_server(service)) as client:
         tools = {tool.name: tool for tool in await client.list_tools()}
 
+    advance_description = tools["advance_qa_orchestration"].description or ""
+    assert "primary review" in advance_description.lower()
+    assert "terra primary" not in advance_description.lower()
+
     for name in (
         "prepare_review_route",
         "get_qa_orchestration",
@@ -74,9 +78,16 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
         ]
         == 0
     )
+    assert (
+        tools["record_qa_task_outcome"].inputSchema["properties"]["triage_calls"][
+            "minimum"
+        ]
+        == 0
+    )
+    assert "luna_calls" not in tools["record_qa_task_outcome"].inputSchema["properties"]
     assert _schema_contains_const(
         tools["record_qa_task_outcome"].inputSchema["properties"]["deep_model"],
-        "gpt-5.6-sol",
+        "gpt-6-sol",
     )
     assert _schema_contains_const(
         tools["record_qa_task_outcome"].inputSchema["properties"]["deep_reasoning"],
@@ -116,7 +127,7 @@ async def test_orchestration_tools_return_no_evidence_fields(tmp_path):
 
     payload = result.structured_content
     assert payload["model_policy"] == {
-        "model": "gpt-5.6-luna",
+        "model": "gpt-6-luna",
         "reasoning": "max",
         "speed": 1.0,
     }
@@ -288,9 +299,10 @@ async def test_orchestration_tools_complete_each_bundle(tmp_path, bundle: Review
                 "findings_confirmed": 0,
                 "findings_rejected": 0,
                 "repeated_source_reads": 0,
-                "luna_calls": 1,
-                "terra_calls": len(REVIEW_BUNDLES[bundle]) + 1,
-                "sol_calls": 0,
+                "triage_calls": 1,
+                "primary_review_calls": len(REVIEW_BUNDLES[bundle]),
+                "deep_review_calls": 0,
+                "synthesis_calls": 1,
                 "orchestration_steps_completed": len(REVIEW_BUNDLES[bundle]) + 2,
                 "orchestration_retries": 0,
                 "run_id": run_id,
@@ -439,9 +451,10 @@ async def test_server_records_orchestration_metrics(tmp_path):
                 "findings_rejected": 0,
                 "repeated_source_reads": 0,
                 "orchestration_used": True,
-                "luna_calls": 1,
-                "terra_calls": 2,
-                "sol_calls": 0,
+                "triage_calls": 1,
+                "primary_review_calls": 1,
+                "deep_review_calls": 0,
+                "synthesis_calls": 1,
                 "orchestration_steps_completed": 3,
                 "orchestration_retries": 0,
                 "run_id": run_id,
@@ -450,13 +463,13 @@ async def test_server_records_orchestration_metrics(tmp_path):
         report = await client.call_tool("get_metrics_report", {"days": 7})
         current = await client.call_tool("get_qa_orchestration", {"run_id": run_id})
 
-    assert report.structured_content["qa_tasks"]["orchestration"] == {
-        "tasks": 1,
-        "luna_calls": 1,
-        "terra_calls": 2,
-        "sol_calls": 0,
-        "steps_completed": 3,
-        "retries": 0,
+    assert report.structured_content["qa_tasks"]["orchestration"]["tasks"] == 1
+    assert report.structured_content["qa_tasks"]["orchestration"]["steps_completed"] == 3
+    assert report.structured_content["qa_tasks"]["stage_calls"] == {
+        "triage": 1,
+        "primary_review": 1,
+        "deep_review": 0,
+        "synthesis": 1,
     }
     assert current.structured_content["status"] == "completed"
 

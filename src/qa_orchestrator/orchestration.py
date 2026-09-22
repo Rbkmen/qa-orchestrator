@@ -30,9 +30,8 @@ class OrchestrationStatus(StrEnum):
 
 
 class OrchestrationModel(StrEnum):
-    LUNA = "gpt-5.6-luna"
-    TERRA = "gpt-5.6-terra"
-    SOL = "gpt-5.6-sol"
+    LUNA = "gpt-6-luna"
+    SOL = "gpt-6-sol"
 
 
 class OrchestrationReason(StrEnum):
@@ -141,7 +140,7 @@ MODEL_POLICIES = MappingProxyType(
             reasoning="max",
         ),
         OrchestrationStep.TERRA_PRIMARY_REVIEW: ModelPolicy(
-            model=OrchestrationModel.TERRA,
+            model=OrchestrationModel.SOL,
             reasoning="medium",
         ),
         OrchestrationStep.SOL_DEEP_REVIEW: ModelPolicy(
@@ -149,7 +148,7 @@ MODEL_POLICIES = MappingProxyType(
             reasoning="high",
         ),
         OrchestrationStep.TERRA_SYNTHESIS: ModelPolicy(
-            model=OrchestrationModel.TERRA,
+            model=OrchestrationModel.SOL,
             reasoning="medium",
         ),
     }
@@ -243,9 +242,9 @@ class OrchestrationError(ValueError):
 _NEXT_ACTIONS = MappingProxyType(
     {
         OrchestrationStep.LUNA_TRIAGE: "Host runs Luna triage and submits the selected review bundle or profile.",
-        OrchestrationStep.TERRA_PRIMARY_REVIEW: "Host runs Terra primary review with the selected ordered profiles.",
+        OrchestrationStep.TERRA_PRIMARY_REVIEW: "Host runs Sol primary review with the selected ordered profiles.",
         OrchestrationStep.SOL_DEEP_REVIEW: "Host runs Sol deep read-only analysis for the fixed escalation reason.",
-        OrchestrationStep.TERRA_SYNTHESIS: "Host runs Terra synthesis and validates the final QA result.",
+        OrchestrationStep.TERRA_SYNTHESIS: "Host runs Sol synthesis and validates the final QA result.",
         OrchestrationStep.AWAITING_HOST_OUTCOME: "Host records the final QA outcome.",
     }
 )

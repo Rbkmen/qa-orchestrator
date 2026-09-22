@@ -10,10 +10,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from qa_orchestrator.events import (
     DEEP_VALUE_COUNTERS,
+    LEGACY_MODEL_CALL_COUNTERS,
     MODEL_TOKEN_COUNTERS,
-    ORCHESTRATION_COUNTERS,
     QA_TASK_TOKEN_COUNTERS,
     SCOPE_COUNTERS,
+    SHARED_ORCHESTRATION_COUNTERS,
+    STAGE_CALL_COUNTERS,
+    STAGE_TOKEN_COUNTERS,
     read_metrics_lines,
     valid_qa_task_metrics,
 )
@@ -71,6 +74,20 @@ class OrchestrationReport(_StrictReportModel):
     retries: int
 
 
+class StageCallsReport(_StrictReportModel):
+    triage: int
+    primary_review: int
+    deep_review: int
+    synthesis: int
+
+
+class StageTokensReport(_StrictReportModel):
+    triage: ModelTokenTotals
+    primary_review: ModelTokenTotals
+    deep_review: ModelTokenTotals
+    synthesis: ModelTokenTotals
+
+
 class QaTasksReport(_StrictReportModel):
     events: int
     outcomes: dict[str, int]
@@ -95,6 +112,8 @@ class QaTasksReport(_StrictReportModel):
     source_mcp_response_tokens: int
     complete_token_measurement_tasks: int
     orchestration: OrchestrationReport
+    stage_calls: StageCallsReport
+    stage_tokens: StageTokensReport
 
 
 class DataQualityReport(_StrictReportModel):
@@ -117,6 +136,12 @@ def summarize_events(lines: Iterable[str], days: int = 7) -> dict[str, object]:
     deep_reasoning: Counter[str] = Counter()
     deep_escalation_reasons: Counter[str] = Counter()
     totals = Counter()
+    stage_token_sources = {
+        "triage": ("triage_input_tokens", "triage_output_tokens"),
+        "primary_review": ("primary_review_input_tokens", "primary_review_output_tokens"),
+        "deep_review": ("deep_input_tokens", "deep_output_tokens"),
+        "synthesis": ("synthesis_input_tokens", "synthesis_output_tokens"),
+    }
 
     for line in lines:
         try:
@@ -126,9 +151,11 @@ def summarize_events(lines: Iterable[str], days: int = 7) -> dict[str, object]:
         if not isinstance(event, dict):
             continue
         timestamp = _event_timestamp(event)
+        schema_version = event.get("schema_version")
         if (
             event.get("event_type") != "qa_task_outcome"
-            or event.get("schema_version") != 1
+            or type(schema_version) is not int
+            or schema_version not in {1, 2}
             or timestamp is None
             or timestamp < cutoff
             or not valid_qa_task_metrics(event)
@@ -146,7 +173,10 @@ def summarize_events(lines: Iterable[str], days: int = 7) -> dict[str, object]:
                 deep_escalation_reasons[str(reason)] += 1
         totals["codegraph_tasks"] += event["codegraph_calls"] > 0
         totals["complete_token_measurement_tasks"] += QA_TASK_TOKEN_COUNTERS <= event.keys()
-        totals["complete_model_token_measurement_tasks"] += MODEL_TOKEN_COUNTERS <= event.keys()
+        model_token_fields = (
+            MODEL_TOKEN_COUNTERS if schema_version == 1 else STAGE_TOKEN_COUNTERS
+        )
+        totals["complete_model_token_measurement_tasks"] += model_token_fields <= event.keys()
         totals["deep_value_measurement_tasks"] += DEEP_VALUE_COUNTERS <= event.keys()
         if event["deep_analysis_used"] is True:
             deep_models[str(event.get("deep_model", "unknown"))] += 1
@@ -166,14 +196,27 @@ def summarize_events(lines: Iterable[str], days: int = 7) -> dict[str, object]:
             "deep_duration_ms",
             "deep_input_tokens",
             "deep_output_tokens",
-            *MODEL_TOKEN_COUNTERS,
             *SCOPE_COUNTERS,
             *DEEP_VALUE_COUNTERS,
-            *ORCHESTRATION_COUNTERS,
+            *SHARED_ORCHESTRATION_COUNTERS,
         ):
             value = event.get(field, 0)
             if type(value) is int and value >= 0:
                 totals[field] += value
+        if schema_version == 1:
+            for field in (*MODEL_TOKEN_COUNTERS, *LEGACY_MODEL_CALL_COUNTERS):
+                value = event.get(field, 0)
+                if type(value) is int and value >= 0:
+                    totals[field] += value
+            totals["v1_deep_input_tokens"] += event.get("deep_input_tokens", 0)
+            totals["v1_deep_output_tokens"] += event.get("deep_output_tokens", 0)
+        else:
+            for field in (*STAGE_CALL_COUNTERS, *STAGE_TOKEN_COUNTERS):
+                value = event.get(field, 0)
+                if type(value) is int and value >= 0:
+                    totals[field] += value
+            totals["stage_deep_input_tokens"] += event.get("deep_input_tokens", 0)
+            totals["stage_deep_output_tokens"] += event.get("deep_output_tokens", 0)
 
     return {
         "period_days": days,
@@ -203,8 +246,8 @@ def summarize_events(lines: Iterable[str], days: int = 7) -> dict[str, object]:
                     "output": totals["terra_primary_output_tokens"],
                 },
                 "sol": {
-                    "input": totals["deep_input_tokens"],
-                    "output": totals["deep_output_tokens"],
+                    "input": totals["v1_deep_input_tokens"],
+                    "output": totals["v1_deep_output_tokens"],
                 },
                 "terra_synthesis": {
                     "input": totals["terra_synthesis_input_tokens"],
@@ -248,6 +291,27 @@ def summarize_events(lines: Iterable[str], days: int = 7) -> dict[str, object]:
                 "sol_calls": totals["sol_calls"],
                 "steps_completed": totals["orchestration_steps_completed"],
                 "retries": totals["orchestration_retries"],
+            },
+            "stage_calls": {
+                "triage": totals["triage_calls"],
+                "primary_review": totals["primary_review_calls"],
+                "deep_review": totals["deep_review_calls"],
+                "synthesis": totals["synthesis_calls"],
+            },
+            "stage_tokens": {
+                stage: {
+                    "input": (
+                        totals["stage_deep_input_tokens"]
+                        if stage == "deep_review"
+                        else totals[input_field]
+                    ),
+                    "output": (
+                        totals["stage_deep_output_tokens"]
+                        if stage == "deep_review"
+                        else totals[output_field]
+                    ),
+                }
+                for stage, (input_field, output_field) in stage_token_sources.items()
             },
         },
         "data_quality": {

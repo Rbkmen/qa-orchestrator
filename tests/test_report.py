@@ -1,7 +1,37 @@
 import json
 from datetime import UTC, datetime
 
-from qa_orchestrator.report import summarize_events
+from qa_orchestrator.report import MetricsReport, summarize_events
+
+
+def test_report_skips_rows_with_non_string_task_categories():
+    timestamp = datetime.now(UTC).isoformat()
+    base_event = {
+        "schema_version": 2,
+        "event_type": "qa_task_outcome",
+        "timestamp": timestamp,
+        "task_type": "ordinary_review",
+        "outcome": "completed",
+        "deep_analysis_used": False,
+        "codegraph_calls": 0,
+        "source_mcp_calls": 0,
+        "findings_identified": 0,
+        "findings_confirmed": 0,
+        "findings_rejected": 0,
+        "repeated_source_reads": 0,
+    }
+
+    report = summarize_events(
+        json.dumps(event)
+        for event in (
+            {**base_event, "task_type": []},
+            {**base_event, "outcome": {}},
+            base_event,
+        )
+    )
+
+    MetricsReport.model_validate(report)
+    assert report["qa_tasks"]["events"] == 1
 
 
 def test_report_aggregates_only_model_free_task_outcomes():
@@ -180,3 +210,124 @@ def test_report_skips_incomplete_orchestration_event_without_crashing():
     report = summarize_events([line])
 
     assert report["qa_tasks"]["events"] == 0
+
+
+def test_report_keeps_v1_and_v2_metrics_separate():
+    timestamp = datetime.now(UTC).isoformat()
+    v1_event = {
+        "schema_version": 1,
+        "event_type": "qa_task_outcome",
+        "timestamp": timestamp,
+        "task_type": "ordinary_review",
+        "outcome": "completed",
+        "deep_analysis_used": True,
+        "deep_model": "gpt-5.6-sol",
+        "deep_reasoning": "high",
+        "deep_input_tokens": 10,
+        "deep_output_tokens": 15,
+        "codegraph_calls": 0,
+        "source_mcp_calls": 0,
+        "findings_identified": 0,
+        "findings_confirmed": 0,
+        "findings_rejected": 0,
+        "repeated_source_reads": 0,
+        "orchestration_used": True,
+        "luna_calls": 1,
+        "terra_calls": 2,
+        "sol_calls": 1,
+        "orchestration_steps_completed": 4,
+        "orchestration_retries": 0,
+        "luna_input_tokens": 100,
+        "luna_output_tokens": 25,
+        "terra_primary_input_tokens": 240,
+        "terra_primary_output_tokens": 80,
+        "terra_synthesis_input_tokens": 120,
+        "terra_synthesis_output_tokens": 40,
+    }
+    v2_event = {
+        "schema_version": 2,
+        "event_type": "qa_task_outcome",
+        "timestamp": timestamp,
+        "task_type": "ordinary_review",
+        "outcome": "completed",
+        "deep_analysis_used": True,
+        "deep_model": "gpt-6-sol",
+        "deep_reasoning": "high",
+        "deep_input_tokens": 20,
+        "deep_output_tokens": 30,
+        "codegraph_calls": 0,
+        "source_mcp_calls": 0,
+        "findings_identified": 0,
+        "findings_confirmed": 0,
+        "findings_rejected": 0,
+        "repeated_source_reads": 0,
+        "orchestration_used": True,
+        "triage_calls": 1,
+        "primary_review_calls": 3,
+        "deep_review_calls": 1,
+        "synthesis_calls": 1,
+        "orchestration_steps_completed": 6,
+        "orchestration_retries": 0,
+        "triage_input_tokens": 110,
+        "triage_output_tokens": 26,
+        "primary_review_input_tokens": 250,
+        "primary_review_output_tokens": 81,
+        "synthesis_input_tokens": 130,
+        "synthesis_output_tokens": 41,
+    }
+    incomplete_v2_event = {
+        "schema_version": 2,
+        "event_type": "qa_task_outcome",
+        "timestamp": timestamp,
+        "task_type": "ordinary_review",
+        "outcome": "partial",
+        "deep_analysis_used": False,
+        "codegraph_calls": 0,
+        "source_mcp_calls": 0,
+        "findings_identified": 0,
+        "findings_confirmed": 0,
+        "findings_rejected": 0,
+        "repeated_source_reads": 0,
+        "orchestration_used": False,
+        "triage_input_tokens": 5,
+    }
+
+    report = summarize_events(
+        json.dumps(event) for event in (v1_event, v2_event, incomplete_v2_event)
+    )
+    MetricsReport.model_validate(report)
+
+    assert report["qa_tasks"]["events"] == 3
+    assert report["qa_tasks"]["orchestration"]["tasks"] == 2
+    assert report["qa_tasks"]["orchestration"] == {
+        "tasks": 2,
+        "luna_calls": 1,
+        "terra_calls": 2,
+        "sol_calls": 1,
+        "steps_completed": 10,
+        "retries": 0,
+    }
+    assert report["qa_tasks"]["deep_by_model"] == {
+        "gpt-5.6-sol": 1,
+        "gpt-6-sol": 1,
+    }
+    assert report["qa_tasks"]["stage_calls"] == {
+        "triage": 1,
+        "primary_review": 3,
+        "deep_review": 1,
+        "synthesis": 1,
+    }
+    assert report["qa_tasks"]["stage_tokens"]["deep_review"] == {
+        "input": 20,
+        "output": 30,
+    }
+    assert report["qa_tasks"]["stage_tokens"]["triage"] == {
+        "input": 115,
+        "output": 26,
+    }
+    assert report["qa_tasks"]["model_tokens"]["sol"] == {
+        "input": 10,
+        "output": 15,
+    }
+    assert report["qa_tasks"]["model_tokens"]["complete_measurement_tasks"] == 2
+    assert report["data_quality"]["complete_model_token_measurement_rate"] == 0.667

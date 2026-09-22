@@ -23,9 +23,11 @@ CLIENT_RULE_CONTRACT = {
     "state read": (r"\bget_qa_orchestration\b",),
     "content-free metrics": (r"\brecord_qa_task_outcome\b",),
     "single route selection": (r"exactly one.*(?:bundle|profile)",),
-    "Luna policy": (r"gpt-5\.6-luna", r"luna/max"),
-    "Terra policy": (r"gpt-5\.6-terra", r"terra/medium"),
-    "Sol policy": (r"gpt-5\.6-sol", r"sol/high"),
+    "Luna model": (r"gpt-6-luna",),
+    "Luna reasoning": (r"luna/max",),
+    "Sol model": (r"gpt-6-sol",),
+    "Sol primary reasoning": (r"sol/medium",),
+    "Sol deep reasoning": (r"sol/high",),
     "fixed speed": (r"speed=1\.0",),
     "risk signals": (r"\brisk_signals\b",),
     "completed profile": (r"\bcompleted_profile\b",),
@@ -67,6 +69,29 @@ def test_launcher_forwards_metrics_overrides():
 
 def test_client_rule_templates_preserve_orchestration_contract():
     assert CLIENT_RULE_FILES
+    v2_metric_fields = (
+        "triage_calls",
+        "primary_review_calls",
+        "deep_review_calls",
+        "synthesis_calls",
+        "triage_input_tokens",
+        "triage_output_tokens",
+        "primary_review_input_tokens",
+        "primary_review_output_tokens",
+        "synthesis_input_tokens",
+        "synthesis_output_tokens",
+    )
+    legacy_model_fields = (
+        "luna_calls",
+        "terra_calls",
+        "sol_calls",
+        "luna_input_tokens",
+        "luna_output_tokens",
+        "terra_primary_input_tokens",
+        "terra_primary_output_tokens",
+        "terra_synthesis_input_tokens",
+        "terra_synthesis_output_tokens",
+    )
 
     for artifact in CLIENT_RULE_FILES:
         text = artifact.read_text(encoding="utf-8")
@@ -80,6 +105,13 @@ def test_client_rule_templates_preserve_orchestration_contract():
         ]
 
         assert not missing, f"{artifact.relative_to(ROOT)} is missing: {', '.join(missing)}"
+        assert all(field in text for field in v2_metric_fields), artifact.relative_to(ROOT)
+        assert not any(field in text for field in legacy_model_fields), artifact.relative_to(ROOT)
+
+    generic_rules = (ROOT / "client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md").read_text(
+        encoding="utf-8"
+    )
+    assert "v1" in generic_rules.lower()
 
 
 def test_ci_uses_immutable_action_refs_and_builds_wheel():
@@ -110,17 +142,21 @@ def test_operational_artifacts_describe_host_orchestration():
         ROOT / "README.md",
         ROOT / "docs/ORCHESTRATION_POLICY.md",
         ROOT / "client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md",
+        ROOT / "docs/clients/codex.md",
+        ROOT / "docs/clients/claude-code.md",
+        ROOT / "docs/clients/cursor.md",
+        ROOT / "docs/clients/generic-mcp.md",
     ]
-    required = (
-        "start_qa_orchestration",
-        "advance_qa_orchestration",
-        "get_qa_orchestration",
-        "gpt-5.6-luna",
-        "gpt-5.6-terra",
-        "gpt-5.6-sol",
+    required_policy = (
+        "gpt-6-luna",
+        "gpt-6-sol",
         "speed=1.0",
-        "host_owns_decisions",
     )
+    host_contract_artifacts = {
+        ROOT / "README.md",
+        ROOT / "docs/ORCHESTRATION_POLICY.md",
+        ROOT / "client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md",
+    }
     forbidden = (
         "qa orchestrator calls models",
         "qa orchestrator invokes models",
@@ -130,8 +166,16 @@ def test_operational_artifacts_describe_host_orchestration():
 
     for artifact in artifacts:
         text = artifact.read_text(encoding="utf-8").lower()
-        for phrase in required:
+        for phrase in required_policy:
             assert phrase in text
+        if artifact in host_contract_artifacts:
+            for tool in (
+                "start_qa_orchestration",
+                "advance_qa_orchestration",
+                "get_qa_orchestration",
+            ):
+                assert tool in text
+            assert "host_owns_decisions" in text
         for phrase in forbidden:
             assert phrase not in text
 
@@ -150,7 +194,7 @@ def test_operational_artifacts_describe_review_bundles_and_statuses():
         "requirements",
         "faraday — evidence investigator",
         "luna / max",
-        "terra / medium",
+        "sol / medium",
         "sol / high",
         "host → final qa outcome",
     )
