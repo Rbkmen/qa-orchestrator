@@ -1,18 +1,19 @@
 ---
-description: Use QA Router for deterministic review profiles and content-free task metrics
+description: Use QA Orchestrator for deterministic review profiles and content-free task metrics
 alwaysApply: true
 ---
 
-# QA Router usage
+# QA Orchestrator usage
 
-When the `qa-router` MCP server is available, use it as a read-only routing helper.
+When the `qa-orchestrator` MCP server is available, use it as a read-only orchestration helper.
 
 - Obtain sources, run model stages, analyze evidence, make the QA decision, and perform code, file, or external changes in Cursor Agent.
 - For an implementation-aware review, start with `start_qa_orchestration`. During Luna triage, select exactly one fixed bundle or compatibility profile, never both, then call `prepare_review_route` for each role in the fixed order: `ordinary_mr`, `widget`, `security`, `autotest`, or `requirements`.
 - Role names are `Faraday — Evidence Investigator` (`code_explorer`), `Code Reviewer`, `Test Analyzer`, `Security Reviewer`, `Silent Failure Hunter`, `TypeScript Reviewer`, and `React Reviewer`. Faraday is an internal role name, not an external service or model.
-- Policy: `gpt-5.6-luna/max`, `gpt-5.6-terra/medium`, and optional `gpt-5.6-sol/high`, always with `speed=1.0`. After every Terra role, call `advance_qa_orchestration` with its `completed_profile`; Sol and synthesis are allowed only after the last role. Send only structured signals; `get_qa_orchestration` returns the state.
+- Policy: `gpt-5.6-luna/max`, `gpt-5.6-terra/medium`, and optional `gpt-5.6-sol/high`, always with `speed=1.0`. After every Terra role, call `advance_qa_orchestration` with its `completed_profile`; after the last role, send the boolean `risk_signals` object so the orchestrator applies the fixed escalation rules. Sol and synthesis are allowed only after the last role. Send only structured signals; `get_qa_orchestration` returns the state and `deep_assessment`.
 - Use the route for focus and required sections; it is not an autonomous agent and does not replace checking the diff, contracts, or runtime evidence.
-- The router does not accept evidence, prompts, or model outputs and does not perform external writes.
+- Prefer a single compatibility profile for a low-risk, one-repository, one-concern change; use a fixed bundle for broad or cross-concern work. Keep one compact Evidence Packet with `E1`-style references and bounded `F-01` finding candidates instead of repeating raw diffs/logs.
+- The orchestrator does not accept evidence, prompts, or model outputs and does not perform external writes.
 - After any QA task with status `completed`, `partial`, or `blocked`, call `record_qa_task_outcome` exactly once. For orchestration, pass its `run_id`; send only counters and deep-analysis measurements. For an orchestrated Sol branch, set `deep_model=gpt-5.6-sol` and `deep_reasoning=high`.
 - Never send issue keys, paths, source text, code, logs, or prompts in metrics.
 - Use `get_metrics_report` for aggregate metrics control; do not treat it as evidence or a readiness decision.

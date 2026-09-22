@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+orchestrator_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+orchestrator_home=${HOME:?HOME must be set}
+orchestrator_data_dir=${QA_ORCHESTRATOR_DATA_DIR:-"$orchestrator_home/.qa-orchestrator"}
+orchestrator_command=
+
+if [ -x "$orchestrator_root/.venv/bin/qa-orchestrator" ]; then
+  orchestrator_command="$orchestrator_root/.venv/bin/qa-orchestrator"
+elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/qa-orchestrator" ]; then
+  orchestrator_command="$VIRTUAL_ENV/bin/qa-orchestrator"
+else
+  orchestrator_command=$(command -v qa-orchestrator || true)
+fi
+
+if [ -z "$orchestrator_command" ]; then
+  echo "QA Orchestrator is not installed. Run 'uv sync' or activate a virtualenv containing qa-orchestrator." >&2
+  exit 127
+fi
+
+exec /usr/bin/env -i \
+  HOME="$orchestrator_home" \
+  PATH="$orchestrator_home/.local/bin:/opt/homebrew/bin:/usr/bin:/bin" \
+  QA_ORCHESTRATOR_METRICS_RETENTION_DAYS="${QA_ORCHESTRATOR_METRICS_RETENTION_DAYS:-30}" \
+  QA_ORCHESTRATOR_METRICS_MAX_EVENTS="${QA_ORCHESTRATOR_METRICS_MAX_EVENTS:-10000}" \
+  QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS="${QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS:-1800}" \
+  QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS="${QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS:-100}" \
+  QA_ORCHESTRATOR_DATA_DIR="$orchestrator_data_dir" \
+  "$orchestrator_command"

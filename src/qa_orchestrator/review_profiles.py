@@ -2,7 +2,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from qa_router_mcp.contracts import ReviewAgent, ReviewBundle, ReviewRoute
+from qa_orchestrator.contracts import ReviewAgent, ReviewBundle, ReviewRoute
 
 REQUIRED_REVIEW_SECTIONS = (
     "Scope",

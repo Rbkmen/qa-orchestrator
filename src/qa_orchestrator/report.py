@@ -6,9 +6,12 @@ from datetime import UTC, datetime, timedelta
 from os import environ
 from pathlib import Path
 
-from qa_router_mcp.events import (
+from qa_orchestrator.events import (
+    DEEP_VALUE_COUNTERS,
+    MODEL_TOKEN_COUNTERS,
     ORCHESTRATION_COUNTERS,
     QA_TASK_TOKEN_COUNTERS,
+    SCOPE_COUNTERS,
     read_metrics_lines,
     valid_qa_task_metrics,
 )
@@ -20,6 +23,7 @@ def summarize_events(lines: Iterable[str], days: int = 7) -> dict[str, object]:
     task_types: Counter[str] = Counter()
     deep_models: Counter[str] = Counter()
     deep_reasoning: Counter[str] = Counter()
+    deep_escalation_reasons: Counter[str] = Counter()
     totals = Counter()
 
     for line in lines:
@@ -43,8 +47,15 @@ def summarize_events(lines: Iterable[str], days: int = 7) -> dict[str, object]:
         task_types[str(event["task_type"])] += 1
         totals["events"] += 1
         totals["deep_tasks"] += event["deep_analysis_used"] is True
+        deep_escalation_recommended = event.get("deep_escalation_recommended") is True
+        totals["deep_escalation_recommended_tasks"] += deep_escalation_recommended
+        if deep_escalation_recommended:
+            for reason in event.get("deep_escalation_reason_codes", []):
+                deep_escalation_reasons[str(reason)] += 1
         totals["codegraph_tasks"] += event["codegraph_calls"] > 0
         totals["complete_token_measurement_tasks"] += QA_TASK_TOKEN_COUNTERS <= event.keys()
+        totals["complete_model_token_measurement_tasks"] += MODEL_TOKEN_COUNTERS <= event.keys()
+        totals["deep_value_measurement_tasks"] += DEEP_VALUE_COUNTERS <= event.keys()
         if event["deep_analysis_used"] is True:
             deep_models[str(event.get("deep_model", "unknown"))] += 1
             deep_reasoning[str(event.get("deep_reasoning", "unknown"))] += 1
@@ -63,6 +74,9 @@ def summarize_events(lines: Iterable[str], days: int = 7) -> dict[str, object]:
             "deep_duration_ms",
             "deep_input_tokens",
             "deep_output_tokens",
+            *MODEL_TOKEN_COUNTERS,
+            *SCOPE_COUNTERS,
+            *DEEP_VALUE_COUNTERS,
             *ORCHESTRATION_COUNTERS,
         ):
             value = event.get(field, 0)
@@ -78,11 +92,47 @@ def summarize_events(lines: Iterable[str], days: int = 7) -> dict[str, object]:
             "codegraph_calls": totals["codegraph_calls"],
             "source_mcp_calls": totals["source_mcp_calls"],
             "deep_tasks": totals["deep_tasks"],
+            "deep_escalation": {
+                "recommended_tasks": totals["deep_escalation_recommended_tasks"],
+                "by_reason": dict(sorted(deep_escalation_reasons.items())),
+            },
             "deep_by_model": dict(sorted(deep_models.items())),
             "deep_by_reasoning": dict(sorted(deep_reasoning.items())),
             "deep_duration_ms": totals["deep_duration_ms"],
             "deep_input_tokens": totals["deep_input_tokens"],
             "deep_output_tokens": totals["deep_output_tokens"],
+            "model_tokens": {
+                "luna": {
+                    "input": totals["luna_input_tokens"],
+                    "output": totals["luna_output_tokens"],
+                },
+                "terra_primary": {
+                    "input": totals["terra_primary_input_tokens"],
+                    "output": totals["terra_primary_output_tokens"],
+                },
+                "sol": {
+                    "input": totals["deep_input_tokens"],
+                    "output": totals["deep_output_tokens"],
+                },
+                "terra_synthesis": {
+                    "input": totals["terra_synthesis_input_tokens"],
+                    "output": totals["terra_synthesis_output_tokens"],
+                },
+                "complete_measurement_tasks": totals[
+                    "complete_model_token_measurement_tasks"
+                ],
+            },
+            "scope": {
+                "evidence_packet_tokens": totals["evidence_packet_tokens"],
+                "merge_requests": totals["merge_requests_count"],
+                "repositories": totals["repositories_count"],
+            },
+            "deep_value": {
+                "measurement_tasks": totals["deep_value_measurement_tasks"],
+                "identified": totals["deep_findings_identified"],
+                "new_confirmed": totals["deep_findings_new_confirmed"],
+                "rejected": totals["deep_findings_rejected"],
+            },
             "findings_identified": totals["findings_identified"],
             "findings_confirmed": totals["findings_confirmed"],
             "findings_rejected": totals["findings_rejected"],
@@ -113,6 +163,9 @@ def summarize_events(lines: Iterable[str], days: int = 7) -> dict[str, object]:
             "complete_token_measurement_rate": _coverage_rate(
                 totals["complete_token_measurement_tasks"], totals["events"]
             ),
+            "complete_model_token_measurement_rate": _coverage_rate(
+                totals["complete_model_token_measurement_tasks"], totals["events"]
+            ),
         },
     }
 
@@ -140,5 +193,5 @@ def main() -> None:
     args = parser.parse_args()
     if args.days < 1:
         parser.error("--days must be positive")
-    data_dir = Path(environ.get("QA_ROUTER_DATA_DIR", str(Path.home() / ".qa-router")))
+    data_dir = Path(environ.get("QA_ORCHESTRATOR_DATA_DIR", str(Path.home() / ".qa-orchestrator")))
     print(json.dumps(summarize_events(read_metrics_lines(data_dir / "metrics.jsonl"), args.days), indent=2))

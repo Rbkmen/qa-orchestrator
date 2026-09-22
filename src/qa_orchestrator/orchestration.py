@@ -8,8 +8,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
-from qa_router_mcp.contracts import QaTaskOutcome, QaTaskType, ReviewAgent, ReviewBundle
-from qa_router_mcp.review_profiles import REVIEW_BUNDLES, bundle_profiles
+from qa_orchestrator.contracts import QaTaskOutcome, QaTaskType, ReviewAgent, ReviewBundle
+from qa_orchestrator.review_profiles import REVIEW_BUNDLES, bundle_profiles
 
 
 class OrchestrationStep(StrEnum):
@@ -40,8 +40,90 @@ class OrchestrationReason(StrEnum):
     CROSS_REPOSITORY = "cross_repository"
     SECURITY_SENSITIVE = "security_sensitive"
     PAYMENT_SENSITIVE = "payment_sensitive"
+    FRAUD_SENSITIVE = "fraud_sensitive"
     ROOT_CAUSE = "root_cause"
     HIGH_BLAST_RADIUS = "high_blast_radius"
+    HIGH_RISK_DOMAIN = "high_risk_domain"
+    EVIDENCE_CONFLICT = "evidence_conflict"
+    NON_REPRODUCIBLE = "non_reproducible"
+
+
+class DeepReviewRule(StrEnum):
+    HIGH_RISK_WITH_UNCERTAINTY = "high_risk_with_uncertainty"
+    MULTIPLE_COMPLEXITY_SIGNALS = "multiple_complexity_signals"
+    CRITICAL_EVIDENCE_CONFLICT = "critical_evidence_conflict"
+
+
+class DeepReviewSignals(BaseModel):
+    """Content-free, host-supplied signals used for deterministic escalation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    high_risk_domain: bool = False
+    evidence_uncertain: bool = False
+    cross_system_scope: bool = False
+    multiple_plausible_causes: bool = False
+    evidence_conflict: bool = False
+    non_reproducible: bool = False
+    high_blast_radius: bool = False
+
+
+class DeepReviewAssessment(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    should_escalate: bool
+    triggered_rules: tuple[DeepReviewRule, ...] = ()
+    reason_codes: tuple[OrchestrationReason, ...] = ()
+    complexity_signal_count: int = Field(ge=0, le=4)
+
+
+_COMPLEXITY_SIGNAL_REASONS = (
+    ("cross_system_scope", OrchestrationReason.CROSS_REPOSITORY),
+    ("multiple_plausible_causes", OrchestrationReason.ROOT_CAUSE),
+    ("non_reproducible", OrchestrationReason.NON_REPRODUCIBLE),
+    ("high_blast_radius", OrchestrationReason.HIGH_BLAST_RADIUS),
+)
+
+
+def assess_deep_review(signals: DeepReviewSignals) -> DeepReviewAssessment:
+    """Apply the fixed deep-review rules to structured host signals."""
+    complexity_signal_count = sum(
+        getattr(signals, field_name) for field_name, _ in _COMPLEXITY_SIGNAL_REASONS
+    )
+    triggered_rules: list[DeepReviewRule] = []
+    reason_codes: list[OrchestrationReason] = []
+
+    def add_reason(reason: OrchestrationReason) -> None:
+        if reason not in reason_codes:
+            reason_codes.append(reason)
+
+    if signals.high_risk_domain and signals.evidence_uncertain:
+        triggered_rules.append(DeepReviewRule.HIGH_RISK_WITH_UNCERTAINTY)
+        add_reason(OrchestrationReason.HIGH_RISK_DOMAIN)
+        add_reason(OrchestrationReason.EVIDENCE_GAP)
+
+    if complexity_signal_count >= 2:
+        triggered_rules.append(DeepReviewRule.MULTIPLE_COMPLEXITY_SIGNALS)
+        for field_name, reason in _COMPLEXITY_SIGNAL_REASONS:
+            if getattr(signals, field_name):
+                add_reason(reason)
+
+    if signals.evidence_conflict and (
+        signals.high_risk_domain
+        or signals.cross_system_scope
+        or signals.high_blast_radius
+    ):
+        triggered_rules.append(DeepReviewRule.CRITICAL_EVIDENCE_CONFLICT)
+        add_reason(OrchestrationReason.EVIDENCE_CONFLICT)
+        if signals.high_blast_radius:
+            add_reason(OrchestrationReason.HIGH_BLAST_RADIUS)
+
+    return DeepReviewAssessment(
+        should_escalate=bool(triggered_rules),
+        triggered_rules=tuple(triggered_rules),
+        reason_codes=tuple(reason_codes),
+        complexity_signal_count=complexity_signal_count,
+    )
 
 
 class ModelPolicy(BaseModel):
@@ -88,6 +170,7 @@ class QaOrchestrationSession(BaseModel):
     review_profiles: list[ReviewAgent] = Field(default_factory=list)
     current_profile: ReviewAgent | None = None
     completed_profiles: list[ReviewAgent] = Field(default_factory=list)
+    deep_assessment: DeepReviewAssessment | None = None
     deep_reason_code: OrchestrationReason | None = None
     model_policy: ModelPolicy | None = None
     next_action: str = Field(min_length=1)
@@ -106,6 +189,7 @@ class AdvanceQaOrchestrationRequest(BaseModel):
     selected_bundle: ReviewBundle | None = None
     selected_profile: ReviewAgent | None = None
     completed_profile: ReviewAgent | None = None
+    risk_signals: DeepReviewSignals | None = None
     needs_deep_analysis: bool = False
     reason_code: OrchestrationReason | None = None
 
@@ -127,6 +211,15 @@ class AdvanceQaOrchestrationRequest(BaseModel):
                 raise ValueError("completed_profile requires a completed Terra primary review")
         elif self.completed_profile is not None:
             raise ValueError("completed_profile may only be supplied after Terra primary review")
+
+        if self.risk_signals is not None:
+            if (
+                self.completed_step is not OrchestrationStep.TERRA_PRIMARY_REVIEW
+                or self.status != "completed"
+            ):
+                raise ValueError("risk signals require a completed Terra primary review")
+            if self.needs_deep_analysis or self.reason_code is not None:
+                raise ValueError("risk signals cannot be combined with a manual deep request")
 
         if self.needs_deep_analysis:
             if self.completed_step is not OrchestrationStep.TERRA_PRIMARY_REVIEW:
@@ -236,6 +329,7 @@ class QaOrchestrator:
         selected_bundle: ReviewBundle | None = None,
         selected_profile: ReviewAgent | None = None,
         completed_profile: ReviewAgent | None = None,
+        risk_signals: DeepReviewSignals | None = None,
         needs_deep_analysis: bool = False,
         reason_code: OrchestrationReason | None = None,
     ) -> QaOrchestrationSession:
@@ -247,6 +341,7 @@ class QaOrchestrator:
                 selected_bundle=selected_bundle,
                 selected_profile=selected_profile,
                 completed_profile=completed_profile,
+                risk_signals=risk_signals,
                 needs_deep_analysis=needs_deep_analysis,
                 reason_code=reason_code,
             )
@@ -383,6 +478,7 @@ class QaOrchestrator:
                     "review_profiles": list(selected_profiles),
                     "current_profile": selected_profile,
                     "completed_profiles": [],
+                    "deep_assessment": None,
                     "deep_reason_code": None,
                     "model_policy": MODEL_POLICIES[OrchestrationStep.TERRA_PRIMARY_REVIEW],
                     "next_action": _NEXT_ACTIONS[OrchestrationStep.TERRA_PRIMARY_REVIEW],
@@ -403,6 +499,8 @@ class QaOrchestrator:
             is_last_profile = next_profile_index == len(session.review_profiles) - 1
             if request.needs_deep_analysis and not is_last_profile:
                 raise OrchestrationError("deep analysis requires the final review profile")
+            if request.risk_signals is not None and not is_last_profile:
+                raise OrchestrationError("risk signals require the final review profile")
 
             completed_profiles = [*session.completed_profiles, expected_profile]
             if not is_last_profile:
@@ -416,13 +514,29 @@ class QaOrchestrator:
                     }
                 )
 
-            if request.needs_deep_analysis:
+            assessment = (
+                assess_deep_review(request.risk_signals)
+                if request.risk_signals is not None
+                else None
+            )
+            should_escalate = request.needs_deep_analysis or (
+                assessment is not None and assessment.should_escalate
+            )
+            if should_escalate:
+                reason_code = (
+                    assessment.reason_codes[0]
+                    if assessment is not None and assessment.reason_codes
+                    else request.reason_code
+                )
+                if reason_code is None:
+                    raise OrchestrationError("deep analysis requires a reason code")
                 return session.model_copy(
                     update={
                         "current_step": OrchestrationStep.SOL_DEEP_REVIEW,
                         "current_profile": None,
                         "completed_profiles": completed_profiles,
-                        "deep_reason_code": request.reason_code,
+                        "deep_assessment": assessment,
+                        "deep_reason_code": reason_code,
                         "model_policy": MODEL_POLICIES[OrchestrationStep.SOL_DEEP_REVIEW],
                         "next_action": _NEXT_ACTIONS[OrchestrationStep.SOL_DEEP_REVIEW],
                     }
@@ -432,6 +546,8 @@ class QaOrchestrator:
                     "current_step": OrchestrationStep.TERRA_SYNTHESIS,
                     "current_profile": None,
                     "completed_profiles": completed_profiles,
+                    "deep_assessment": assessment,
+                    "deep_reason_code": None,
                     "model_policy": MODEL_POLICIES[OrchestrationStep.TERRA_SYNTHESIS],
                     "next_action": _NEXT_ACTIONS[OrchestrationStep.TERRA_SYNTHESIS],
                 }

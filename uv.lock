@@ -1003,7 +1003,7 @@ wheels = [
 ]
 
 [[package]]
-name = "qa-router-mcp"
+name = "qa-orchestrator"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

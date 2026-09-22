@@ -9,7 +9,7 @@ from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 
 ROOT = Path(__file__).parents[1]
-LAUNCHER = ROOT / "scripts/qa-router-mcp"
+LAUNCHER = ROOT / "scripts/qa-orchestrator"
 
 
 def test_launcher_is_executable_valid_shell():
@@ -27,10 +27,10 @@ def test_launcher_is_executable_valid_shell():
 def test_launcher_forwards_metrics_overrides():
     content = LAUNCHER.read_text(encoding="utf-8")
 
-    assert 'QA_ROUTER_METRICS_RETENTION_DAYS="${QA_ROUTER_METRICS_RETENTION_DAYS:-30}"' in content
-    assert 'QA_ROUTER_METRICS_MAX_EVENTS="${QA_ROUTER_METRICS_MAX_EVENTS:-10000}"' in content
-    assert 'QA_ROUTER_ORCHESTRATION_TTL_SECONDS="${QA_ROUTER_ORCHESTRATION_TTL_SECONDS:-1800}"' in content
-    assert 'QA_ROUTER_ORCHESTRATION_MAX_SESSIONS="${QA_ROUTER_ORCHESTRATION_MAX_SESSIONS:-100}"' in content
+    assert 'QA_ORCHESTRATOR_METRICS_RETENTION_DAYS="${QA_ORCHESTRATOR_METRICS_RETENTION_DAYS:-30}"' in content
+    assert 'QA_ORCHESTRATOR_METRICS_MAX_EVENTS="${QA_ORCHESTRATOR_METRICS_MAX_EVENTS:-10000}"' in content
+    assert 'QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS="${QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS:-1800}"' in content
+    assert 'QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS="${QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS:-100}"' in content
 
 
 def test_ci_uses_immutable_action_refs_and_builds_wheel():
@@ -45,8 +45,8 @@ def test_ci_uses_immutable_action_refs_and_builds_wheel():
 def test_operational_artifacts_describe_primary_agent_routing():
     artifacts = [
         ROOT / "README.md",
-        ROOT / "docs/ROUTING_POLICY.md",
-        ROOT / "client-rules/generic/QA_ROUTER_INSTRUCTIONS.md",
+        ROOT / "docs/ORCHESTRATION_POLICY.md",
+        ROOT / "client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md",
     ]
 
     for artifact in artifacts:
@@ -59,8 +59,8 @@ def test_operational_artifacts_describe_primary_agent_routing():
 def test_operational_artifacts_describe_host_orchestration():
     artifacts = [
         ROOT / "README.md",
-        ROOT / "docs/ROUTING_POLICY.md",
-        ROOT / "client-rules/generic/QA_ROUTER_INSTRUCTIONS.md",
+        ROOT / "docs/ORCHESTRATION_POLICY.md",
+        ROOT / "client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md",
     ]
     required = (
         "start_qa_orchestration",
@@ -73,10 +73,10 @@ def test_operational_artifacts_describe_host_orchestration():
         "host_owns_decisions",
     )
     forbidden = (
-        "qa router calls models",
-        "qa router invokes models",
-        "submit evidence to qa router",
-        "arbitrary prompt to qa router",
+        "qa orchestrator calls models",
+        "qa orchestrator invokes models",
+        "submit evidence to qa orchestrator",
+        "arbitrary prompt to qa orchestrator",
     )
 
     for artifact in artifacts:
@@ -90,8 +90,8 @@ def test_operational_artifacts_describe_host_orchestration():
 def test_operational_artifacts_describe_review_bundles_and_statuses():
     artifacts = [
         ROOT / "README.md",
-        ROOT / "docs/ROUTING_POLICY.md",
-        ROOT / "client-rules/generic/QA_ROUTER_INSTRUCTIONS.md",
+        ROOT / "docs/ORCHESTRATION_POLICY.md",
+        ROOT / "client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md",
     ]
     required = (
         "ordinary_mr",
@@ -108,8 +108,8 @@ def test_operational_artifacts_describe_review_bundles_and_statuses():
     forbidden = (
         "faraday service",
         "faraday provider",
-        "qa router calls models",
-        "submit evidence to qa router",
+        "qa orchestrator calls models",
+        "submit evidence to qa orchestrator",
     )
 
     for artifact in artifacts:

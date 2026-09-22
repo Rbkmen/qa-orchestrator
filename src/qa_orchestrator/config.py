@@ -9,7 +9,7 @@ class Settings:
     metrics_max_events: int = 10_000
     orchestration_session_ttl_seconds: int = 1_800
     orchestration_max_sessions: int = 100
-    data_dir: Path = Path.home() / ".qa-router"
+    data_dir: Path = Path.home() / ".qa-orchestrator"
 
     @property
     def metrics_path(self) -> Path:
@@ -24,23 +24,23 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         defaults = cls()
-        data_dir = Path(environ.get("QA_ROUTER_DATA_DIR", str(defaults.data_dir)))
+        data_dir = Path(environ.get("QA_ORCHESTRATOR_DATA_DIR", str(defaults.data_dir)))
         return cls(
             metrics_retention_days=int(
-                environ.get("QA_ROUTER_METRICS_RETENTION_DAYS", str(defaults.metrics_retention_days))
+                environ.get("QA_ORCHESTRATOR_METRICS_RETENTION_DAYS", str(defaults.metrics_retention_days))
             ),
             metrics_max_events=int(
-                environ.get("QA_ROUTER_METRICS_MAX_EVENTS", str(defaults.metrics_max_events))
+                environ.get("QA_ORCHESTRATOR_METRICS_MAX_EVENTS", str(defaults.metrics_max_events))
             ),
             orchestration_session_ttl_seconds=int(
                 environ.get(
-                    "QA_ROUTER_ORCHESTRATION_TTL_SECONDS",
+                    "QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS",
                     str(defaults.orchestration_session_ttl_seconds),
                 )
             ),
             orchestration_max_sessions=int(
                 environ.get(
-                    "QA_ROUTER_ORCHESTRATION_MAX_SESSIONS",
+                    "QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS",
                     str(defaults.orchestration_max_sessions),
                 )
             ),

@@ -1,10 +1,10 @@
-# QA Router Host-Owned Orchestrator
+# QA Orchestrator Host-Owned Design
 
 **Status:** Approved by user on 2026-09-19
 
 ## Goal
 
-Add a deterministic, host-owned orchestration layer to QA Router. The orchestrator coordinates a three-model QA flow and a fixed catalog of specialist review profiles without becoming a model runtime, source-system client, autonomous agent factory, or decision authority.
+Add a deterministic, host-owned orchestration layer to QA Orchestrator. The orchestrator coordinates a three-model QA flow and a fixed catalog of specialist review profiles without becoming a model runtime, source-system client, autonomous agent factory, or decision authority.
 
 The implementation must allow one task to run a deterministic bundle of specialist profiles together. The bundle is selected during Luna triage, executed by Terra in the host, and synthesized by Terra after host verification. This adds coordinated specialist coverage without adding another model provider or another autonomous agent role.
 
@@ -12,7 +12,7 @@ The primary host agent remains responsible for authoritative evidence, tool call
 
 ## Model policy
 
-The orchestration contract exposes model assignments and reasoning levels to the host client. QA Router does not invoke these models itself.
+The orchestration contract exposes model assignments and reasoning levels to the host client. QA Orchestrator does not invoke these models itself.
 
 | Stage | Model | Reasoning | Responsibility |
 |---|---|---|---|
@@ -50,7 +50,7 @@ Luna selects one fixed bundle or one single profile. The initial fixed bundles a
 | `autotest` | `code_reviewer`, `pr_test_analyzer`, `typescript_reviewer` |
 | `requirements` | `code_explorer`, `code_reviewer` |
 
-The host runs the selected profiles in order during the Terra primary-review stage. The router exposes the ordered profile list as content-free metadata; it does not run or prompt the profiles. A single-profile selection remains supported for compatibility and is represented as a one-item profile list.
+The host runs the selected profiles in order during the Terra primary-review stage. The orchestrator exposes the ordered profile list as content-free metadata; it does not run or prompt the profiles. A single-profile selection remains supported for compatibility and is represented as a one-item profile list.
 
 The public contract adds a `ReviewBundle` enum and fixed `REVIEW_BUNDLES` mapping. A session exposes `selected_bundle`, compatibility field `selected_profile`, and ordered `review_profiles`. After Luna completes, exactly one of `selected_bundle` or `selected_profile` must be supplied. A bundle expands to its immutable profile order; a single profile expands to a one-item list. The host cannot submit an arbitrary list or reorder a bundle.
 
@@ -60,19 +60,21 @@ The public contract adds a `ReviewBundle` enum and fixed `REVIEW_BUNDLES` mappin
 
 - retrieval from Jira, GitLab, TestRail, Sentry, Grafana, OpenSearch, Slack, Confluence, CodeGraph, and repositories;
 - construction and sanitization of the Evidence Packet;
+- conversion of the evidence state into boolean, content-free deep-review signals;
 - launching the configured model stages and supplying their inputs;
 - interpreting model outputs and separating confirmed findings from hypotheses;
-- the decision to request the Sol escalation;
+- validating the orchestrator's deterministic escalation assessment;
 - severity, priority, root cause, release/readiness judgment, code changes, and external writes.
 
-### QA Router owns
+### QA Orchestrator owns
 
 - deterministic workflow state and allowed transitions;
 - the selected review bundle or single profile, ordered profile metadata, and model policy metadata;
+- deterministic evaluation of host-supplied deep-review signals;
 - read-only constraints and the next host action;
 - content-free orchestration and QA-task metrics.
 
-The router never receives prompts, evidence, source text, model output, logs, issue keys, paths, or credentials.
+The orchestrator never receives prompts, evidence, source text, model output, logs, issue keys, paths, or credentials.
 
 ## Orchestration state machine
 
@@ -96,7 +98,7 @@ terra_primary_review(profile[i])
   -> terra_synthesis          (only after profile[N])
 ```
 
-The Sol branch is entered only when the host reports that deeper read-only analysis is justified. It is never selected from raw evidence by the router. Any stage may end as `partial` or `blocked`; the router does not retry a model or silently switch tiers.
+The Sol branch is entered when the host supplies structured signals that match one of the fixed deep-review rules. It is never selected from raw evidence by the orchestrator. Any stage may end as `partial` or `blocked`; the orchestrator does not retry a model or silently switch tiers.
 
 ## MCP contracts
 
@@ -123,17 +125,18 @@ Advances one valid state transition using structured, content-free signals only:
 - completed step;
 - step status: `completed`, `partial`, or `blocked`;
 - exactly one selected fixed bundle or one `ReviewAgent` after Luna triage;
-- `completed_profile` after each completed Terra primary profile; the router requires the current profile and the fixed bundle order;
-- `needs_deep_analysis=true` to request the optional Sol branch;
-- optional reason code from a fixed enum such as `evidence_gap`, `cross_repository`, `security_sensitive`, `payment_sensitive`, `root_cause`, or `high_blast_radius`.
+- `completed_profile` after each completed Terra primary profile; the orchestrator requires the current profile and the fixed bundle order;
+- `risk_signals` after the final Terra primary profile; the orchestrator applies the fixed deep-review rules and returns a content-free assessment;
+- `needs_deep_analysis=true` plus one fixed reason code remains available for compatibility;
+- optional reason code from a fixed enum such as `evidence_gap`, `cross_repository`, `security_sensitive`, `payment_sensitive`, `root_cause`, or `high_blast_radius` on the compatibility path.
 
-It returns the next step, its assigned model/reasoning, the selected bundle, ordered profile list, current profile, completed profiles, and the constraints for the host. Invalid ordering, skipped profiles, early Sol/synthesis, unknown sessions, incompatible bundle/profile signals, and arbitrary profile names fail closed.
+It returns the next step, its assigned model/reasoning, the selected bundle, ordered profile list, current profile, completed profiles, `deep_assessment` when risk signals were supplied, and the constraints for the host. Invalid ordering, skipped profiles, early Sol/synthesis, unknown sessions, incompatible bundle/profile signals, and arbitrary profile names fail closed.
 
 ### `get_qa_orchestration`
 
 Returns the current content-free session state and next action. It never returns model prompts, outputs, evidence, or source references.
 
-`record_qa_task_outcome` remains the single metrics write for a finished task. For an orchestrated task the host calls it once with the same opaque `run_id` after the session reaches `awaiting_host_outcome`, `partial`, or `blocked`; Router validates and finalizes that session without storing the identifier in metrics. Repeating the same `run_id` and outcome is idempotent.
+`record_qa_task_outcome` remains the single metrics write for a finished task. For an orchestrated task the host calls it once with the same opaque `run_id` after the session reaches `awaiting_host_outcome`, `partial`, or `blocked`; Orchestrator validates and finalizes that session without storing the identifier in metrics. Repeating the same `run_id` and outcome is idempotent.
 
 ## Model-stage behavior
 
@@ -143,13 +146,13 @@ The host gives Luna a minimal Evidence Packet. Luna may suggest one fixed bundle
 
 ### Terra primary review
 
-Terra performs the main implementation-aware review using the selected profile or ordered bundle. For a bundle, Terra runs each profile in order and returns candidate analysis for each role. The host calls `advance_qa_orchestration` with that role's `completed_profile` before the router exposes the next role; synthesis and Sol are unavailable until the final profile is complete. The host checks callers, contracts, tests, runtime evidence, and repository rules before accepting any finding.
+Terra performs the main implementation-aware review using the selected profile or ordered bundle. For a bundle, Terra runs each profile in order and returns candidate analysis for each role. The host calls `advance_qa_orchestration` with that role's `completed_profile` before the orchestrator exposes the next role; synthesis and Sol are unavailable until the final profile is complete. The host checks callers, contracts, tests, runtime evidence, and repository rules before accepting any finding.
 
-The host may report user-facing status at profile boundaries, for example: `Terra / Medium → Faraday — Evidence Investigator`, then `Terra / Medium → Code Reviewer`. The router does not emit conversational progress messages itself.
+The host may report user-facing status at profile boundaries, for example: `Terra / Medium → Faraday — Evidence Investigator`, then `Terra / Medium → Code Reviewer`. The orchestrator does not emit conversational progress messages itself.
 
 ### Sol deep review
 
-Sol receives only the smallest relevant Evidence Packet plus the concrete question that justified escalation. It is read-only and may challenge Terra's assumptions, identify cross-repository impact, or expose high-risk gaps. The host, not Sol or the router, decides whether the result changes the final QA answer.
+Sol receives only the smallest relevant Evidence Packet plus the concrete question that justified escalation. It is read-only and may challenge Terra's assumptions, identify cross-repository impact, or expose high-risk gaps. The orchestrator selects this branch from boolean signals using these rules: high risk plus uncertainty; at least two complexity signals; or a high-impact evidence conflict. The host, not Sol or the orchestrator, decides whether the result changes the final QA answer.
 
 ### Terra synthesis
 
@@ -167,7 +170,7 @@ Synthesis never authorizes a merge, release, severity, or external write by itse
 - Unknown profile or bundle, incompatible bundle/profile selection, altered or skipped profile order, early synthesis/Sol, unknown run, expired session, or illegal transition: typed error and no state change.
 - Model timeout or unavailable host model: host records `partial` or `blocked`; no automatic fallback tier.
 - Sol not required: host advances directly from Terra primary review to Terra synthesis.
-- Server restart: active sessions are discarded; the host starts a fresh session without losing source data because the router never held it.
+- Server restart: active sessions are discarded; the host starts a fresh session without losing source data because the orchestrator never held it.
 - Session limits and TTL prevent unbounded in-memory growth.
 
 ## Metrics
@@ -178,6 +181,12 @@ Extend content-free task metrics with optional orchestration counters:
 - `luna_calls`, `terra_calls`, `sol_calls`;
 - `orchestration_steps_completed`;
 - `orchestration_retries`.
+- optional per-stage token counters for Luna, Terra primary review, Sol, and Terra synthesis;
+- optional Evidence Packet, merge-request, and repository scope counters;
+- optional Sol-value counters for identified, newly confirmed, and rejected findings.
+
+The token fields are `luna_input_tokens`, `luna_output_tokens`, `terra_primary_input_tokens`, `terra_primary_output_tokens`, `deep_input_tokens`, `deep_output_tokens`, `terra_synthesis_input_tokens`, and `terra_synthesis_output_tokens`. Scope fields are `evidence_packet_tokens`, `merge_requests_count`, and `repositories_count`.
+- `deep_escalation_recommended` and fixed `deep_escalation_reason_codes`.
 
 These are non-negative counters supplied by the host. They do not contain model prompts, outputs, issue identifiers, source paths, or task text. The existing source-MCP, CodeGraph, findings, repeated-read, and deep-analysis measurements remain unchanged.
 
@@ -194,14 +203,15 @@ Tests must cover:
 3. every fixed bundle, its exact profile order, and the single-profile compatibility path;
 4. all seven profiles, their display names, and their model assignments;
 5. illegal transitions, expired sessions, unknown runs, and invalid signals;
-6. no evidence or free-form content accepted by orchestration tools;
-7. content-free orchestration metrics and the existing exact MCP surface plus the three new tools;
-8. clean startup with no model process, model endpoint, external Faraday/Qodo/Devin/Jules dependency, or provider dependency.
+6. deterministic deep-review rules for high risk plus uncertainty, two complexity signals, critical evidence conflict, and non-escalating low-risk signals;
+7. no evidence or free-form content accepted by orchestration tools;
+8. content-free orchestration metrics and the existing exact MCP surface plus the three new tools;
+9. clean startup with no model process, model endpoint, external Faraday/Qodo/Devin/Jules dependency, or provider dependency.
 
 ## Non-goals
 
-- Calling models from the QA Router process;
-- retrieving Jira, GitLab, TestRail, monitoring, Slack, Confluence, or repository data from the router;
+- Calling models from the QA Orchestrator process;
+- retrieving Jira, GitLab, TestRail, monitoring, Slack, Confluence, or repository data from the orchestrator;
 - spawning autonomous Codex/Claude/Cursor agents or threads;
 - integrating external Faraday, Qodo, Devin, Jules, or similar products into the core route;
 - automatic severity, root-cause, release, merge, or external-write decisions;

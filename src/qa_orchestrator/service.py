@@ -3,28 +3,28 @@ import json
 from pathlib import Path
 from threading import RLock
 
-from qa_router_mcp.config import Settings
-from qa_router_mcp.contracts import (
+from qa_orchestrator.config import Settings
+from qa_orchestrator.contracts import (
     QaTaskOutcome,
     QaTaskOutcomeReceipt,
     QaTaskType,
     ReviewAgent,
     ReviewRoute,
 )
-from qa_router_mcp.events import EventSink, JsonEventSink, valid_qa_task_metrics
-from qa_router_mcp.orchestration import (
+from qa_orchestrator.events import EventSink, JsonEventSink, valid_qa_task_metrics
+from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
     OrchestrationModel,
     OrchestrationStatus,
     QaOrchestrationSession,
     QaOrchestrator,
 )
-from qa_router_mcp.review_profiles import build_review_route
+from qa_orchestrator.review_profiles import build_review_route
 
 
-class RouterService:
+class OrchestratorService:
     @classmethod
-    def from_settings(cls, *, data_dir: Path | None = None) -> "RouterService":
+    def from_settings(cls, *, data_dir: Path | None = None) -> "OrchestratorService":
         settings = Settings(data_dir=data_dir) if data_dir is not None else Settings()
         return cls(settings)
 
@@ -77,6 +77,18 @@ class RouterService:
         deep_duration_ms: int | None = None,
         deep_input_tokens: int | None = None,
         deep_output_tokens: int | None = None,
+        deep_findings_identified: int | None = None,
+        deep_findings_new_confirmed: int | None = None,
+        deep_findings_rejected: int | None = None,
+        luna_input_tokens: int | None = None,
+        luna_output_tokens: int | None = None,
+        terra_primary_input_tokens: int | None = None,
+        terra_primary_output_tokens: int | None = None,
+        terra_synthesis_input_tokens: int | None = None,
+        terra_synthesis_output_tokens: int | None = None,
+        evidence_packet_tokens: int | None = None,
+        merge_requests_count: int | None = None,
+        repositories_count: int | None = None,
         codegraph_response_tokens: int | None = None,
         source_mcp_response_tokens: int | None = None,
         avoided_source_read_tokens: int | None = None,
@@ -108,6 +120,18 @@ class RouterService:
             ("deep_duration_ms", deep_duration_ms),
             ("deep_input_tokens", deep_input_tokens),
             ("deep_output_tokens", deep_output_tokens),
+            ("deep_findings_identified", deep_findings_identified),
+            ("deep_findings_new_confirmed", deep_findings_new_confirmed),
+            ("deep_findings_rejected", deep_findings_rejected),
+            ("luna_input_tokens", luna_input_tokens),
+            ("luna_output_tokens", luna_output_tokens),
+            ("terra_primary_input_tokens", terra_primary_input_tokens),
+            ("terra_primary_output_tokens", terra_primary_output_tokens),
+            ("terra_synthesis_input_tokens", terra_synthesis_input_tokens),
+            ("terra_synthesis_output_tokens", terra_synthesis_output_tokens),
+            ("evidence_packet_tokens", evidence_packet_tokens),
+            ("merge_requests_count", merge_requests_count),
+            ("repositories_count", repositories_count),
             ("codegraph_response_tokens", codegraph_response_tokens),
             ("source_mcp_response_tokens", source_mcp_response_tokens),
             ("avoided_source_read_tokens", avoided_source_read_tokens),
@@ -131,11 +155,17 @@ class RouterService:
             raise ValueError("run_id requires orchestration_used")
 
         with self._outcome_lock:
-            fingerprint = _outcome_fingerprint(event)
             if run_id is not None:
                 session = self.orchestrator.get(run_id)
+                deep_recommended, deep_reasons = self._deep_escalation_metrics(session)
+                event["deep_escalation_recommended"] = deep_recommended
+                event["deep_escalation_reason_codes"] = deep_reasons
                 if event["task_type"] != session.task_type:
                     raise ValueError("task_type does not match run_id")
+            if not valid_qa_task_metrics(event):
+                raise ValueError("QA task metrics are inconsistent")
+            fingerprint = _outcome_fingerprint(event)
+            if run_id is not None:
                 if not self._valid_orchestration_metrics(event, session, outcome):
                     raise ValueError("QA task metrics are inconsistent")
                 if session.status in {
@@ -166,6 +196,12 @@ class RouterService:
         session: QaOrchestrationSession,
         outcome: QaTaskOutcome,
     ) -> bool:
+        expected_recommended, expected_reasons = OrchestratorService._deep_escalation_metrics(session)
+        if (
+            event.get("deep_escalation_recommended") is not expected_recommended
+            or event.get("deep_escalation_reason_codes") != expected_reasons
+        ):
+            return False
         deep_branch_used = session.deep_reason_code is not None
         if (event["sol_calls"] > 0) != deep_branch_used:
             return False
@@ -186,6 +222,19 @@ class RouterService:
             and event["sol_calls"] >= int(deep_branch_used)
             and event["orchestration_steps_completed"] >= required_steps
         )
+
+    @staticmethod
+    def _deep_escalation_metrics(
+        session: QaOrchestrationSession,
+    ) -> tuple[bool, list[str]]:
+        if session.deep_assessment is not None:
+            return (
+                session.deep_assessment.should_escalate,
+                [reason.value for reason in session.deep_assessment.reason_codes],
+            )
+        if session.deep_reason_code is not None:
+            return True, [session.deep_reason_code.value]
+        return False, []
 
 
 def _outcome_fingerprint(event: dict[str, object]) -> str:

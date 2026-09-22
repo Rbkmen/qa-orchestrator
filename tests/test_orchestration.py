@@ -3,14 +3,17 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from qa_router_mcp.contracts import ReviewAgent, ReviewBundle
-from qa_router_mcp.orchestration import (
+from qa_orchestrator.contracts import ReviewAgent, ReviewBundle
+from qa_orchestrator.orchestration import (
+    DeepReviewRule,
+    DeepReviewSignals,
     OrchestrationError,
+    OrchestrationReason,
     OrchestrationStatus,
     OrchestrationStep,
     QaOrchestrator,
 )
-from qa_router_mcp.review_profiles import REVIEW_BUNDLES
+from qa_orchestrator.review_profiles import REVIEW_BUNDLES
 
 
 def test_normal_flow_skips_sol():
@@ -167,6 +170,60 @@ def test_deep_flow_uses_sol_then_returns_to_terra():
         status="completed",
     )
     assert session.current_step is OrchestrationStep.TERRA_SYNTHESIS
+
+
+def test_structured_signals_select_sol_and_expose_the_reason():
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review")
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.LUNA_TRIAGE,
+        status="completed",
+        selected_profile="code_reviewer",
+    )
+
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
+        status="completed",
+        completed_profile=ReviewAgent.CODE_REVIEWER,
+        risk_signals=DeepReviewSignals(
+            high_risk_domain=True,
+            evidence_uncertain=True,
+        ),
+    )
+
+    assert session.current_step is OrchestrationStep.SOL_DEEP_REVIEW
+    assert session.deep_reason_code is OrchestrationReason.HIGH_RISK_DOMAIN
+    assert session.deep_assessment is not None
+    assert session.deep_assessment.should_escalate is True
+    assert session.deep_assessment.triggered_rules == (
+        DeepReviewRule.HIGH_RISK_WITH_UNCERTAINTY,
+    )
+
+
+def test_structured_signals_can_explicitly_skip_sol():
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review")
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.LUNA_TRIAGE,
+        status="completed",
+        selected_profile="code_reviewer",
+    )
+
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
+        status="completed",
+        completed_profile=ReviewAgent.CODE_REVIEWER,
+        risk_signals=DeepReviewSignals(cross_system_scope=True),
+    )
+
+    assert session.current_step is OrchestrationStep.TERRA_SYNTHESIS
+    assert session.deep_reason_code is None
+    assert session.deep_assessment is not None
+    assert session.deep_assessment.should_escalate is False
 
 
 @pytest.mark.parametrize("profile", list(ReviewAgent))

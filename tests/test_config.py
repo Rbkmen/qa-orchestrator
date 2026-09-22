@@ -4,15 +4,15 @@ from pathlib import Path
 
 import pytest
 
-from qa_router_mcp.config import Settings
+from qa_orchestrator.config import Settings
 
 
 def test_settings_use_metrics_defaults(monkeypatch):
-    monkeypatch.delenv("QA_ROUTER_DATA_DIR", raising=False)
-    monkeypatch.delenv("QA_ROUTER_METRICS_RETENTION_DAYS", raising=False)
-    monkeypatch.delenv("QA_ROUTER_METRICS_MAX_EVENTS", raising=False)
-    monkeypatch.delenv("QA_ROUTER_ORCHESTRATION_TTL_SECONDS", raising=False)
-    monkeypatch.delenv("QA_ROUTER_ORCHESTRATION_MAX_SESSIONS", raising=False)
+    monkeypatch.delenv("QA_ORCHESTRATOR_DATA_DIR", raising=False)
+    monkeypatch.delenv("QA_ORCHESTRATOR_METRICS_RETENTION_DAYS", raising=False)
+    monkeypatch.delenv("QA_ORCHESTRATOR_METRICS_MAX_EVENTS", raising=False)
+    monkeypatch.delenv("QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS", raising=False)
+    monkeypatch.delenv("QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS", raising=False)
 
     settings = Settings.from_env()
 
@@ -38,8 +38,8 @@ def test_settings_reject_non_positive_orchestration_limits():
 
 
 def test_settings_read_orchestration_overrides(monkeypatch):
-    monkeypatch.setenv("QA_ROUTER_ORCHESTRATION_TTL_SECONDS", "90")
-    monkeypatch.setenv("QA_ROUTER_ORCHESTRATION_MAX_SESSIONS", "7")
+    monkeypatch.setenv("QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS", "90")
+    monkeypatch.setenv("QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS", "7")
 
     settings = Settings.from_env()
 
@@ -48,7 +48,7 @@ def test_settings_read_orchestration_overrides(monkeypatch):
 
 
 def test_settings_have_no_model_runtime_configuration():
-    settings = Settings(data_dir=Path("/tmp/qa-router-test"))
+    settings = Settings(data_dir=Path("/tmp/qa-orchestrator-test"))
 
     assert {field.name for field in fields(settings)} == {
         "metrics_retention_days",
@@ -61,12 +61,12 @@ def test_settings_have_no_model_runtime_configuration():
 
 def test_launcher_does_not_reference_model_runtime():
     root = Path(__file__).parents[1]
-    content = (root / "scripts/qa-router-mcp").read_text(encoding="utf-8")
+    content = (root / "scripts/qa-orchestrator").read_text(encoding="utf-8")
 
-    assert set(re.findall(r"QA_ROUTER_[A-Z0-9_]+", content)) <= {
-        "QA_ROUTER_METRICS_RETENTION_DAYS",
-        "QA_ROUTER_METRICS_MAX_EVENTS",
-        "QA_ROUTER_ORCHESTRATION_TTL_SECONDS",
-        "QA_ROUTER_ORCHESTRATION_MAX_SESSIONS",
-        "QA_ROUTER_DATA_DIR",
+    assert set(re.findall(r"QA_ORCHESTRATOR_[A-Z0-9_]+", content)) <= {
+        "QA_ORCHESTRATOR_METRICS_RETENTION_DAYS",
+        "QA_ORCHESTRATOR_METRICS_MAX_EVENTS",
+        "QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS",
+        "QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS",
+        "QA_ORCHESTRATOR_DATA_DIR",
     }

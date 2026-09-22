@@ -2,15 +2,15 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
-from qa_router_mcp.contracts import ReviewBundle
-from qa_router_mcp.review_profiles import REVIEW_BUNDLES
-from qa_router_mcp.server import build_server
-from qa_router_mcp.service import RouterService
+from qa_orchestrator.contracts import ReviewBundle
+from qa_orchestrator.review_profiles import REVIEW_BUNDLES
+from qa_orchestrator.server import build_server
+from qa_orchestrator.service import OrchestratorService
 
 
 @pytest.mark.asyncio
 async def test_server_exposes_six_tools(tmp_path):
-    service = RouterService.from_settings(data_dir=tmp_path)
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
         tools = {tool.name: tool for tool in await client.list_tools()}
@@ -27,7 +27,7 @@ async def test_server_exposes_six_tools(tmp_path):
 
 @pytest.mark.asyncio
 async def test_prepare_review_route_returns_selected_profile(tmp_path):
-    service = RouterService.from_settings(data_dir=tmp_path)
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
         result = await client.call_tool(
@@ -43,7 +43,7 @@ async def test_prepare_review_route_returns_selected_profile(tmp_path):
 
 @pytest.mark.asyncio
 async def test_orchestration_tools_return_no_evidence_fields(tmp_path):
-    service = RouterService.from_settings(data_dir=tmp_path)
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
         result = await client.call_tool(
@@ -78,7 +78,7 @@ async def test_orchestration_tools_return_no_evidence_fields(tmp_path):
 
 @pytest.mark.asyncio
 async def test_orchestration_tools_advance_and_get_structured_state(tmp_path):
-    service = RouterService.from_settings(data_dir=tmp_path)
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
         started = await client.call_tool(
@@ -103,8 +103,50 @@ async def test_orchestration_tools_advance_and_get_structured_state(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_orchestration_tool_selects_sol_from_structured_risk_signals(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+
+    async with Client(build_server(service)) as client:
+        started = await client.call_tool(
+            "start_qa_orchestration",
+            {"task_type": "ordinary_review"},
+        )
+        run_id = started.structured_content["run_id"]
+        primary = await client.call_tool(
+            "advance_qa_orchestration",
+            {
+                "run_id": run_id,
+                "completed_step": "luna_triage",
+                "status": "completed",
+                "selected_profile": "code_reviewer",
+            },
+        )
+        deep = await client.call_tool(
+            "advance_qa_orchestration",
+            {
+                "run_id": run_id,
+                "completed_step": primary.structured_content["current_step"],
+                "status": "completed",
+                "completed_profile": "code_reviewer",
+                "risk_signals": {
+                    "high_risk_domain": True,
+                    "evidence_uncertain": True,
+                },
+            },
+        )
+
+    assert deep.structured_content["current_step"] == "sol_deep_review"
+    assert deep.structured_content["deep_assessment"] == {
+        "should_escalate": True,
+        "triggered_rules": ["high_risk_with_uncertainty"],
+        "reason_codes": ["high_risk_domain", "evidence_gap"],
+        "complexity_signal_count": 0,
+    }
+
+
+@pytest.mark.asyncio
 async def test_orchestration_tools_advance_with_bundle_order(tmp_path):
-    service = RouterService.from_settings(data_dir=tmp_path)
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
         started = await client.call_tool(
@@ -135,7 +177,7 @@ async def test_orchestration_tools_advance_with_bundle_order(tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bundle", list(ReviewBundle))
 async def test_orchestration_tools_complete_each_bundle(tmp_path, bundle: ReviewBundle):
-    service = RouterService.from_settings(data_dir=tmp_path)
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
         started = await client.call_tool(
@@ -200,7 +242,7 @@ async def test_orchestration_tools_complete_each_bundle(tmp_path, bundle: Review
 
 @pytest.mark.asyncio
 async def test_orchestration_tool_rejects_incompatible_bundle_signals(tmp_path):
-    service = RouterService.from_settings(data_dir=tmp_path)
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
         started = await client.call_tool(
@@ -245,7 +287,7 @@ async def test_orchestration_tool_rejects_incompatible_bundle_signals(tmp_path):
 
 @pytest.mark.asyncio
 async def test_orchestration_tool_rejects_selection_after_luna_and_custom_order(tmp_path):
-    service = RouterService.from_settings(data_dir=tmp_path)
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
         started = await client.call_tool(
@@ -288,7 +330,7 @@ async def test_orchestration_tool_rejects_selection_after_luna_and_custom_order(
 
 @pytest.mark.asyncio
 async def test_server_records_orchestration_metrics(tmp_path):
-    service = RouterService.from_settings(data_dir=tmp_path)
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
         started = await client.call_tool(
@@ -358,7 +400,7 @@ async def test_server_records_orchestration_metrics(tmp_path):
 
 @pytest.mark.asyncio
 async def test_task_outcome_and_report_are_model_free(tmp_path):
-    service = RouterService.from_settings(data_dir=tmp_path)
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
         outcome = await client.call_tool(
@@ -383,7 +425,7 @@ async def test_task_outcome_and_report_are_model_free(tmp_path):
 
 @pytest.mark.asyncio
 async def test_metrics_report_rejects_non_positive_days(tmp_path):
-    service = RouterService.from_settings(data_dir=tmp_path)
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
         with pytest.raises(ToolError, match="days must be positive"):
@@ -392,7 +434,7 @@ async def test_metrics_report_rejects_non_positive_days(tmp_path):
 
 @pytest.mark.asyncio
 async def test_unknown_profile_is_rejected_by_mcp_schema(tmp_path):
-    service = RouterService.from_settings(data_dir=tmp_path)
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
         with pytest.raises(ToolError):

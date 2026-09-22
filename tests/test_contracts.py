@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from qa_router_mcp.contracts import QaTaskOutcomeReceipt, ReviewAgent, ReviewRoute
+from qa_orchestrator.contracts import QaTaskOutcomeReceipt, ReviewAgent, ReviewRoute
 
 
 def test_review_route_requires_focus_and_sections():

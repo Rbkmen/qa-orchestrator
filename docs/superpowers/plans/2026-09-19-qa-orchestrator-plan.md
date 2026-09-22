@@ -4,7 +4,7 @@
 
 **Goal:** Extend the existing host-owned QA orchestration state machine with deterministic review bundles, user-facing specialist names, and explicit ordered profile execution while preserving the three-model policy and the six-tool MCP surface.
 
-**Architecture:** Luna/max selects either one compatible profile or one fixed bundle. The host then invokes Terra/medium once per ordered profile, optionally asks Sol/high for a bounded read-only deep review, and uses Terra/medium for synthesis. QA Router remains a content-free contract and state service: it exposes the fixed catalog, validates transitions, returns status metadata, and never invokes models, reads evidence, or performs external writes.
+**Architecture:** Luna/max selects either one compatible profile or one fixed bundle. The host then invokes Terra/medium once per ordered profile, optionally asks Sol/high for a bounded read-only deep review, and uses Terra/medium for synthesis. QA Orchestrator remains a content-free contract and state service: it exposes the fixed catalog, validates transitions, returns status metadata, and never invokes models, reads evidence, or performs external writes.
 
 **Tech Stack:** Python 3.12, FastMCP, Pydantic 2, pytest/pytest-asyncio, Ruff, in-memory TTL-bounded state, JSONL metrics.
 
@@ -30,7 +30,7 @@
 - An expired or unknown `run_id` must return a typed error without leaking session data.
 - Deep analysis requires one fixed reason code; a reason code without a deep-analysis request is invalid.
 - Structured responses and metrics must contain only metadata and fixed counters, never evidence, prompts, model outputs, or generated findings.
-- Documentation must describe the host status flow and must not imply that QA Router runs an agent or model itself.
+- Documentation must describe the host status flow and must not imply that QA Orchestrator runs an agent or model itself.
 
 ---
 
@@ -38,8 +38,8 @@
 
 **Files:**
 
-- Modify: `src/qa_router_mcp/contracts.py`
-- Modify: `src/qa_router_mcp/review_profiles.py`
+- Modify: `src/qa_orchestrator/contracts.py`
+- Modify: `src/qa_orchestrator/review_profiles.py`
 - Test: `tests/test_review_profiles.py`
 - Test: `tests/test_orchestration_contracts.py`
 
@@ -84,7 +84,7 @@
 
 - [x] **Step 4: Run focused tests and lint.**
 
-  Run `uv run pytest -q tests/test_review_profiles.py tests/test_orchestration_contracts.py` and `uv run ruff check src/qa_router_mcp/contracts.py src/qa_router_mcp/review_profiles.py tests/test_review_profiles.py tests/test_orchestration_contracts.py`.
+  Run `uv run pytest -q tests/test_review_profiles.py tests/test_orchestration_contracts.py` and `uv run ruff check src/qa_orchestrator/contracts.py src/qa_orchestrator/review_profiles.py tests/test_review_profiles.py tests/test_orchestration_contracts.py`.
 
   Expected result: all focused tests pass and Ruff reports no errors.
 
@@ -96,7 +96,7 @@
 
 **Files:**
 
-- Modify: `src/qa_router_mcp/orchestration.py`
+- Modify: `src/qa_orchestrator/orchestration.py`
 - Modify: `tests/test_orchestration_contracts.py`
 - Modify: `tests/test_orchestration.py`
 
@@ -149,7 +149,7 @@
 
 - [x] **Step 5: Run the complete orchestration test slice.**
 
-  Run `uv run pytest -q tests/test_orchestration_contracts.py tests/test_orchestration.py` and `uv run ruff check src/qa_router_mcp/orchestration.py tests/test_orchestration_contracts.py tests/test_orchestration.py`.
+  Run `uv run pytest -q tests/test_orchestration_contracts.py tests/test_orchestration.py` and `uv run ruff check src/qa_orchestrator/orchestration.py tests/test_orchestration_contracts.py tests/test_orchestration.py`.
 
   Expected result: normal, Sol, terminal partial/blocked, illegal-transition, expiry, session-limit, bundle-order, and immutability tests all pass.
 
@@ -161,8 +161,8 @@
 
 **Files:**
 
-- Modify: `src/qa_router_mcp/service.py`
-- Modify: `src/qa_router_mcp/server.py`
+- Modify: `src/qa_orchestrator/service.py`
+- Modify: `src/qa_orchestrator/server.py`
 - Modify: `tests/test_service.py`
 - Modify: `tests/test_server.py`
 - Test if required by the implementation: `tests/test_install_artifacts.py`
@@ -182,31 +182,31 @@
 
 - [x] **Step 2: Implement the minimal service/server plumbing.**
 
-  Keep `RouterService` as the owner of the in-memory orchestrator. Add only the new typed bundle argument and response serialization needed by the contracts. Do not move model calls, evidence retrieval, or external-system access into the service or FastMCP layer.
+  Keep `OrchestratorService` as the owner of the in-memory orchestrator. Add only the new typed bundle argument and response serialization needed by the contracts. Do not move model calls, evidence retrieval, or external-system access into the service or FastMCP layer.
 
 - [x] **Step 3: Run focused integration tests and lint.**
 
-  Run `uv run pytest -q tests/test_service.py tests/test_server.py tests/test_install_artifacts.py` and `uv run ruff check src/qa_router_mcp/service.py src/qa_router_mcp/server.py tests/test_service.py tests/test_server.py`.
+  Run `uv run pytest -q tests/test_service.py tests/test_server.py tests/test_install_artifacts.py` and `uv run ruff check src/qa_orchestrator/service.py src/qa_orchestrator/server.py tests/test_service.py tests/test_server.py`.
 
   Expected result: the six-tool surface is unchanged, bundle selection works through the public boundary, and content-bearing inputs remain rejected.
 
 - [x] **Step 4: Commit the MCP contract change.**
 
-  Commit with `feat: expose review bundles through qa-router mcp` after `git diff --check` passes.
+  Commit with `feat: expose review bundles through qa-orchestrator mcp` after `git diff --check` passes.
 
 ### Task 4: Update host-facing routing documentation and status flow
 
 **Files:**
 
 - Modify: `README.md`
-- Modify: `docs/ROUTING_POLICY.md`
+- Modify: `docs/ORCHESTRATION_POLICY.md`
 - Modify: `docs/clients/codex.md`
 - Modify: `docs/clients/generic-mcp.md`
 - Modify: `docs/clients/claude-code.md`
 - Modify: `docs/clients/cursor.md`
-- Modify: `client-rules/generic/QA_ROUTER_INSTRUCTIONS.md`
+- Modify: `client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md`
 - Modify: `client-rules/claude-code/CLAUDE.md`
-- Modify: `client-rules/cursor/qa-router.mdc`
+- Modify: `client-rules/cursor/qa-orchestrator.mdc`
 - Modify: `tests/test_install_artifacts.py`
 
 **Documentation contract:**
@@ -257,7 +257,7 @@
 
 - [x] **Step 1: Run the full automated verification.**
 
-  Run `uv run pytest -q`, `uv run ruff check .`, `git diff --check`, and `/bin/sh -n scripts/qa-router-mcp`.
+  Run `uv run pytest -q`, `uv run ruff check .`, `git diff --check`, and `/bin/sh -n scripts/qa-orchestrator`.
 
 - [x] **Step 2: Verify the public surface and retired references.**
 

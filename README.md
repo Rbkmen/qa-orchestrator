@@ -1,24 +1,24 @@
-# QA Router MCP
+# QA Orchestrator
 
-QA Router MCP is a small deterministic FastMCP service for host-owned QA reviews and anonymized metrics. The router stores only bounded route state: evidence, source code, logs, prompts, model responses, and final decisions remain with the primary host agent.
+QA Orchestrator is a small deterministic FastMCP service for host-owned QA reviews and anonymized metrics. The orchestrator stores only bounded orchestration state: evidence, source code, logs, prompts, model responses, and final decisions remain with the primary host agent.
 
 ## How it works
 
 1. The primary host obtains authoritative evidence from the required systems and classifies the QA task.
-2. The host calls `start_qa_orchestration`. The router creates a content-free session and returns the first step: Luna with `max` reasoning.
-3. The host runs each stage in its configured model environment and sends the router only a structured signal after each stage:
+2. The host calls `start_qa_orchestration`. The orchestrator creates a content-free session and returns the first step: Luna with `max` reasoning.
+3. The host runs each stage in its configured model environment and sends the orchestrator only a structured signal after each stage:
    - `gpt-5.6-luna` + `max` — triage and selection of one fixed review bundle or one compatibility profile;
    - `gpt-5.6-terra` + `medium` — primary review of every profile in the fixed order;
-   - optional `gpt-5.6-sol` + `high` — read-only deep analysis for one fixed reason;
+   - optional `gpt-5.6-sol` + `high` — one read-only deep analysis selected by fixed risk signals;
    - `gpt-5.6-terra` + `medium` — synthesis.
    Every returned model policy includes `speed=1.0`; the host must keep this value for the selected stage.
-4. The host validates findings, runtime evidence, and limitations, then calls `record_qa_task_outcome` once. For an orchestrated task it passes the same `run_id` so the router can close the session.
+4. The host validates findings, runtime evidence, and limitations, then calls `record_qa_task_outcome` once. For an orchestrated task it passes the same `run_id` so the orchestrator can close the session.
 
-The router does not call models, choose severity or release readiness, or perform external writes.
+The orchestrator does not call models, choose severity or release readiness, or perform external writes.
 
 ### Bundles and profile names
 
-Luna selects one fixed bundle or one compatibility profile. Terra executes bundle profiles sequentially. After every role, the host sends `completed_profile`, and the router returns `current_profile` and `completed_profiles`. Sol or synthesis is available only after the final role.
+Luna selects one fixed bundle or one compatibility profile. Terra executes bundle profiles sequentially. After every role, the host sends `completed_profile`, and the orchestrator returns `current_profile` and `completed_profiles`. Sol or synthesis is available only after the final role.
 
 | Bundle | Profile order |
 |---|---|
@@ -53,17 +53,29 @@ Terra / Medium → Synthesis
 Host → Final QA outcome
 ```
 
-When a fixed deep-analysis reason is present, `Sol / High → Deep read-only review` is inserted after the final primary-review role and before synthesis.
+After the final primary-review role, the host sends boolean `risk_signals`. The orchestrator inserts `Sol / High → Deep read-only review` before synthesis when one of the fixed escalation rules matches. It returns the matched rules and fixed reason codes as `deep_assessment`; raw evidence never enters the orchestrator.
+
+Deep-review rules:
+
+1. `high_risk_domain` + `evidence_uncertain`;
+2. any two of `cross_system_scope`, `multiple_plausible_causes`, `non_reproducible`, and `high_blast_radius`;
+3. `evidence_conflict` together with `high_risk_domain`, `cross_system_scope`, or `high_blast_radius`.
+
+The legacy `needs_deep_analysis` + `reason_code` transition remains supported for compatibility.
+
+For low-risk, narrow reviews, Luna may select one compatibility profile instead of a bundle: `code_reviewer` for a small behavior change, `pr_test_analyzer` for a test-only change, `typescript_reviewer` for a TypeScript-only change, or `react_reviewer` for a React-only change. Broad or cross-concern reviews continue to use a fixed bundle.
+
+Keep one compact per-task Evidence Packet with stable evidence references (`E1`, `E2`, ...) and bounded finding candidates (`F-01`, `F-02`, ...). Do not repeat the full diff or raw logs in every model stage.
 
 ## Visual workflow
 
 ### Normal MR review
 
-![QA Route normal MR review](docs/assets/qa-route-normal-review.png)
+![QA Orchestrator normal MR review](docs/assets/qa-orchestrator-normal-review.png)
 
 ### Deep review escalation
 
-![QA Route deep review](docs/assets/qa-route-deep-review.png)
+![QA Orchestrator deep review](docs/assets/qa-orchestrator-deep-review.png)
 
 ## MCP interface
 
@@ -88,7 +100,7 @@ Luna/max → Terra/profile[1] → ... → Terra/profile[N]
 
 Sessions are kept in process memory only. The default TTL is 1,800 seconds and the maximum is 100 active sessions; the shared cache is also bounded, so older terminal sessions may be evicted when capacity is needed. Repeating the final call is idempotent while its session is retained. After a restart, the host starts a new session. `read_only=true` and `host_owns_decisions=true` are part of every state.
 
-After synthesis, the session waits for the final host outcome. A call to `record_qa_task_outcome` with the `run_id` of the current session is treated as orchestrated automatically; `orchestration_used=true` may be sent explicitly, but must not contradict the `run_id`. The router associates counters with the actual branch and moves it to `completed`, `partial`, or `blocked`. For a session stopped at an intermediate stage, first pass `partial` or `blocked` to `advance_qa_orchestration`. Repeating the exact same call for the same `run_id` is idempotent; a changed payload is rejected as a conflict. For a regular task without orchestration, omit `run_id`.
+After synthesis, the session waits for the final host outcome. A call to `record_qa_task_outcome` with the `run_id` of the current session is treated as orchestrated automatically; `orchestration_used=true` may be sent explicitly, but must not contradict the `run_id`. The orchestrator associates counters with the actual branch and moves it to `completed`, `partial`, or `blocked`. For a session stopped at an intermediate stage, first pass `partial` or `blocked` to `advance_qa_orchestration`. Repeating the exact same call for the same `run_id` is idempotent; a changed payload is rejected as a conflict. For a regular task without orchestration, omit `run_id`.
 
 ### Review profiles
 
@@ -106,7 +118,7 @@ The primary host is responsible for:
 - confirmed findings, severity, release/readiness judgment, and the final QA response;
 - file changes and all external writes.
 
-QA Router is responsible only for fixed routing, state transitions, read-only constraints, and content-free metrics. `advance_qa_orchestration` must not receive an Evidence Packet, prompt, model output, source text, logs, paths, or an arbitrary reason.
+QA Orchestrator is responsible only for fixed routing, state transitions, read-only constraints, and content-free metrics. `advance_qa_orchestration` must not receive an Evidence Packet, prompt, model output, source text, logs, paths, or an arbitrary reason.
 
 ## Requirements
 
@@ -118,35 +130,35 @@ QA Router is responsible only for fixed routing, state transitions, read-only co
 ## Installation
 
 ```bash
-git clone https://github.com/Rbkmen/qa-router-mcp.git
-cd qa-router-mcp
+git clone https://github.com/Rbkmen/qa-orchestrator.git
+cd qa-orchestrator
 uv sync
 uv run pytest -q
 uv run ruff check .
 ```
 
-Connect `scripts/qa-router-mcp` as a STDIO MCP server. The launcher first uses the project's `.venv`, then the active `VIRTUAL_ENV`, or an installed `qa-router-mcp` from `PATH`; no separate background process is required.
+Connect `scripts/qa-orchestrator` as a STDIO MCP server. The launcher first uses the project's `.venv`, then the active `VIRTUAL_ENV`, or an installed `qa-orchestrator` from `PATH`; no separate background process is required.
 
 Example for Codex:
 
 ```bash
-codex mcp add qa-router -- \
-  /absolute/path/to/qa-router-mcp/scripts/qa-router-mcp
+codex mcp add qa-orchestrator -- \
+  /absolute/path/to/qa-orchestrator/scripts/qa-orchestrator
 ```
 
 Other connection options are described in the [client guides](docs/clients/).
 
 ## Configuration
 
-By default, metrics are written to `$HOME/.qa-router/metrics.jsonl`.
+By default, metrics are written to `$HOME/.qa-orchestrator/metrics.jsonl`.
 
 | Variable | Default |
 |---|---:|
-| `QA_ROUTER_DATA_DIR` | `$HOME/.qa-router` |
-| `QA_ROUTER_METRICS_RETENTION_DAYS` | `30` |
-| `QA_ROUTER_METRICS_MAX_EVENTS` | `10000` |
-| `QA_ROUTER_ORCHESTRATION_TTL_SECONDS` | `1800` |
-| `QA_ROUTER_ORCHESTRATION_MAX_SESSIONS` | `100` |
+| `QA_ORCHESTRATOR_DATA_DIR` | `$HOME/.qa-orchestrator` |
+| `QA_ORCHESTRATOR_METRICS_RETENTION_DAYS` | `30` |
+| `QA_ORCHESTRATOR_METRICS_MAX_EVENTS` | `10000` |
+| `QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS` | `1800` |
+| `QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS` | `100` |
 
 ## Metrics
 
@@ -155,14 +167,16 @@ By default, metrics are written to `$HOME/.qa-router/metrics.jsonl`.
 - `orchestration_used`;
 - `luna_calls`, `terra_calls`, `sol_calls`;
 - `orchestration_steps_completed`, `orchestration_retries`.
+- `deep_escalation_recommended`, `deep_escalation_reason_codes`.
+- optional per-stage model token counters, Evidence Packet token count, merge-request/repository counts, and Sol-value counters.
 
 For an orchestrated task, use the `run_id` returned by `start_qa_orchestration`; the opaque identifier itself is not written to the JSONL metric.
 
 Values must be non-negative and internally consistent. JSONL contains no issue keys, paths, source text, code, logs, prompts, or model responses. The report is available through MCP or locally:
 
 ```bash
-uv run qa-router-report
-uv run qa-router-report --days 30
+uv run qa-orchestrator-report
+uv run qa-orchestrator-report --days 30
 ```
 
 ## Clients and rules
@@ -171,7 +185,7 @@ uv run qa-router-report --days 30
 - [Claude Code](docs/clients/claude-code.md)
 - [Cursor](docs/clients/cursor.md)
 - [Generic MCP client](docs/clients/generic-mcp.md)
-- [Shared routing policy](docs/ROUTING_POLICY.md)
+- [Shared routing policy](docs/ORCHESTRATION_POLICY.md)
 - [Client-rule templates](client-rules/)
 
 ## Development

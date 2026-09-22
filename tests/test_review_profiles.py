@@ -1,12 +1,12 @@
 import pytest
 
-from qa_router_mcp import contracts, review_profiles
-from qa_router_mcp.contracts import ReviewAgent, ReviewRoute
-from qa_router_mcp.service import RouterService
+from qa_orchestrator import contracts, review_profiles
+from qa_orchestrator.contracts import ReviewAgent, ReviewRoute
+from qa_orchestrator.service import OrchestratorService
 
 
 def test_every_review_profile_returns_read_only_route(tmp_path):
-    service = RouterService.from_settings(data_dir=tmp_path)
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     for profile in ReviewAgent:
         route = service.prepare_review_route(profile)
@@ -26,14 +26,14 @@ def test_every_review_profile_returns_read_only_route(tmp_path):
 
 
 def test_unknown_review_profile_is_rejected(tmp_path):
-    service = RouterService.from_settings(data_dir=tmp_path)
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     with pytest.raises(ValueError, match="unknown review agent profile"):
         service.prepare_review_route("unknown_profile")
 
 
 def test_review_profiles_expose_the_approved_display_names(tmp_path):
-    service = RouterService.from_settings(data_dir=tmp_path)
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
     expected_names = {
         ReviewAgent.CODE_EXPLORER: "Faraday — Evidence Investigator",
         ReviewAgent.CODE_REVIEWER: "Code Reviewer",

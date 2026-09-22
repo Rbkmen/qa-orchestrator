@@ -1,5 +1,5 @@
 [project]
-name = "qa-router-mcp"
+name = "qa-orchestrator"
 version = "0.1.0"
 description = "Deterministic QA review routing and content-free metrics for Codex"
 requires-python = ">=3.12"
@@ -9,8 +9,8 @@ dependencies = [
 ]
 
 [project.scripts]
-qa-router-mcp = "qa_router_mcp.server:main"
-qa-router-report = "qa_router_mcp.report:main"
+qa-orchestrator = "qa_orchestrator.server:main"
+qa-orchestrator-report = "qa_orchestrator.report:main"
 
 [dependency-groups]
 dev = [

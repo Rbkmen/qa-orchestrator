@@ -1,7 +1,7 @@
 from fastmcp import FastMCP
 
-from qa_router_mcp.config import Settings
-from qa_router_mcp.contracts import (
+from qa_orchestrator.config import Settings
+from qa_orchestrator.contracts import (
     QaTaskOutcome,
     QaTaskOutcomeReceipt,
     QaTaskType,
@@ -9,19 +9,20 @@ from qa_router_mcp.contracts import (
     ReviewBundle,
     ReviewRoute,
 )
-from qa_router_mcp.events import JsonEventSink, read_metrics_lines
-from qa_router_mcp.orchestration import (
+from qa_orchestrator.events import JsonEventSink, read_metrics_lines
+from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
+    DeepReviewSignals,
     OrchestrationReason,
     OrchestrationStep,
     QaOrchestrationSession,
 )
-from qa_router_mcp.report import summarize_events
-from qa_router_mcp.service import RouterService
+from qa_orchestrator.report import summarize_events
+from qa_orchestrator.service import OrchestratorService
 
 
-def build_server(service: RouterService) -> FastMCP:
-    mcp = FastMCP(name="qa-router-mcp")
+def build_server(service: OrchestratorService) -> FastMCP:
+    mcp = FastMCP(name="qa-orchestrator")
 
     @mcp.tool
     def prepare_review_route(agent_profile: ReviewAgent) -> ReviewRoute:
@@ -41,6 +42,7 @@ def build_server(service: RouterService) -> FastMCP:
         selected_bundle: ReviewBundle | None = None,
         selected_profile: ReviewAgent | None = None,
         completed_profile: ReviewAgent | None = None,
+        risk_signals: DeepReviewSignals | None = None,
         needs_deep_analysis: bool = False,
         reason_code: OrchestrationReason | None = None,
     ) -> QaOrchestrationSession:
@@ -53,6 +55,7 @@ def build_server(service: RouterService) -> FastMCP:
                 selected_bundle=selected_bundle,
                 selected_profile=selected_profile,
                 completed_profile=completed_profile,
+                risk_signals=risk_signals,
                 needs_deep_analysis=needs_deep_analysis,
                 reason_code=reason_code,
             )
@@ -79,6 +82,18 @@ def build_server(service: RouterService) -> FastMCP:
         deep_duration_ms: int | None = None,
         deep_input_tokens: int | None = None,
         deep_output_tokens: int | None = None,
+        deep_findings_identified: int | None = None,
+        deep_findings_new_confirmed: int | None = None,
+        deep_findings_rejected: int | None = None,
+        luna_input_tokens: int | None = None,
+        luna_output_tokens: int | None = None,
+        terra_primary_input_tokens: int | None = None,
+        terra_primary_output_tokens: int | None = None,
+        terra_synthesis_input_tokens: int | None = None,
+        terra_synthesis_output_tokens: int | None = None,
+        evidence_packet_tokens: int | None = None,
+        merge_requests_count: int | None = None,
+        repositories_count: int | None = None,
         codegraph_response_tokens: int | None = None,
         source_mcp_response_tokens: int | None = None,
         avoided_source_read_tokens: int | None = None,
@@ -106,6 +121,18 @@ def build_server(service: RouterService) -> FastMCP:
             deep_duration_ms=deep_duration_ms,
             deep_input_tokens=deep_input_tokens,
             deep_output_tokens=deep_output_tokens,
+            deep_findings_identified=deep_findings_identified,
+            deep_findings_new_confirmed=deep_findings_new_confirmed,
+            deep_findings_rejected=deep_findings_rejected,
+            luna_input_tokens=luna_input_tokens,
+            luna_output_tokens=luna_output_tokens,
+            terra_primary_input_tokens=terra_primary_input_tokens,
+            terra_primary_output_tokens=terra_primary_output_tokens,
+            terra_synthesis_input_tokens=terra_synthesis_input_tokens,
+            terra_synthesis_output_tokens=terra_synthesis_output_tokens,
+            evidence_packet_tokens=evidence_packet_tokens,
+            merge_requests_count=merge_requests_count,
+            repositories_count=repositories_count,
             codegraph_response_tokens=codegraph_response_tokens,
             source_mcp_response_tokens=source_mcp_response_tokens,
             avoided_source_read_tokens=avoided_source_read_tokens,
@@ -134,7 +161,7 @@ def build_server(service: RouterService) -> FastMCP:
 
 def main() -> None:
     settings = Settings.from_env()
-    service = RouterService(
+    service = OrchestratorService(
         settings,
         JsonEventSink(
             settings.metrics_path,

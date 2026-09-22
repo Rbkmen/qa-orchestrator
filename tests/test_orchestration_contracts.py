@@ -3,10 +3,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
-from qa_router_mcp.contracts import ReviewAgent, ReviewBundle
-from qa_router_mcp.orchestration import (
+from qa_orchestrator.contracts import ReviewAgent, ReviewBundle
+from qa_orchestrator.orchestration import (
     MODEL_POLICIES,
     AdvanceQaOrchestrationRequest,
+    DeepReviewSignals,
     ModelPolicy,
     OrchestrationModel,
     OrchestrationReason,
@@ -93,6 +94,29 @@ def test_deep_reason_requires_fixed_reason_code():
         reason_code=OrchestrationReason.SECURITY_SENSITIVE,
     )
     assert request.reason_code is OrchestrationReason.SECURITY_SENSITIVE
+
+
+def test_risk_signals_are_final_terra_only_and_replace_manual_deep_request():
+    signals = DeepReviewSignals(high_risk_domain=True, evidence_uncertain=True)
+
+    with pytest.raises(ValidationError, match="completed Terra primary review"):
+        AdvanceQaOrchestrationRequest(
+            run_id="qar-0123456789abcdef0123456789abcdef",
+            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            status="completed",
+            selected_profile=ReviewAgent.CODE_REVIEWER,
+            risk_signals=signals,
+        )
+
+    with pytest.raises(ValidationError, match="cannot be combined"):
+        AdvanceQaOrchestrationRequest(
+            run_id="qar-0123456789abcdef0123456789abcdef",
+            completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
+            status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+            risk_signals=signals,
+            needs_deep_analysis=True,
+        )
 
 
 def test_completed_terra_requires_completed_profile():

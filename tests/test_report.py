@@ -1,7 +1,7 @@
 import json
 from datetime import UTC, datetime
 
-from qa_router_mcp.report import summarize_events
+from qa_orchestrator.report import summarize_events
 
 
 def test_report_aggregates_only_model_free_task_outcomes():
@@ -15,11 +15,28 @@ def test_report_aggregates_only_model_free_task_outcomes():
                 "task_type": "ordinary_review",
                 "outcome": "completed",
                 "deep_analysis_used": True,
+                "deep_escalation_recommended": True,
+                "deep_escalation_reason_codes": [
+                    "high_risk_domain",
+                    "evidence_gap",
+                ],
                 "deep_model": "gpt-5.6-sol",
                 "deep_reasoning": "high",
                 "deep_duration_ms": 120,
                 "deep_input_tokens": 20,
                 "deep_output_tokens": 30,
+                "deep_findings_identified": 2,
+                "deep_findings_new_confirmed": 1,
+                "deep_findings_rejected": 1,
+                "luna_input_tokens": 100,
+                "luna_output_tokens": 25,
+                "terra_primary_input_tokens": 240,
+                "terra_primary_output_tokens": 80,
+                "terra_synthesis_input_tokens": 120,
+                "terra_synthesis_output_tokens": 40,
+                "evidence_packet_tokens": 180,
+                "merge_requests_count": 2,
+                "repositories_count": 2,
                 "codegraph_calls": 1,
                 "source_mcp_calls": 2,
                 "findings_identified": 2,
@@ -72,6 +89,31 @@ def test_report_aggregates_only_model_free_task_outcomes():
     assert report["qa_tasks"]["outcomes"] == {"completed": 2}
     assert report["qa_tasks"]["by_task_type"] == {"ordinary_review": 2}
     assert report["qa_tasks"]["deep_tasks"] == 1
+    assert report["qa_tasks"]["deep_escalation"] == {
+        "recommended_tasks": 1,
+        "by_reason": {
+            "evidence_gap": 1,
+            "high_risk_domain": 1,
+        },
+    }
+    assert report["qa_tasks"]["model_tokens"] == {
+        "luna": {"input": 100, "output": 25},
+        "terra_primary": {"input": 240, "output": 80},
+        "sol": {"input": 20, "output": 30},
+        "terra_synthesis": {"input": 120, "output": 40},
+        "complete_measurement_tasks": 1,
+    }
+    assert report["qa_tasks"]["scope"] == {
+        "evidence_packet_tokens": 180,
+        "merge_requests": 2,
+        "repositories": 2,
+    }
+    assert report["qa_tasks"]["deep_value"] == {
+        "measurement_tasks": 1,
+        "identified": 2,
+        "new_confirmed": 1,
+        "rejected": 1,
+    }
     assert report["qa_tasks"]["deep_by_model"] == {"gpt-5.6-sol": 1}
     assert report["qa_tasks"]["findings_confirmed"] == 1
     assert report["qa_tasks"]["codegraph"]["calls"] == 1

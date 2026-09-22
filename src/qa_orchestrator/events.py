@@ -9,7 +9,7 @@ from pathlib import Path
 from tempfile import mkstemp
 from typing import IO, Protocol
 
-from qa_router_mcp.contracts import QaTaskOutcomeReceipt
+from qa_orchestrator.contracts import QaTaskOutcomeReceipt
 
 QA_TASK_TYPES = {
     "ordinary_review",
@@ -34,6 +34,24 @@ QA_TASK_TOKEN_COUNTERS = {
     "source_mcp_response_tokens",
     "avoided_source_read_tokens",
 }
+MODEL_TOKEN_COUNTERS = {
+    "luna_input_tokens",
+    "luna_output_tokens",
+    "terra_primary_input_tokens",
+    "terra_primary_output_tokens",
+    "terra_synthesis_input_tokens",
+    "terra_synthesis_output_tokens",
+}
+SCOPE_COUNTERS = {
+    "evidence_packet_tokens",
+    "merge_requests_count",
+    "repositories_count",
+}
+DEEP_VALUE_COUNTERS = {
+    "deep_findings_identified",
+    "deep_findings_new_confirmed",
+    "deep_findings_rejected",
+}
 ORCHESTRATION_COUNTERS = {
     "luna_calls",
     "terra_calls",
@@ -43,6 +61,18 @@ ORCHESTRATION_COUNTERS = {
 }
 DEEP_REASONING = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 DEEP_MODELS = {"gpt-5.6-sol"}
+DEEP_ESCALATION_REASON_CODES = {
+    "evidence_gap",
+    "cross_repository",
+    "security_sensitive",
+    "payment_sensitive",
+    "fraud_sensitive",
+    "root_cause",
+    "high_blast_radius",
+    "high_risk_domain",
+    "evidence_conflict",
+    "non_reproducible",
+}
 EVENT_FIELDS = {
     "schema_version",
     "event_type",
@@ -55,9 +85,14 @@ EVENT_FIELDS = {
     "deep_duration_ms",
     "deep_input_tokens",
     "deep_output_tokens",
+    "deep_escalation_recommended",
+    "deep_escalation_reason_codes",
     "orchestration_used",
     *QA_TASK_COUNTERS,
     *QA_TASK_TOKEN_COUNTERS,
+    *MODEL_TOKEN_COUNTERS,
+    *SCOPE_COUNTERS,
+    *DEEP_VALUE_COUNTERS,
     *ORCHESTRATION_COUNTERS,
 }
 
@@ -89,9 +124,14 @@ class JsonEventSink:
             "deep_duration_ms",
             "deep_input_tokens",
             "deep_output_tokens",
+            "deep_escalation_recommended",
+            "deep_escalation_reason_codes",
             "orchestration_used",
             *QA_TASK_COUNTERS,
             *QA_TASK_TOKEN_COUNTERS,
+            *MODEL_TOKEN_COUNTERS,
+            *SCOPE_COUNTERS,
+            *DEEP_VALUE_COUNTERS,
             *ORCHESTRATION_COUNTERS,
         }
         payload = {key: event[key] for key in fields if key in event}
@@ -201,6 +241,29 @@ def valid_qa_task_metrics(event: dict[str, object]) -> bool:
     orchestration_used = event.get("orchestration_used", False)
     if type(orchestration_used) is not bool:
         return False
+    escalation_fields_present = {
+        "deep_escalation_recommended",
+        "deep_escalation_reason_codes",
+    } & event.keys()
+    if escalation_fields_present and escalation_fields_present != {
+        "deep_escalation_recommended",
+        "deep_escalation_reason_codes",
+    }:
+        return False
+    if escalation_fields_present:
+        recommended = event["deep_escalation_recommended"]
+        reasons = event["deep_escalation_reason_codes"]
+        if type(recommended) is not bool or not isinstance(reasons, list):
+            return False
+        if any(
+            not isinstance(reason, str) or reason not in DEEP_ESCALATION_REASON_CODES
+            for reason in reasons
+        ) or len(reasons) != len(set(reasons)):
+            return False
+        if recommended is False and reasons:
+            return False
+        if recommended is True and not reasons:
+            return False
     if "deep_model" in event and (
         not deep_used
         or not isinstance(event["deep_model"], str)
@@ -229,6 +292,17 @@ def valid_qa_task_metrics(event: dict[str, object]) -> bool:
         field in event and (type(event[field]) is not int or event[field] < 0)
         for field in QA_TASK_TOKEN_COUNTERS
     ):
+        return False
+    if any(
+        field in event and (type(event[field]) is not int or event[field] < 0)
+        for field in (*MODEL_TOKEN_COUNTERS, *SCOPE_COUNTERS, *DEEP_VALUE_COUNTERS)
+    ):
+        return False
+    if not deep_used and any(event.get(field, 0) > 0 for field in DEEP_VALUE_COUNTERS):
+        return False
+    if event.get("deep_findings_new_confirmed", 0) + event.get(
+        "deep_findings_rejected", 0
+    ) > event.get("deep_findings_identified", 0):
         return False
     if any(
         field in event and (type(event[field]) is not int or event[field] < 0)
