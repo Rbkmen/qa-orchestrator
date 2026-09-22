@@ -1,6 +1,6 @@
 # QA Orchestrator
 
-QA Orchestrator is a small deterministic FastMCP service for host-owned QA reviews and anonymized metrics. The orchestrator stores only bounded orchestration state: evidence, source code, logs, prompts, model responses, and final decisions remain with the primary host agent.
+QA Orchestrator is a small deterministic FastMCP service for host-owned QA reviews and content-free aggregate metrics. It keeps orchestration state bounded; evidence, source code, logs, prompts, model responses, and final decisions remain with the primary host agent.
 
 ## How it works
 
@@ -42,14 +42,13 @@ Technical profiles and display names:
 
 Faraday is only the internal display name of the `code_explorer` profile. No external agent, service, package, or model is connected under that name.
 
-Normal status flow:
+Ordinary MR flow with optional escalation:
 
 ```text
 Luna / Max → Ordinary MR Review
-Sol / Medium → Faraday — Evidence Investigator
-Sol / Medium → Code Reviewer
-Sol / Medium → Test Analyzer
-Sol / Medium → Synthesis
+Sol / Medium → Faraday — Evidence Investigator → Code Reviewer → Test Analyzer
+  ├─ no escalation ───────────────────────────────→ Sol / Medium Synthesis
+  └─ fixed risk signals match → Sol / High Deep Review → Sol / Medium Synthesis
 Host → Final QA outcome
 ```
 
@@ -69,7 +68,7 @@ Keep one compact per-task Evidence Packet with stable evidence references (`E1`,
 
 ## QA Orchestrator at a glance
 
-### Workflow and anonymized stage metrics
+### Workflow and content-free stage metrics
 
 ![Futuristic cyber-console diagram showing the GPT-6 Luna and Sol workflow, optional read-only deep review, and content-free v1 and v2 metrics](docs/assets/qa-orchestrator-stage-metrics-v9.png)
 
@@ -110,7 +109,7 @@ The primary host is responsible for:
 
 - obtaining and validating evidence;
 - calling Jira, GitLab, TestRail, Sentry, Grafana, OpenSearch, Slack, Confluence, CodeGraph, and the file system;
-- running the three model stages under the policy and validating their outputs;
+- running triage, primary-review, synthesis, and any optional deep-review stage under the policy;
 - confirmed findings, severity, release/readiness judgment, and the final QA response;
 - file changes and all external writes.
 
@@ -125,15 +124,15 @@ QA Orchestrator is responsible only for fixed routing, state transitions, read-o
 
 ## Installation
 
+For the complete setup—including Codex registration, host instructions, verification, and troubleshooting—see the [installation guide](docs/INSTALLATION.md).
+
 ```bash
 git clone https://github.com/Rbkmen/qa-orchestrator.git
 cd qa-orchestrator
 uv sync
-uv run pytest -q
-uv run ruff check .
 ```
 
-Connect `scripts/qa-orchestrator` as a STDIO MCP server. The launcher first uses the project's `.venv`, then the active `VIRTUAL_ENV`, or an installed `qa-orchestrator` from `PATH`; no separate background process is required.
+The launcher first uses the project's `.venv`, then the active `VIRTUAL_ENV`, or an installed `qa-orchestrator` from `PATH`; no separate background process is required.
 
 Example for Codex:
 
@@ -158,9 +157,13 @@ By default, metrics are written to `$HOME/.qa-orchestrator/metrics.jsonl`.
 
 ## Metrics
 
+Every `record_qa_task_outcome` call must include the base counters `codegraph_calls`, `source_mcp_calls`, `findings_identified`, `findings_confirmed`, `findings_rejected`, and `repeated_source_reads`; send `0` when a counter is empty.
+
 New `record_qa_task_outcome` events use schema v2; the service assigns the version. Send stage call counters `triage_calls`, `primary_review_calls`, `deep_review_calls`, and `synthesis_calls`, plus shared `orchestration_steps_completed` and `orchestration_retries`. For a completed bundle with `N` profiles, report at least one triage call, `N` primary-review calls, one synthesis call, and `N+2` completed steps. If deep review ran, report its actual call count (at least one) and one additional step. A selected deep branch that stops before the deep review has `deep_review_calls=0` and omits deep model metadata.
 
 When the deep review runs, send `deep_model=gpt-6-sol` and `deep_reasoning=high`. Stage token measurements are optional: `triage_input_tokens`, `triage_output_tokens`, `primary_review_input_tokens`, `primary_review_output_tokens`, `synthesis_input_tokens`, and `synthesis_output_tokens`; deep-review tokens use `deep_input_tokens` and `deep_output_tokens`. Evidence Packet token count, merge-request/repository counts, and deep-analysis finding counters are also optional. Do not send model-family call/token fields for new events.
+
+Other optional counters include `codegraph_response_tokens`, `source_mcp_response_tokens`, and `avoided_source_read_tokens`; deep-review duration is optional as well.
 
 For an orchestrated task, use the `run_id` returned by `start_qa_orchestration`; the opaque identifier itself is not written to the JSONL metric.
 

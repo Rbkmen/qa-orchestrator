@@ -4,6 +4,8 @@ QA Orchestrator must remain a small deterministic service: fixed routing, host-o
 
 ## Development
 
+For end-user setup, see the [installation guide](docs/INSTALLATION.md). This file covers development and contribution workflow.
+
 Requirements:
 
 - Python 3.12+;
@@ -26,8 +28,8 @@ The full test suite must not require network access, credentials, or a separate 
 - `prepare_review_route` returns only static metadata for the selected profile.
 - `start_qa_orchestration`, `advance_qa_orchestration`, and `get_qa_orchestration` manage content-free state only.
 - The orchestrator does not call models, create threads or agents, write user-requested files, or perform writes to external systems.
-- The model policy is fixed: Luna/max for triage, Terra/medium for primary review and synthesis, and optional Sol/high for read-only deep analysis.
-- Metrics contain only the task type, outcome, and aggregate counters; task content is prohibited.
+- The model policy is fixed: GPT-6 Luna/max for triage, GPT-6 Sol/medium for primary review and synthesis, and optional GPT-6 Sol/high for read-only deep analysis. Every stage uses `speed=1.0`.
+- Metrics are content-free and limited to schema-defined metadata and aggregate counters; never store task content such as issue keys, paths, source, logs, prompts, or model responses.
 - Do not add persistent QA memory, a source cache, a learning layer, or hidden external calls.
 
 ## Changing the MCP contract
