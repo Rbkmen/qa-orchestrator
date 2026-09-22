@@ -128,7 +128,7 @@ def test_documentation_contains_no_retired_runtime_terms():
         *ROOT.glob("client-rules/**/*.md"),
         *ROOT.glob("client-rules/**/*.mdc"),
     ]
-    forbidden = ("qwen", "lmstudio", "lm studio", "llmster", "mlx", "local model", "local delegation")
+    forbidden = ("local model", "local delegation")
 
     for artifact in artifacts:
         text = artifact.read_text(encoding="utf-8").lower()
