@@ -7,218 +7,67 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from qa_orchestrator.config import Settings
-from qa_orchestrator.events import read_metrics_lines, valid_qa_task_metrics
+from qa_orchestrator.events import (
+    DISTRIBUTION_EVENT_TYPE,
+    DISTRIBUTION_SCHEMA_VERSION,
+    JsonEventSink,
+    normalize_task_distribution_event,
+    read_metrics_lines,
+    valid_task_distribution_event,
+)
 from qa_orchestrator.service import OrchestratorService
 
 
-def _valid_v2_orchestration_event(**updates):
+def _distribution_event(**updates):
     event = {
-        "schema_version": 2,
+        "schema_version": DISTRIBUTION_SCHEMA_VERSION,
+        "event_type": DISTRIBUTION_EVENT_TYPE,
+        "timestamp": datetime.now(UTC).isoformat(),
         "task_type": "ordinary_review",
-        "outcome": "completed",
-        "deep_analysis_used": False,
-        "orchestration_used": True,
-        "codegraph_calls": 0,
-        "source_mcp_calls": 0,
-        "findings_identified": 0,
-        "findings_confirmed": 0,
-        "findings_rejected": 0,
-        "repeated_source_reads": 0,
-        "triage_calls": 1,
-        "primary_review_calls": 3,
-        "deep_review_calls": 0,
-        "synthesis_calls": 1,
-        "orchestration_steps_completed": 5,
-        "orchestration_retries": 0,
     }
     event.update(updates)
     return event
 
 
-def test_v2_completed_orchestration_accepts_stage_counters():
-    assert valid_qa_task_metrics(_valid_v2_orchestration_event())
+def test_distribution_event_accepts_only_task_type_and_timestamp():
+    assert valid_task_distribution_event(_distribution_event())
+    assert not valid_task_distribution_event(_distribution_event(outcome="completed"))
+    assert not valid_task_distribution_event(_distribution_event(extra_metric=1))
 
 
-@pytest.mark.parametrize("schema_version", [True, 3, 0, "2"])
-def test_metrics_reject_unsupported_schema_versions(schema_version):
-    assert not valid_qa_task_metrics(
-        _valid_v2_orchestration_event(schema_version=schema_version)
-    )
+@pytest.mark.parametrize("schema_version", [True, 1, 2, 4, "3"])
+def test_distribution_rejects_unsupported_schema_versions(schema_version):
+    assert not valid_task_distribution_event(_distribution_event(schema_version=schema_version))
 
 
-@pytest.mark.parametrize("field,value", [("task_type", []), ("outcome", {})])
-def test_metrics_reject_unhashable_task_and_outcome_values(field, value):
-    assert not valid_qa_task_metrics(_valid_v2_orchestration_event(**{field: value}))
+@pytest.mark.parametrize("task_type", [[], {}, "not_a_task_type"])
+def test_distribution_rejects_invalid_task_types(task_type):
+    assert not valid_task_distribution_event(_distribution_event(task_type=task_type))
 
 
-@pytest.mark.parametrize(
-    "field",
-    ["triage_calls", "primary_review_calls", "deep_review_calls", "synthesis_calls"],
-)
-@pytest.mark.parametrize("value", [-1, True])
-def test_v2_rejects_invalid_stage_call_counters(field, value):
-    assert not valid_qa_task_metrics(_valid_v2_orchestration_event(**{field: value}))
+@pytest.mark.parametrize("schema_version", [1, 2, None])
+def test_legacy_outcome_is_normalized_to_distribution_only(schema_version):
+    timestamp = datetime.now(UTC).isoformat()
+    legacy_event = {
+        "event_type": "qa_task_outcome",
+        "timestamp": timestamp,
+        "task_type": "widget_review",
+        "outcome": "completed",
+        "private_metric": 123,
+    }
+    if schema_version is not None:
+        legacy_event["schema_version"] = schema_version
+
+    assert normalize_task_distribution_event(legacy_event) == {
+        "schema_version": DISTRIBUTION_SCHEMA_VERSION,
+        "event_type": DISTRIBUTION_EVENT_TYPE,
+        "timestamp": timestamp,
+        "task_type": "widget_review",
+    }
 
 
-@pytest.mark.parametrize(
-    "field",
-    [
-        "triage_input_tokens",
-        "triage_output_tokens",
-        "primary_review_input_tokens",
-        "primary_review_output_tokens",
-        "synthesis_input_tokens",
-        "synthesis_output_tokens",
-    ],
-)
-@pytest.mark.parametrize("value", [-1, True])
-def test_v2_rejects_invalid_stage_token_counters(field, value):
-    assert not valid_qa_task_metrics(_valid_v2_orchestration_event(**{field: value}))
-
-
-@pytest.mark.parametrize(
-    "field",
-    [
-        "luna_calls",
-        "terra_calls",
-        "sol_calls",
-        "luna_input_tokens",
-        "luna_output_tokens",
-        "terra_primary_input_tokens",
-        "terra_primary_output_tokens",
-        "terra_synthesis_input_tokens",
-        "terra_synthesis_output_tokens",
-    ],
-)
-def test_v2_rejects_legacy_model_counters(field):
-    assert not valid_qa_task_metrics(_valid_v2_orchestration_event(**{field: 1}))
-
-
-@pytest.mark.parametrize(
-    "field",
-    [
-        "triage_calls",
-        "primary_review_calls",
-        "deep_review_calls",
-        "synthesis_calls",
-        "triage_input_tokens",
-        "triage_output_tokens",
-        "primary_review_input_tokens",
-        "primary_review_output_tokens",
-        "synthesis_input_tokens",
-        "synthesis_output_tokens",
-    ],
-)
-def test_v1_rejects_v2_stage_counters(field):
-    event = _valid_v2_orchestration_event(schema_version=1)
-    for stage_field in (
-        "triage_calls",
-        "primary_review_calls",
-        "deep_review_calls",
-        "synthesis_calls",
-    ):
-        event.pop(stage_field)
-    event.update(luna_calls=1, terra_calls=4, sol_calls=0)
-    event[field] = 0
-
-    assert not valid_qa_task_metrics(event)
-
-
-def test_v1_legacy_event_without_schema_version_remains_valid():
-    event = _valid_v2_orchestration_event()
-    event.pop("schema_version")
-    for field in (
-        "triage_calls",
-        "primary_review_calls",
-        "deep_review_calls",
-        "synthesis_calls",
-    ):
-        event.pop(field)
-    event.update(
-        luna_calls=1,
-        terra_calls=4,
-        sol_calls=0,
-    )
-
-    assert valid_qa_task_metrics(event)
-
-
-def test_v1_history_keeps_legacy_deep_model_attribution():
-    event = _valid_v2_orchestration_event(
-        deep_analysis_used=True,
-        deep_model="gpt-5.6-sol",
-        deep_reasoning="high",
-        deep_review_calls=1,
-    )
-    event.pop("schema_version")
-    for field in (
-        "triage_calls",
-        "primary_review_calls",
-        "deep_review_calls",
-        "synthesis_calls",
-    ):
-        event.pop(field)
-    event.update(luna_calls=1, terra_calls=4, sol_calls=1)
-
-    assert valid_qa_task_metrics(event)
-
-
-def test_v2_deep_review_requires_selected_branch_model_and_reasoning():
-    event = _valid_v2_orchestration_event(
-        deep_analysis_used=True,
-        deep_review_calls=1,
-        deep_model="gpt-6-sol",
-        deep_reasoning="high",
-        synthesis_calls=1,
-        orchestration_steps_completed=6,
-    )
-
-    assert valid_qa_task_metrics(event)
-    # This is a call count within the selected branch, not a boolean encoded as 1.
-    assert valid_qa_task_metrics({**event, "deep_review_calls": 2})
-    assert not valid_qa_task_metrics({**event, "deep_review_calls": 0})
-    assert valid_qa_task_metrics({**event, "deep_model": "gpt-5.6-sol"})
-    assert not valid_qa_task_metrics({**event, "deep_model": "secret/path-or-issue-key"})
-    assert valid_qa_task_metrics({**event, "deep_reasoning": "medium"})
-
-
-@pytest.mark.parametrize("outcome", ["partial", "blocked"])
-def test_v2_incomplete_orchestration_may_stop_before_synthesis(outcome):
-    event = _valid_v2_orchestration_event(
-        outcome=outcome,
-        triage_calls=1,
-        primary_review_calls=0,
-        synthesis_calls=0,
-        orchestration_steps_completed=1,
-    )
-
-    assert valid_qa_task_metrics(event)
-
-
-def test_v2_non_orchestrated_event_rejects_stage_calls():
-    event = _valid_v2_orchestration_event(
-        orchestration_used=False,
-        triage_calls=0,
-        primary_review_calls=1,
-        deep_review_calls=0,
-        synthesis_calls=0,
-        orchestration_steps_completed=0,
-    )
-
-    assert not valid_qa_task_metrics(event)
-
-
-def _record_minimal_outcome(service: OrchestratorService) -> None:
-    receipt = service.record_qa_task_outcome(
-        task_type="ordinary_review",
-        outcome="completed",
-        codegraph_calls=0,
-        source_mcp_calls=0,
-        findings_identified=0,
-        findings_confirmed=0,
-        findings_rejected=0,
-        repeated_source_reads=0,
-    )
+def _record_task(service: OrchestratorService, task_type: str = "ordinary_review") -> None:
+    receipt = service.record_qa_task_outcome(task_type=task_type, outcome="completed")
     assert receipt.status == "recorded"
 
 
@@ -234,12 +83,95 @@ def test_metrics_retention_and_max_events_are_enforced(tmp_path):
         )
     )
 
-    _record_minimal_outcome(service)
-    _record_minimal_outcome(service)
+    _record_task(service)
+    _record_task(service, "widget_review")
+    _record_task(service)
 
     events = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines()]
     assert len(events) == 2
     assert all(event["timestamp"] != old_timestamp for event in events)
+
+
+def test_next_write_migrates_old_records_and_drops_unneeded_fields(tmp_path):
+    old_timestamp = datetime.now(UTC).isoformat()
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "event_type": "qa_task_outcome",
+                "timestamp": old_timestamp,
+                "task_type": "widget_review",
+                "outcome": "completed",
+                "private_metric": 123,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+
+    _record_task(service)
+
+    events = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines()]
+    assert events[0] == {
+        "schema_version": DISTRIBUTION_SCHEMA_VERSION,
+        "event_type": DISTRIBUTION_EVENT_TYPE,
+        "timestamp": old_timestamp,
+        "task_type": "widget_review",
+    }
+    assert valid_task_distribution_event(events[1])
+    assert events[1]["task_type"] == "ordinary_review"
+
+
+def test_startup_sanitizer_rewrites_existing_data_to_distribution_only(tmp_path):
+    old_timestamp = datetime.now(UTC).isoformat()
+    older_timestamp = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    metrics_path = tmp_path / "metrics.jsonl"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "event_type": "qa_task_outcome",
+                "timestamp": older_timestamp,
+                "task_type": "ordinary_review",
+                "outcome": "completed",
+                "legacy_metric": 1234,
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "schema_version": 2,
+                "event_type": "qa_task_outcome",
+                "timestamp": old_timestamp,
+                "task_type": "widget_review",
+                "outcome": "completed",
+                "extra_metric": 1234,
+                "model": "private-model-detail",
+            }
+        )
+        + "\nnot-json\n",
+        encoding="utf-8",
+    )
+
+    assert JsonEventSink(metrics_path).sanitize_existing_records()
+
+    events = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines()]
+    assert events == [
+        {
+            "schema_version": DISTRIBUTION_SCHEMA_VERSION,
+            "event_type": DISTRIBUTION_EVENT_TYPE,
+            "timestamp": older_timestamp,
+            "task_type": "ordinary_review",
+        },
+        {
+            "schema_version": DISTRIBUTION_SCHEMA_VERSION,
+            "event_type": DISTRIBUTION_EVENT_TYPE,
+            "timestamp": old_timestamp,
+            "task_type": "widget_review",
+        }
+    ]
 
 
 def test_metrics_rewrite_discards_malformed_lines(tmp_path):
@@ -247,11 +179,11 @@ def test_metrics_rewrite_discards_malformed_lines(tmp_path):
     metrics_path.write_text("not-json\n", encoding="utf-8")
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
-    _record_minimal_outcome(service)
+    _record_task(service)
 
     lines = metrics_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
-    assert json.loads(lines[0])["event_type"] == "qa_task_outcome"
+    assert json.loads(lines[0])["event_type"] == DISTRIBUTION_EVENT_TYPE
 
 
 def test_malformed_utf8_metrics_are_discarded_on_next_write(tmp_path):
@@ -259,11 +191,11 @@ def test_malformed_utf8_metrics_are_discarded_on_next_write(tmp_path):
     metrics_path.write_bytes(b"\xff\n")
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
-    _record_minimal_outcome(service)
+    _record_task(service)
 
     lines = metrics_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
-    assert json.loads(lines[0])["event_type"] == "qa_task_outcome"
+    assert json.loads(lines[0])["event_type"] == DISTRIBUTION_EVENT_TYPE
 
 
 def test_reading_metrics_does_not_create_a_lock_file(tmp_path):
@@ -279,7 +211,7 @@ def test_metrics_storage_uses_restricted_permissions(tmp_path):
     data_dir = tmp_path / "metrics"
     service = OrchestratorService.from_settings(data_dir=data_dir)
 
-    _record_minimal_outcome(service)
+    _record_task(service)
 
     assert stat.S_IMODE(data_dir.stat().st_mode) == 0o700
     assert stat.S_IMODE((data_dir / "metrics.jsonl").stat().st_mode) == 0o600
@@ -295,12 +227,6 @@ def test_metrics_do_not_change_existing_shared_data_dir_permissions(tmp_path):
     receipt = service.record_qa_task_outcome(
         task_type="ordinary_review",
         outcome="completed",
-        codegraph_calls=0,
-        source_mcp_calls=0,
-        findings_identified=0,
-        findings_confirmed=0,
-        findings_rejected=0,
-        repeated_source_reads=0,
     )
 
     assert receipt.status == "unavailable"
@@ -312,8 +238,8 @@ def test_concurrent_metrics_writers_preserve_each_event(tmp_path):
     services = [OrchestratorService.from_settings(data_dir=tmp_path) for _ in range(8)]
 
     with ThreadPoolExecutor(max_workers=len(services)) as executor:
-        list(executor.map(_record_minimal_outcome, services))
+        list(executor.map(_record_task, services))
 
     lines = (tmp_path / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(lines) == len(services)
-    assert all(json.loads(line)["event_type"] == "qa_task_outcome" for line in lines)
+    assert all(json.loads(line)["event_type"] == DISTRIBUTION_EVENT_TYPE for line in lines)

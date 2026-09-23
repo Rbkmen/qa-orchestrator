@@ -1,3 +1,4 @@
+import sys
 from typing import Annotated
 
 from fastmcp import FastMCP
@@ -13,7 +14,6 @@ from qa_orchestrator.contracts import (
     ReviewRoute,
 )
 from qa_orchestrator.events import JsonEventSink, read_metrics_lines
-from qa_orchestrator.model_policy import MODEL_ID_PATTERN, ReasoningEffort
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
     DeepReviewSignals,
@@ -21,7 +21,7 @@ from qa_orchestrator.orchestration import (
     OrchestrationStep,
     QaOrchestrationSession,
 )
-from qa_orchestrator.report import MetricsReport, summarize_events
+from qa_orchestrator.report import TaskDistributionReport, summarize_events
 from qa_orchestrator.service import OrchestratorService
 
 READ_ONLY_TOOL_ANNOTATIONS = {
@@ -36,9 +36,6 @@ STATE_TOOL_ANNOTATIONS = {
     "openWorldHint": False,
 }
 RunId = Annotated[str, Field(pattern=r"^qar-[0-9a-f]{32}$")]
-NonNegativeInt = Annotated[int, Field(ge=0)]
-ModelId = Annotated[str, Field(min_length=1, max_length=128, pattern=MODEL_ID_PATTERN)]
-DeepReasoning = ReasoningEffort
 
 
 def _validate_positive_days(value: int) -> int:
@@ -113,113 +110,48 @@ def build_server(service: OrchestratorService) -> FastMCP:
     def record_qa_task_outcome(
         task_type: QaTaskType,
         outcome: QaTaskOutcome,
-        codegraph_calls: NonNegativeInt,
-        source_mcp_calls: NonNegativeInt,
-        findings_identified: NonNegativeInt,
-        findings_confirmed: NonNegativeInt,
-        findings_rejected: NonNegativeInt,
-        repeated_source_reads: NonNegativeInt,
-        deep_analysis_used: bool = False,
-        deep_model: ModelId | None = None,
-        deep_reasoning: DeepReasoning | None = None,
-        deep_duration_ms: NonNegativeInt | None = None,
-        deep_input_tokens: NonNegativeInt | None = None,
-        deep_output_tokens: NonNegativeInt | None = None,
-        deep_findings_identified: NonNegativeInt | None = None,
-        deep_findings_new_confirmed: NonNegativeInt | None = None,
-        deep_findings_rejected: NonNegativeInt | None = None,
-        triage_input_tokens: NonNegativeInt | None = None,
-        triage_output_tokens: NonNegativeInt | None = None,
-        primary_review_input_tokens: NonNegativeInt | None = None,
-        primary_review_output_tokens: NonNegativeInt | None = None,
-        synthesis_input_tokens: NonNegativeInt | None = None,
-        synthesis_output_tokens: NonNegativeInt | None = None,
-        evidence_packet_tokens: NonNegativeInt | None = None,
-        merge_requests_count: NonNegativeInt | None = None,
-        repositories_count: NonNegativeInt | None = None,
-        codegraph_response_tokens: NonNegativeInt | None = None,
-        source_mcp_response_tokens: NonNegativeInt | None = None,
-        avoided_source_read_tokens: NonNegativeInt | None = None,
-        orchestration_used: bool | None = None,
-        triage_calls: NonNegativeInt = 0,
-        primary_review_calls: NonNegativeInt = 0,
-        deep_review_calls: NonNegativeInt = 0,
-        synthesis_calls: NonNegativeInt = 0,
-        orchestration_steps_completed: NonNegativeInt = 0,
-        orchestration_retries: NonNegativeInt = 0,
         run_id: RunId | None = None,
     ) -> QaTaskOutcomeReceipt:
-        """Record one content-free outcome owned by the host QA agent.
+        """Record only the task category for aggregate distribution.
 
-        When run_id is supplied, include the orchestration stage counters. For
-        a completed bundle with N primary-review profiles, the minimum is one
-        triage call, N primary-review calls, one synthesis call, and N+2
-        completed steps, plus one deep-review call and one additional step
-        when deep review ran. `deep_model` must match the configured deep-stage
-        model when an orchestrated run uses deep review.
+        `outcome` finalizes orchestration when `run_id` is supplied. The outcome
+        and run identifier are not written to the distribution record.
         """
         return service.record_qa_task_outcome(
             task_type=task_type,
             outcome=outcome,
-            codegraph_calls=codegraph_calls,
-            source_mcp_calls=source_mcp_calls,
-            findings_identified=findings_identified,
-            findings_confirmed=findings_confirmed,
-            findings_rejected=findings_rejected,
-            repeated_source_reads=repeated_source_reads,
-            deep_analysis_used=deep_analysis_used,
-            deep_model=deep_model,
-            deep_reasoning=deep_reasoning,
-            deep_duration_ms=deep_duration_ms,
-            deep_input_tokens=deep_input_tokens,
-            deep_output_tokens=deep_output_tokens,
-            deep_findings_identified=deep_findings_identified,
-            deep_findings_new_confirmed=deep_findings_new_confirmed,
-            deep_findings_rejected=deep_findings_rejected,
-            triage_input_tokens=triage_input_tokens,
-            triage_output_tokens=triage_output_tokens,
-            primary_review_input_tokens=primary_review_input_tokens,
-            primary_review_output_tokens=primary_review_output_tokens,
-            synthesis_input_tokens=synthesis_input_tokens,
-            synthesis_output_tokens=synthesis_output_tokens,
-            evidence_packet_tokens=evidence_packet_tokens,
-            merge_requests_count=merge_requests_count,
-            repositories_count=repositories_count,
-            codegraph_response_tokens=codegraph_response_tokens,
-            source_mcp_response_tokens=source_mcp_response_tokens,
-            avoided_source_read_tokens=avoided_source_read_tokens,
-            orchestration_used=orchestration_used,
-            triage_calls=triage_calls,
-            primary_review_calls=primary_review_calls,
-            deep_review_calls=deep_review_calls,
-            synthesis_calls=synthesis_calls,
-            orchestration_steps_completed=orchestration_steps_completed,
-            orchestration_retries=orchestration_retries,
             run_id=run_id,
         )
 
     @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
-    def get_metrics_report(days: PositiveDays = 7) -> MetricsReport:
-        """Read content-free QA task metrics for a positive time window."""
+    def get_metrics_report(days: PositiveDays = 7) -> TaskDistributionReport:
+        """Read aggregate QA task distribution for a positive time window."""
         if days < 1:
             raise ValueError("days must be positive")
         try:
             lines = read_metrics_lines(service.settings.metrics_path)
         except OSError as exc:
             raise RuntimeError("metrics_unavailable") from exc
-        return MetricsReport.model_validate(summarize_events(lines, days=days))
+        return TaskDistributionReport.model_validate(summarize_events(lines, days=days))
 
     return mcp
 
 
 def main() -> None:
     settings = Settings.from_env()
+    events = JsonEventSink(
+        settings.metrics_path,
+        settings.metrics_retention_days,
+        settings.metrics_max_events,
+    )
+    if not events.sanitize_existing_records():
+        print(
+            "Existing task-distribution data could not be sanitized; "
+            "reporting remains aggregate-only.",
+            file=sys.stderr,
+        )
     service = OrchestratorService(
         settings,
-        JsonEventSink(
-            settings.metrics_path,
-            settings.metrics_retention_days,
-            settings.metrics_max_events,
-        ),
+        events,
     )
     build_server(service).run()

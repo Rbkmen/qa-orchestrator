@@ -77,6 +77,6 @@ During triage, select exactly one fixed bundle or one compatibility profile, nev
 
 For a low-risk, one-repository change with one narrow concern, prefer one compatibility profile: `code_reviewer` for behavior/callers, `pr_test_analyzer` for test-only changes, `typescript_reviewer` for TypeScript-only changes, or `react_reviewer` for React-only changes. Keep one compact Evidence Packet with `E1`-style references and bounded `F-01` finding candidates; pass only the relevant sections to each role.
 
-New outcome events use schema v2 stage counters: `triage_calls`, `primary_review_calls`, `deep_review_calls`, and `synthesis_calls`; stage-token fields use the `triage_*`, `primary_review_*`, and `synthesis_*` names, while deep-review tokens remain `deep_input_tokens` and `deep_output_tokens`. Stored v1 history remains readable and reported separately.
+At the final status, call `record_qa_task_outcome` with `task_type`, `outcome`, and the original `run_id` for orchestrated work. Only task type and timestamp are saved for the aggregate distribution; the outcome is used to finalize the session but is not persisted. `get_metrics_report(days)` returns the total task count and counts by task type.
 
 Reference: [official Codex MCP documentation](https://developers.openai.com/codex/mcp).

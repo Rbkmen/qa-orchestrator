@@ -1,6 +1,6 @@
 # QA Orchestrator
 
-QA Orchestrator is a small deterministic FastMCP service for host-owned QA reviews and content-free aggregate metrics. It keeps orchestration state bounded; evidence, source code, logs, prompts, model responses, and final decisions remain with the primary host agent.
+QA Orchestrator is a small deterministic FastMCP service for host-owned QA reviews and aggregate task distribution. It keeps orchestration state bounded; evidence, source code, logs, prompts, model responses, and final decisions remain with the primary host agent.
 
 ## How it works
 
@@ -69,9 +69,9 @@ Keep one compact per-task Evidence Packet with stable evidence references (`E1`,
 
 ## QA Orchestrator at a glance
 
-### Workflow and content-free stage metrics
+### Workflow and task distribution
 
-![Provider-neutral workflow stages and content-free v1 and v2 metrics](docs/assets/qa-orchestrator-stage-metrics-v10.png)
+![Current QA Orchestrator workflow and task-distribution report, showing task type and timestamp as the only retained task data.](docs/assets/qa-orchestrator-workflow-and-distribution.png)
 
 ## MCP interface
 
@@ -83,8 +83,8 @@ The service publishes exactly six tools:
 | `start_qa_orchestration(task_type)` | Create a host-owned orchestration session |
 | `advance_qa_orchestration(...)` | Make one structured transition between stages |
 | `get_qa_orchestration(run_id)` | Read the current content-free state |
-| `record_qa_task_outcome(...)` | Record one anonymized QA-task result |
-| `get_metrics_report(days)` | Return an aggregate report for a positive time range |
+| `record_qa_task_outcome(...)` | Record a task category and finalize an optional orchestration session |
+| `get_metrics_report(days)` | Return task counts by category for a positive time range |
 
 Bundle orchestration flow:
 
@@ -96,7 +96,7 @@ Triage → Primary review[1] → ... → Primary review[N]
 
 Sessions are kept in process memory only. The default TTL is 1,800 seconds and the maximum is 100 active sessions; the shared cache is also bounded, so older terminal sessions may be evicted when capacity is needed. Repeating the final call is idempotent while its session is retained. After a restart, the host starts a new session. `read_only=true` and `host_owns_decisions=true` are part of every state.
 
-After synthesis, the session waits for the final host outcome. A call to `record_qa_task_outcome` with the `run_id` of the current session is treated as orchestrated automatically; `orchestration_used=true` may be sent explicitly, but must not contradict the `run_id`. The orchestrator associates counters with the actual branch and moves it to `completed`, `partial`, or `blocked`. For a session stopped at an intermediate stage, first pass `partial` or `blocked` to `advance_qa_orchestration`. Repeating the exact same call for the same `run_id` is idempotent; a changed payload is rejected as a conflict. For a regular task without orchestration, omit `run_id`.
+After synthesis, the session waits for the final host outcome. Call `record_qa_task_outcome` with `task_type`, `outcome`, and the session `run_id`; the outcome finalizes the session but is not saved in task-distribution data. For a session stopped at an intermediate stage, first pass `partial` or `blocked` to `advance_qa_orchestration`. Repeating the exact same call for the same `run_id` is idempotent; a changed outcome is rejected as a conflict. For a regular task without orchestration, omit `run_id`.
 
 ### Review profiles
 
@@ -114,7 +114,7 @@ The primary host is responsible for:
 - confirmed findings, severity, release/readiness judgment, and the final QA response;
 - file changes and all external writes.
 
-QA Orchestrator is responsible only for fixed routing, state transitions, read-only constraints, and content-free metrics. `advance_qa_orchestration` must not receive an Evidence Packet, prompt, model output, source text, logs, paths, or an arbitrary reason.
+QA Orchestrator is responsible only for fixed routing, state transitions, read-only constraints, and aggregate task distribution. `advance_qa_orchestration` must not receive an Evidence Packet, prompt, model output, source text, logs, paths, or an arbitrary reason.
 
 ## Requirements
 
@@ -182,7 +182,7 @@ The two supported host integrations are described in the [client guides](docs/cl
 
 ## Configuration
 
-By default, metrics are written to `$HOME/.qa-orchestrator/metrics.jsonl`.
+By default, task-distribution records are written to `$HOME/.qa-orchestrator/metrics.jsonl`.
 
 | Variable | Default |
 |---|---:|
@@ -193,21 +193,13 @@ By default, metrics are written to `$HOME/.qa-orchestrator/metrics.jsonl`.
 | `QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS` | `100` |
 | `QA_ORCHESTRATOR_MODEL_POLICY_PATH` | `$HOME/.qa-orchestrator/model-policy.json` |
 
-## Metrics
+## Task distribution
 
-Every `record_qa_task_outcome` call must include the base counters `codegraph_calls`, `source_mcp_calls`, `findings_identified`, `findings_confirmed`, `findings_rejected`, and `repeated_source_reads`; send `0` when a counter is empty.
+Call `record_qa_task_outcome` once when the final QA status is known, with `task_type` and `outcome`. For orchestrated work, also pass the original `run_id`; for regular work, omit it. Only task type and timestamp are saved. The outcome finalizes an orchestration session but is not retained in the distribution data.
 
-New `record_qa_task_outcome` events use schema v2; the service assigns the version. Send stage call counters `triage_calls`, `primary_review_calls`, `deep_review_calls`, and `synthesis_calls`, plus shared `orchestration_steps_completed` and `orchestration_retries`. For a completed bundle with `N` profiles, report at least one triage call, `N` primary-review calls, one synthesis call, and `N+2` completed steps. If deep review ran, report its actual call count (at least one) and one additional step. A selected deep branch that stops before the deep review has `deep_review_calls=0` and omits deep model metadata.
+The report contains only `period_days`, `total_tasks`, and `by_task_type`. It is available through MCP or locally:
 
-When the deep review runs, send the configured deep-stage model in `deep_model` and its configured `deep_reasoning` (default `high`). Stage token measurements are optional: `triage_input_tokens`, `triage_output_tokens`, `primary_review_input_tokens`, `primary_review_output_tokens`, `synthesis_input_tokens`, and `synthesis_output_tokens`; deep-review tokens use `deep_input_tokens` and `deep_output_tokens`. Evidence Packet token count, merge-request/repository counts, and deep-analysis finding counters are also optional. Do not send model-family call/token fields for new events.
-
-Other optional counters include `codegraph_response_tokens`, `source_mcp_response_tokens`, and `avoided_source_read_tokens`; deep-review duration is optional as well.
-
-For an orchestrated task, use the `run_id` returned by `start_qa_orchestration`; the opaque identifier itself is not written to the JSONL metric.
-
-Values must be non-negative and internally consistent. JSONL contains no issue keys, paths, source text, code, logs, prompts, or model responses. The report is available through MCP or locally:
-
-Schema-v1 rows already stored remain readable. Their model-family totals stay in the legacy report fields; schema-v2 stage totals appear separately as `stage_calls` and `stage_tokens`. The report keeps exact deep-model IDs and combines shared task totals across versions. Incomplete v2 token measurements contribute known token values but not to the complete-measurement count.
+On startup, existing supported outcome events are reduced to their timestamp and task type; other fields are discarded. New JSONL entries contain no issue keys, paths, source text, code, logs, prompts, or model responses.
 
 ```bash
 uv run qa-orchestrator-report

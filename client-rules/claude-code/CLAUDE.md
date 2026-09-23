@@ -6,7 +6,7 @@ When the `qa-orchestrator` MCP server is available, use it as a deterministic QA
 
 - If the MCP is unavailable, a required call fails, or the session expires,
   continue with the selected workspace and repository rules, mark orchestration
-  and metrics as unavailable, and never emulate or claim an orchestration call.
+  and task-distribution recording as unavailable, and never emulate or claim an orchestration call.
 - A partial result caused by missing orchestration input remains a valid
   host-owned QA result; report the missing boundary.
 - Obtain evidence, run model stages, analyze the task, produce findings, make the final QA decision, and perform any changes or external writes in Claude Code.
@@ -19,21 +19,13 @@ When the `qa-orchestrator` MCP server is available, use it as a deterministic QA
 - Use the route only as a focus/checklist. Independently verify the diff, callers, contracts, runtime evidence, and unverified gaps.
 - When the current QA task reaches its final reported status (`completed`,
   `partial`, or `blocked`), call `record_qa_task_outcome` exactly once with
-  counters and no issue keys, source text, code, logs, or paths. Do not record
-  intermediate continuations; if the task resumes after a partial result,
-  record only the final status for that task. For orchestration, pass the
-  opaque `run_id`; do not pass `orchestration_used=false` with a `run_id`.
-  New outcome events use schema v2: send `triage_calls`,
-  `primary_review_calls`, `deep_review_calls`, `synthesis_calls`, shared
-  `orchestration_steps_completed` and `orchestration_retries`, and optional
-  `triage_input_tokens`, `triage_output_tokens`,
-  `primary_review_input_tokens`, `primary_review_output_tokens`,
-  `synthesis_input_tokens`, and `synthesis_output_tokens`. Deep-review tokens
-  remain `deep_input_tokens` and `deep_output_tokens`. Only report
-  the configured `deep_model` and
-  configured `deep_reasoning` (default `high` when supported by the selected model) after deep review runs; if the task stops before it
-  starts, use `deep_review_calls=0` and omit those fields. Stored v1 history
-  remains readable and is reported separately.
-- Use `get_metrics_report` only for aggregate read-only metrics.
+  only `task_type`, `outcome`, and the opaque `run_id` when orchestration was
+  used. Do not record intermediate continuations; if the task resumes after a
+  partial result, record only the final status. The outcome finalizes an
+  orchestrated session but is not saved in distribution data. Only task type
+  and timestamp are stored; findings, model settings, stage calls, and source
+  calls are not collected.
+- Use `get_metrics_report` only for the aggregate task distribution: total
+  tasks and counts by task type.
 - For implementation-aware reviews, use Findings, Changes, Manual Test Plan, and Open Questions / Could Not Verify; follow the workspace flow when it defines another output shape for requirements or planning.
 - Do not add persistent QA memory, a source cache, or hidden tool calls.

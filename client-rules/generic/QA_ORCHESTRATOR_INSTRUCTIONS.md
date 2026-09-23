@@ -1,6 +1,6 @@
 # QA Orchestrator host-agent instructions
 
-Use `qa-orchestrator` as a deterministic helper for QA profiles and anonymized task metrics. The primary host agent remains the sole owner of evidence, analysis, decisions, and external actions.
+Use `qa-orchestrator` as a deterministic helper for QA profiles and anonymized task distribution. The primary host agent remains the sole owner of evidence, analysis, decisions, and external actions.
 
 This file is the canonical source for orchestrator mechanics. Workspace and repository rules own task-specific routing and output shape; they should reference this file instead of duplicating its mechanics.
 
@@ -9,7 +9,7 @@ This file is the canonical source for orchestrator mechanics. Workspace and repo
 - Use these instructions only when the `qa-orchestrator` MCP is available and
   the task is an applicable QA flow. If the MCP is unavailable, a required call
   fails, or the session expires, continue with the selected workspace and
-  repository rules, mark orchestration and metrics as unavailable, and never
+  repository rules, mark orchestration and task-distribution recording as unavailable, and never
   emulate or claim an orchestration call.
 - A partial result caused by missing orchestration input remains a valid
   host-owned QA result; report the missing boundary.
@@ -17,7 +17,7 @@ This file is the canonical source for orchestrator mechanics. Workspace and repo
 ## Review routing
 
 - For an implementation-aware QA review, start with `start_qa_orchestration`. During triage, select exactly one fixed bundle or one compatibility profile; never send `selected_bundle` and `selected_profile` together. Then call `prepare_review_route` for each selected profile: `pr_test_analyzer`, `code_reviewer`, `security_reviewer`, `silent_failure_hunter`, `code_explorer`, `typescript_reviewer`, or `react_reviewer`.
-- For a low-risk, one-repository change with one narrow concern, prefer one compatibility profile to save tokens: `code_reviewer` for behavior/callers, `pr_test_analyzer` for test-only changes, `typescript_reviewer` for TypeScript-only changes, or `react_reviewer` for React-only changes. Use a fixed bundle for broad, cross-concern, or high-risk work.
+- For a low-risk, one-repository change with one narrow concern, prefer one compatibility profile: `code_reviewer` for behavior/callers, `pr_test_analyzer` for test-only changes, `typescript_reviewer` for TypeScript-only changes, or `react_reviewer` for React-only changes. Use a fixed bundle for broad, cross-concern, or high-risk work.
 - Available bundles are `ordinary_mr` (`code_explorer` → `code_reviewer` → `pr_test_analyzer`), `widget` (`code_explorer` → `react_reviewer` → `typescript_reviewer` → `pr_test_analyzer`), `security` (`code_explorer` → `security_reviewer` → `silent_failure_hunter`), `autotest` (`code_reviewer` → `pr_test_analyzer` → `typescript_reviewer`), and `requirements` (`code_explorer` → `code_reviewer`). Do not change the order or submit a custom list.
 - Role display names are `Faraday — Evidence Investigator` = `code_explorer`, `Code Reviewer`, `Test Analyzer`, `Security Reviewer`, `Silent Failure Hunter`, `TypeScript Reviewer`, and `React Reviewer`. Faraday is an internal role name, not an external service or separate model.
 - Use the returned `focus`, `required_sections`, `constraints`, and `escalation_signals` as the working checklist.
@@ -31,19 +31,19 @@ This file is the canonical source for orchestrator mechanics. Workspace and repo
 
 On the final primary-review role, set `risk_signals` from the evidence state: `high_risk_domain`, `evidence_uncertain`, `cross_system_scope`, `multiple_plausible_causes`, `evidence_conflict`, `non_reproducible`, and `high_blast_radius`. Deep review is selected when: high risk + uncertainty; at least two complexity signals; or a high-impact evidence conflict. Pass no raw evidence, logs, prompts, paths, or model output. Validate `deep_assessment` and the deep-review findings yourself, and do not create a second escalation automatically. The legacy `needs_deep_analysis` + `reason_code` path is compatibility-only.
 
-## Metrics
+## Task distribution
 
-- When the current QA task reaches its final reported status (`completed`,
-  `partial`, or `blocked`), call `record_qa_task_outcome` exactly once. Do not
+- When the current QA task reaches its final status (`completed`, `partial`,
+  or `blocked`), call `record_qa_task_outcome` exactly once. Do not
   record intermediate continuations; if the task resumes after a partial
   result, record only the final status for that task. For orchestration, pass
-  the session `run_id` (this infers orchestration, so `orchestration_used` may
-  be omitted), and for a regular task omit it. Do not pass
-  `orchestration_used=false` with a `run_id`.
-- Every outcome call requires `codegraph_calls`, `source_mcp_calls`, `findings_identified`, `findings_confirmed`, `findings_rejected`, and `repeated_source_reads`; pass `0` when a counter is empty.
-- New outcome events use schema v2. Send stage calls `triage_calls`, `primary_review_calls`, `deep_review_calls`, and `synthesis_calls`, shared `orchestration_steps_completed` and `orchestration_retries`, and optional token counters `triage_input_tokens`, `triage_output_tokens`, `primary_review_input_tokens`, `primary_review_output_tokens`, `synthesis_input_tokens`, and `synthesis_output_tokens`. Deep-review token counters remain `deep_input_tokens` and `deep_output_tokens`.
-- Only after deep review actually runs, send the configured `deep_model` and configured `deep_reasoning` (default `high`); if the task becomes `partial` or `blocked` before deep review starts, keep `deep_review_calls=0` and omit those fields. For a completed bundle with `N` profiles, send at least one triage call, `N` primary-review calls, one synthesis call, and `N+2` completed steps; add one deep-review call and one step when it ran.
-- Stored schema-v1 history remains readable; its model-family totals are reported separately from the v2 stage totals.
+  the session `run_id`; for a regular task, omit it. Send only `task_type`,
+  the final `outcome`, and `run_id` when applicable. The outcome is used to
+  finalize an orchestrated session but is not saved in the distribution data.
+- The distribution record stores only the task type and timestamp. Do not send
+  additional fields.
+- `get_metrics_report(days)` returns only `period_days`, `total_tasks`, and
+  `by_task_type`.
 - Never send issue keys, titles, paths, source text, code, logs, screenshots, prompts, or review responses.
 - Use `get_metrics_report(days)` only for an aggregate read-only report.
 

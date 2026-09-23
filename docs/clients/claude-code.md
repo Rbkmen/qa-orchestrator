@@ -46,7 +46,7 @@ cp "$(pwd)/client-rules/claude-code/CLAUDE.md" \
   /absolute/path/to/your-project/CLAUDE.md
 ```
 
-If the file already exists, merge the rules manually. Claude Code remains the owner of evidence, analysis, findings, model calls, changes, and external writes. The orchestrator publishes six tools for routing, orchestration state, and aggregate metrics; it returns only structured content-free data.
+If the file already exists, merge the rules manually. Claude Code remains the owner of evidence, analysis, findings, model calls, changes, and external writes. The orchestrator publishes six tools for routing, orchestration state, and aggregate task distribution; it returns only structured content-free data.
 
 If you installed with `uvx` and have no checkout, use the [canonical Claude
 Code instructions on GitHub](https://github.com/Rbkmen/qa-orchestrator/blob/main/client-rules/claude-code/CLAUDE.md)
@@ -55,6 +55,6 @@ project's `CLAUDE.md`; do not replace existing project instructions.
 
 Use the returned `model_policy` for triage, the selected roles, optional deep review, and synthesis; the default provider is OpenAI/Codex and each stage's model and reasoning are configurable, with `speed=1.0` for every stage. Deep reasoning defaults to `high` when the selected model supports it and can be selected in `qa-orch setup`. OpenAI uses `reasoning.effort`; Anthropic uses `output_config.effort`; `none` means omit the provider-specific parameter. The triage stage selects exactly one fixed bundle or one compatibility profile; the bundle order cannot be changed. For `ordinary_mr`, use `Faraday — Evidence Investigator` → `Code Reviewer` → `Test Analyzer`; after every primary-review role, pass its `completed_profile`, and on the last role pass `risk_signals` in the same call so the orchestrator selects deep review or synthesis. Do not pass `risk_signals` on the later synthesis transition. After each stage, call `advance_qa_orchestration`; record the final result once with `record_qa_task_outcome` and the original `run_id`. The `terra_primary_review` and `terra_synthesis` transition identifiers remain stable; select the model from `model_policy`, not the step name. Use model-neutral status labels: `Triage` → `Primary review` → optional `Deep review` → `Final synthesis` → `Host`.
 
-New outcome events use schema v2 stage counters: `triage_calls`, `primary_review_calls`, `deep_review_calls`, and `synthesis_calls`; stage-token fields use the `triage_*`, `primary_review_*`, and `synthesis_*` names, while deep-review tokens remain `deep_input_tokens` and `deep_output_tokens`. Stored v1 history remains readable and reported separately.
+At the final status, call `record_qa_task_outcome` with `task_type`, `outcome`, and the original `run_id` for orchestrated work. Only task type and timestamp are saved for the aggregate distribution; the outcome is used to finalize the session but is not persisted. `get_metrics_report(days)` returns the total task count and counts by task type.
 
 Reference: [official Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).

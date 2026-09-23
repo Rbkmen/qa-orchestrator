@@ -1,6 +1,6 @@
 # Install and configure QA Orchestrator
 
-QA Orchestrator is a local MCP server that provides fixed QA routing, bounded orchestration state, and content-free metrics. It runs over MCP STDIO when the host client starts it; no separate background service, database, or API key is required by the server.
+QA Orchestrator is a local MCP server that provides fixed QA routing, bounded orchestration state, and aggregate task distribution. It runs over MCP STDIO when the host client starts it; no separate background service, database, or API key is required by the server.
 
 The host client—not the orchestrator—runs the model stages, gathers evidence, and makes the final QA decision. Model access follows the host user's account and permissions.
 
@@ -165,7 +165,7 @@ For implementation-aware QA reviews, read and follow the canonical QA Orchestrat
 <path-to-qa-orchestrator>/client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md
 ```
 
-If the target `AGENTS.md` already exists, merge the rule instead of replacing the file. The linked file is the canonical source for orchestration stages, risk escalation, and metrics; keep workspace-specific routing and output requirements in the workspace rules.
+If the target `AGENTS.md` already exists, merge the rule instead of replacing the file. The linked file is the canonical source for orchestration stages, risk escalation, and task-distribution recording; keep workspace-specific routing and output requirements in the workspace rules.
 
 If you installed with `uvx` and do not have a checkout, use the canonical
 [Codex host instructions on GitHub](https://github.com/Rbkmen/qa-orchestrator/blob/main/client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md)
@@ -185,7 +185,7 @@ The server is started on demand by the MCP client. Do not start a second backgro
 
 ## Data and privacy
 
-Evidence, source code, logs, prompts, model responses, and final QA decisions stay with the host agent. Active orchestration state is bounded and held in process memory. Aggregate metrics are written locally to `$HOME/.qa-orchestrator/metrics.jsonl` by default; set `QA_ORCHESTRATOR_DATA_DIR` to use another directory.
+Evidence, source code, logs, prompts, model responses, and final QA decisions stay with the host agent. Active orchestration state is bounded and held in process memory. Distribution records retain only task type and timestamp as task data and are written locally to `$HOME/.qa-orchestrator/metrics.jsonl` by default; set `QA_ORCHESTRATOR_DATA_DIR` to use another directory. On startup of the MCP server or report command, existing supported outcome records are reduced to those two data fields; unrelated fields and malformed or unsupported records are discarded.
 
 ## Updating
 

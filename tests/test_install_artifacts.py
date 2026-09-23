@@ -21,7 +21,8 @@ CLIENT_RULE_CONTRACT = {
     "orchestration entry": (r"\bstart_qa_orchestration\b",),
     "route preparation": (r"\bprepare_review_route\b",),
     "state read": (r"\bget_qa_orchestration\b",),
-    "content-free metrics": (r"\brecord_qa_task_outcome\b",),
+    "task distribution recording": (r"\brecord_qa_task_outcome\b",),
+    "task distribution report": (r"\bget_metrics_report\b",),
     "single route selection": (r"exactly one.*(?:bundle|profile)",),
     "model-neutral stage labels": (r"stage labels and status text model-neutral",),
     "fixed speed": (r"speed=1\.0",),
@@ -40,9 +41,9 @@ CLIENT_RULE_CONTRACT = {
         r"does not accept evidence, prompts, or model outputs",
     ),
     "MCP failure fallback": (r"MCP is unavailable",),
-    "terminal metrics status": (r"final reported status",),
+    "terminal task status": (r"final (?:reported )?status",),
     "no intermediate metrics": (r"intermediate continuations",),
-    "run-id consistency": (r"orchestration_used=false.*run_id",),
+    "run-id consistency": (r"run_id",),
 }
 
 
@@ -70,30 +71,6 @@ def test_launcher_forwards_metrics_overrides():
 
 def test_client_rule_templates_preserve_orchestration_contract():
     assert CLIENT_RULE_FILES
-    v2_metric_fields = (
-        "triage_calls",
-        "primary_review_calls",
-        "deep_review_calls",
-        "synthesis_calls",
-        "triage_input_tokens",
-        "triage_output_tokens",
-        "primary_review_input_tokens",
-        "primary_review_output_tokens",
-        "synthesis_input_tokens",
-        "synthesis_output_tokens",
-    )
-    legacy_model_fields = (
-        "luna_calls",
-        "terra_calls",
-        "sol_calls",
-        "luna_input_tokens",
-        "luna_output_tokens",
-        "terra_primary_input_tokens",
-        "terra_primary_output_tokens",
-        "terra_synthesis_input_tokens",
-        "terra_synthesis_output_tokens",
-    )
-
     for artifact in CLIENT_RULE_FILES:
         text = artifact.read_text(encoding="utf-8")
         missing = [
@@ -106,13 +83,7 @@ def test_client_rule_templates_preserve_orchestration_contract():
         ]
 
         assert not missing, f"{artifact.relative_to(ROOT)} is missing: {', '.join(missing)}"
-        assert all(field in text for field in v2_metric_fields), artifact.relative_to(ROOT)
-        assert not any(field in text for field in legacy_model_fields), artifact.relative_to(ROOT)
-
-    generic_rules = (ROOT / "client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md").read_text(
-        encoding="utf-8"
-    )
-    assert "v1" in generic_rules.lower()
+        assert "task_type" in text, artifact.relative_to(ROOT)
 
 
 def test_ci_uses_immutable_action_refs_and_builds_wheel():

@@ -17,7 +17,7 @@ The primary host owns:
 - CodeGraph and source-MCP calls;
 - code/file changes and all writes to external systems.
 
-QA Orchestrator owns only deterministic profile routing, content-free orchestration state, deep-review signal evaluation, and aggregate metrics. The orchestrator does not accept evidence, prompts, or model outputs and does not perform autonomous writes.
+QA Orchestrator owns only deterministic profile routing, content-free orchestration state, deep-review signal evaluation, and aggregate task distribution. The orchestrator does not accept evidence, prompts, or model outputs and does not perform autonomous writes.
 
 ## Model policy
 
@@ -77,7 +77,7 @@ Deep read-only review appears only after the last primary-review profile and whe
 
 ### Adaptive profile selection
 
-The single-profile compatibility path is the low-token route. The triage stage should select one profile instead of a full bundle only when the review has one narrow concern, one repository, low risk, and a small changed surface:
+The single-profile compatibility path is for narrow reviews. The triage stage should select one profile instead of a full bundle only when the review has one narrow concern, one repository, low risk, and a small changed surface:
 
 | Scope | Selection |
 |---|---|
@@ -176,24 +176,17 @@ Use the narrowest profile that matches the task:
 
 Every review must separate confirmed findings from hypotheses and unverified runtime or release facts. An empty or unknown profile is rejected before a route is built.
 
-## Metrics contract
+## Task distribution
 
-New `record_qa_task_outcome` events use schema v2, assigned by the service. They accept only content-free fields:
+`record_qa_task_outcome` accepts only `task_type`, `outcome`, and an optional `run_id`:
 
-- `task_type`, `outcome`;
-- CodeGraph/source call counters;
-- identified, confirmed, and rejected findings plus repeated source reads;
-- the configured `deep_model` and `deep_reasoning` after deep review actually runs; the default deep reasoning is `high`. If the task stops before that step, use `deep_review_calls=0` and omit those fields. Duration and token measurements are optional;
-- stage calls: `triage_calls`, `primary_review_calls`, `deep_review_calls`, and `synthesis_calls`; shared `orchestration_steps_completed` and `orchestration_retries`;
-- optional stage tokens: `triage_input_tokens`, `triage_output_tokens`, `primary_review_input_tokens`, `primary_review_output_tokens`, `synthesis_input_tokens`, and `synthesis_output_tokens`; deep-review tokens remain `deep_input_tokens` and `deep_output_tokens`.
-- For a completed bundle with `N` primary-review profiles, the minimum counters are one triage call, `N` primary-review calls, one synthesis call, and `N+2` completed steps; when deep review ran, report its actual call count (at least one) and add one step.
-- `deep_escalation_recommended` and fixed `deep_escalation_reason_codes` for orchestrated tasks.
-- optional scope counters: `evidence_packet_tokens`, `merge_requests_count`, and `repositories_count`;
-- optional deep-review counters: `deep_findings_identified`, `deep_findings_new_confirmed`, and `deep_findings_rejected`.
+- `task_type` identifies one supported QA task category.
+- `outcome` finalizes an orchestrated session; it is not saved in distribution data.
+- `run_id` associates the final call with its in-memory session; it is not persisted.
 
-When `run_id` is present, the outcome is treated as orchestrated automatically; `orchestration_used=true` may also be sent explicitly, while an explicit false value is rejected. The opaque identifier is used only to associate the final outcome and aggregate counters with the in-memory session, is checked against the selected branch, and is not persisted in JSONL.
+The distribution record stores only the task type and timestamp. The report returns `period_days`, `total_tasks`, and `by_task_type`.
 
-V1 rows already stored remain readable. Legacy model-family totals remain separate from v2 stage totals, which the report exposes as `stage_calls` and `stage_tokens`; shared task totals span both versions. Incomplete stage-token measurements contribute known values but do not count as complete. Do not send issue keys, titles, paths, source text, code, logs, screenshots, or generated content. `get_metrics_report(days)` returns aggregates and data-quality counters only.
+On MCP-server or report-command startup, existing outcome events are migrated to the distribution format, retaining only their timestamp and task type; unrelated fields and malformed records are discarded. Do not send issue keys, titles, paths, source text, code, logs, screenshots, or generated content.
 
 ## MCP tools
 

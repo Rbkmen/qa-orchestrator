@@ -1,333 +1,80 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from qa_orchestrator.report import MetricsReport, summarize_events
+import pytest
+from pydantic import ValidationError
+
+from qa_orchestrator.events import DISTRIBUTION_EVENT_TYPE, DISTRIBUTION_SCHEMA_VERSION
+from qa_orchestrator.report import TaskDistributionReport, summarize_events
 
 
-def test_report_skips_rows_with_non_string_task_categories():
-    timestamp = datetime.now(UTC).isoformat()
-    base_event = {
-        "schema_version": 2,
-        "event_type": "qa_task_outcome",
-        "timestamp": timestamp,
-        "task_type": "ordinary_review",
-        "outcome": "completed",
-        "deep_analysis_used": False,
-        "codegraph_calls": 0,
-        "source_mcp_calls": 0,
-        "findings_identified": 0,
-        "findings_confirmed": 0,
-        "findings_rejected": 0,
-        "repeated_source_reads": 0,
+def _distribution_event(task_type="ordinary_review", timestamp=None, **extra):
+    return {
+        "schema_version": DISTRIBUTION_SCHEMA_VERSION,
+        "event_type": DISTRIBUTION_EVENT_TYPE,
+        "timestamp": timestamp or datetime.now(UTC).isoformat(),
+        "task_type": task_type,
+        **extra,
     }
 
-    report = summarize_events(
-        json.dumps(event)
-        for event in (
-            {**base_event, "task_type": []},
-            {**base_event, "outcome": {}},
-            base_event,
-        )
-    )
 
-    MetricsReport.model_validate(report)
-    assert report["qa_tasks"]["events"] == 1
-
-
-def test_report_aggregates_only_model_free_task_outcomes():
-    timestamp = datetime.now(UTC).isoformat()
+def test_report_skips_invalid_rows_and_returns_only_distribution():
+    valid = _distribution_event()
     lines = [
-        json.dumps(
-            {
-                "schema_version": 1,
-                "event_type": "qa_task_outcome",
-                "timestamp": timestamp,
-                "task_type": "ordinary_review",
-                "outcome": "completed",
-                "deep_analysis_used": True,
-                "deep_escalation_recommended": True,
-                "deep_escalation_reason_codes": [
-                    "high_risk_domain",
-                    "evidence_gap",
-                ],
-                "deep_model": "gpt-5.6-sol",
-                "deep_reasoning": "high",
-                "deep_duration_ms": 120,
-                "deep_input_tokens": 20,
-                "deep_output_tokens": 30,
-                "deep_findings_identified": 2,
-                "deep_findings_new_confirmed": 1,
-                "deep_findings_rejected": 1,
-                "luna_input_tokens": 100,
-                "luna_output_tokens": 25,
-                "terra_primary_input_tokens": 240,
-                "terra_primary_output_tokens": 80,
-                "terra_synthesis_input_tokens": 120,
-                "terra_synthesis_output_tokens": 40,
-                "evidence_packet_tokens": 180,
-                "merge_requests_count": 2,
-                "repositories_count": 2,
-                "codegraph_calls": 1,
-                "source_mcp_calls": 2,
-                "findings_identified": 2,
-                "findings_confirmed": 1,
-                "findings_rejected": 1,
-                "repeated_source_reads": 0,
-                "codegraph_response_tokens": 10,
-                "source_mcp_response_tokens": 20,
-                "avoided_source_read_tokens": 5,
-            }
-        ),
-        json.dumps(
-            {
-                "schema_version": 1,
-                "event_type": "qa_task_outcome",
-                "timestamp": timestamp,
-                "task_type": "ordinary_review",
-                "outcome": "completed",
-                "deep_analysis_used": False,
-                "codegraph_calls": 0,
-                "source_mcp_calls": 1,
-                "findings_identified": 0,
-                "findings_confirmed": 0,
-                "findings_rejected": 0,
-                "repeated_source_reads": 0,
-            }
-        ),
-        json.dumps(
-            {
-                "schema_version": 1,
-                "event_type": "qa_task_outcome",
-                "timestamp": timestamp,
-                "task_type": "ordinary_review",
-                "outcome": "completed",
-                "legacy_metric": True,
-                "deep_analysis_used": False,
-                "codegraph_calls": 0,
-                "source_mcp_calls": 0,
-                "findings_identified": 0,
-                "findings_confirmed": 0,
-                "findings_rejected": 0,
-                "repeated_source_reads": 0,
-            }
-        ),
+        "not-json",
+        json.dumps([]),
+        json.dumps({**valid, "task_type": []}),
+        json.dumps({**valid, "extra_metric": 1}),
+        json.dumps({**valid, "schema_version": 2}),
+        json.dumps(valid),
     ]
 
     report = summarize_events(lines)
 
-    assert report["qa_tasks"]["events"] == 2
-    assert report["qa_tasks"]["outcomes"] == {"completed": 2}
-    assert report["qa_tasks"]["by_task_type"] == {"ordinary_review": 2}
-    assert report["qa_tasks"]["deep_tasks"] == 1
-    assert report["qa_tasks"]["deep_escalation"] == {
-        "recommended_tasks": 1,
-        "by_reason": {
-            "evidence_gap": 1,
-            "high_risk_domain": 1,
-        },
-    }
-    assert report["qa_tasks"]["model_tokens"] == {
-        "luna": {"input": 100, "output": 25},
-        "terra_primary": {"input": 240, "output": 80},
-        "sol": {"input": 20, "output": 30},
-        "terra_synthesis": {"input": 120, "output": 40},
-        "complete_measurement_tasks": 1,
-    }
-    assert report["qa_tasks"]["scope"] == {
-        "evidence_packet_tokens": 180,
-        "merge_requests": 2,
-        "repositories": 2,
-    }
-    assert report["qa_tasks"]["deep_value"] == {
-        "measurement_tasks": 1,
-        "identified": 2,
-        "new_confirmed": 1,
-        "rejected": 1,
-    }
-    assert report["qa_tasks"]["deep_by_model"] == {"gpt-5.6-sol": 1}
-    assert report["qa_tasks"]["findings_confirmed"] == 1
-    assert report["qa_tasks"]["codegraph"]["calls"] == 1
-    assert "by_model" not in report
-
-
-def test_report_aggregates_orchestration_counters():
-    line = json.dumps(
-        {
-            "schema_version": 1,
-            "event_type": "qa_task_outcome",
-            "timestamp": datetime.now(UTC).isoformat(),
-            "task_type": "ordinary_review",
-            "outcome": "completed",
-            "deep_analysis_used": True,
-            "deep_model": "gpt-5.6-sol",
-            "deep_reasoning": "high",
-            "codegraph_calls": 1,
-            "source_mcp_calls": 2,
-            "findings_identified": 1,
-            "findings_confirmed": 1,
-            "findings_rejected": 0,
-            "repeated_source_reads": 0,
-            "orchestration_used": True,
-            "luna_calls": 1,
-            "terra_calls": 2,
-            "sol_calls": 1,
-            "orchestration_steps_completed": 4,
-            "orchestration_retries": 0,
-        }
-    )
-
-    report = summarize_events([line])
-
-    assert report["qa_tasks"]["orchestration"] == {
-        "tasks": 1,
-        "luna_calls": 1,
-        "terra_calls": 2,
-        "sol_calls": 1,
-        "steps_completed": 4,
-        "retries": 0,
+    TaskDistributionReport.model_validate(report)
+    assert report == {
+        "period_days": 7,
+        "total_tasks": 1,
+        "by_task_type": {"ordinary_review": 1},
     }
 
 
-def test_report_skips_incomplete_orchestration_event_without_crashing():
-    line = json.dumps(
-        {
-            "schema_version": 1,
-            "event_type": "qa_task_outcome",
-            "timestamp": datetime.now(UTC).isoformat(),
-            "task_type": "ordinary_review",
-            "outcome": "completed",
-            "deep_analysis_used": False,
-            "codegraph_calls": 0,
-            "source_mcp_calls": 0,
-            "findings_identified": 0,
-            "findings_confirmed": 0,
-            "findings_rejected": 0,
-            "repeated_source_reads": 0,
-            "orchestration_used": True,
-        }
-    )
-
-    report = summarize_events([line])
-
-    assert report["qa_tasks"]["events"] == 0
-
-
-def test_report_keeps_v1_and_v2_metrics_separate():
+@pytest.mark.parametrize("schema_version", [1, 2, None])
+def test_report_counts_current_and_sanitized_historical_task_types(schema_version):
     timestamp = datetime.now(UTC).isoformat()
-    v1_event = {
-        "schema_version": 1,
+    current = _distribution_event("ordinary_review", timestamp)
+    historical = {
         "event_type": "qa_task_outcome",
         "timestamp": timestamp,
-        "task_type": "ordinary_review",
+        "task_type": "widget_review",
         "outcome": "completed",
-        "deep_analysis_used": True,
-        "deep_model": "gpt-5.6-sol",
-        "deep_reasoning": "high",
-        "deep_input_tokens": 10,
-        "deep_output_tokens": 15,
-        "codegraph_calls": 0,
-        "source_mcp_calls": 0,
-        "findings_identified": 0,
-        "findings_confirmed": 0,
-        "findings_rejected": 0,
-        "repeated_source_reads": 0,
-        "orchestration_used": True,
-        "luna_calls": 1,
-        "terra_calls": 2,
-        "sol_calls": 1,
-        "orchestration_steps_completed": 4,
-        "orchestration_retries": 0,
-        "luna_input_tokens": 100,
-        "luna_output_tokens": 25,
-        "terra_primary_input_tokens": 240,
-        "terra_primary_output_tokens": 80,
-        "terra_synthesis_input_tokens": 120,
-        "terra_synthesis_output_tokens": 40,
+        "private_metric": 12,
     }
-    v2_event = {
-        "schema_version": 2,
-        "event_type": "qa_task_outcome",
-        "timestamp": timestamp,
-        "task_type": "ordinary_review",
-        "outcome": "completed",
-        "deep_analysis_used": True,
-        "deep_model": "gpt-6-sol",
-        "deep_reasoning": "high",
-        "deep_input_tokens": 20,
-        "deep_output_tokens": 30,
-        "codegraph_calls": 0,
-        "source_mcp_calls": 0,
-        "findings_identified": 0,
-        "findings_confirmed": 0,
-        "findings_rejected": 0,
-        "repeated_source_reads": 0,
-        "orchestration_used": True,
-        "triage_calls": 1,
-        "primary_review_calls": 3,
-        "deep_review_calls": 1,
-        "synthesis_calls": 1,
-        "orchestration_steps_completed": 6,
-        "orchestration_retries": 0,
-        "triage_input_tokens": 110,
-        "triage_output_tokens": 26,
-        "primary_review_input_tokens": 250,
-        "primary_review_output_tokens": 81,
-        "synthesis_input_tokens": 130,
-        "synthesis_output_tokens": 41,
-    }
-    incomplete_v2_event = {
-        "schema_version": 2,
-        "event_type": "qa_task_outcome",
-        "timestamp": timestamp,
-        "task_type": "ordinary_review",
-        "outcome": "partial",
-        "deep_analysis_used": False,
-        "codegraph_calls": 0,
-        "source_mcp_calls": 0,
-        "findings_identified": 0,
-        "findings_confirmed": 0,
-        "findings_rejected": 0,
-        "repeated_source_reads": 0,
-        "orchestration_used": False,
-        "triage_input_tokens": 5,
+    if schema_version is not None:
+        historical["schema_version"] = schema_version
+
+    report = summarize_events([json.dumps(current), json.dumps(historical)])
+
+    assert report == {
+        "period_days": 7,
+        "total_tasks": 2,
+        "by_task_type": {"ordinary_review": 1, "widget_review": 1},
     }
 
-    report = summarize_events(
-        json.dumps(event) for event in (v1_event, v2_event, incomplete_v2_event)
+
+def test_report_excludes_tasks_outside_requested_window():
+    old = _distribution_event(
+        "qa_planning",
+        (datetime.now(UTC) - timedelta(days=8)).isoformat(),
     )
-    MetricsReport.model_validate(report)
 
-    assert report["qa_tasks"]["events"] == 3
-    assert report["qa_tasks"]["orchestration"]["tasks"] == 2
-    assert report["qa_tasks"]["orchestration"] == {
-        "tasks": 2,
-        "luna_calls": 1,
-        "terra_calls": 2,
-        "sol_calls": 1,
-        "steps_completed": 10,
-        "retries": 0,
-    }
-    assert report["qa_tasks"]["deep_by_model"] == {
-        "gpt-5.6-sol": 1,
-        "gpt-6-sol": 1,
-    }
-    assert report["qa_tasks"]["stage_calls"] == {
-        "triage": 1,
-        "primary_review": 3,
-        "deep_review": 1,
-        "synthesis": 1,
-    }
-    assert report["qa_tasks"]["stage_tokens"]["deep_review"] == {
-        "input": 20,
-        "output": 30,
-    }
-    assert report["qa_tasks"]["stage_tokens"]["triage"] == {
-        "input": 115,
-        "output": 26,
-    }
-    assert report["qa_tasks"]["model_tokens"]["sol"] == {
-        "input": 10,
-        "output": 15,
-    }
-    assert report["qa_tasks"]["model_tokens"]["complete_measurement_tasks"] == 2
-    assert report["data_quality"]["complete_model_token_measurement_rate"] == 0.667
+    report = summarize_events([json.dumps(old)], days=7)
+
+    assert report == {"period_days": 7, "total_tasks": 0, "by_task_type": {}}
+
+
+def test_report_schema_forbids_unrelated_data():
+    report = summarize_events([json.dumps(_distribution_event())])
+
+    with pytest.raises(ValidationError):
+        TaskDistributionReport.model_validate({**report, "unrelated_metric": 1})

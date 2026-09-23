@@ -11,9 +11,8 @@ from tempfile import mkstemp
 from typing import IO, Protocol
 
 from qa_orchestrator.contracts import QaTaskOutcomeReceipt
-from qa_orchestrator.model_policy import is_valid_model_id
 
-QA_TASK_TYPES = {
+QA_TASK_TYPES = frozenset({
     "ordinary_review",
     "widget_review",
     "epic_analysis",
@@ -21,105 +20,16 @@ QA_TASK_TYPES = {
     "qa_planning",
     "autotest_implementation",
     "other",
-}
-QA_TASK_OUTCOMES = {"completed", "partial", "blocked"}
-QA_TASK_COUNTERS = {
-    "codegraph_calls",
-    "source_mcp_calls",
-    "findings_identified",
-    "findings_confirmed",
-    "findings_rejected",
-    "repeated_source_reads",
-}
-QA_TASK_TOKEN_COUNTERS = {
-    "codegraph_response_tokens",
-    "source_mcp_response_tokens",
-    "avoided_source_read_tokens",
-}
-MODEL_TOKEN_COUNTERS = {
-    "luna_input_tokens",
-    "luna_output_tokens",
-    "terra_primary_input_tokens",
-    "terra_primary_output_tokens",
-    "terra_synthesis_input_tokens",
-    "terra_synthesis_output_tokens",
-}
-STAGE_CALL_COUNTERS = {
-    "triage_calls",
-    "primary_review_calls",
-    "deep_review_calls",
-    "synthesis_calls",
-}
-STAGE_TOKEN_COUNTERS = {
-    "triage_input_tokens",
-    "triage_output_tokens",
-    "primary_review_input_tokens",
-    "primary_review_output_tokens",
-    "synthesis_input_tokens",
-    "synthesis_output_tokens",
-}
-SCOPE_COUNTERS = {
-    "evidence_packet_tokens",
-    "merge_requests_count",
-    "repositories_count",
-}
-DEEP_VALUE_COUNTERS = {
-    "deep_findings_identified",
-    "deep_findings_new_confirmed",
-    "deep_findings_rejected",
-}
-LEGACY_MODEL_CALL_COUNTERS = {
-    "luna_calls",
-    "terra_calls",
-    "sol_calls",
-}
-LEGACY_MODEL_COUNTERS = MODEL_TOKEN_COUNTERS | LEGACY_MODEL_CALL_COUNTERS
-SHARED_ORCHESTRATION_COUNTERS = {
-    "orchestration_steps_completed",
-    "orchestration_retries",
-}
-ORCHESTRATION_COUNTERS = LEGACY_MODEL_CALL_COUNTERS | SHARED_ORCHESTRATION_COUNTERS
-V2_ORCHESTRATION_COUNTERS = STAGE_CALL_COUNTERS | SHARED_ORCHESTRATION_COUNTERS
-DEEP_REASONING = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
-DEEP_MODELS_BY_SCHEMA = {
-    1: {"gpt-5.6-sol"},
-    2: None,
-}
-DEEP_ESCALATION_REASON_CODES = {
-    "evidence_gap",
-    "cross_repository",
-    "security_sensitive",
-    "payment_sensitive",
-    "fraud_sensitive",
-    "root_cause",
-    "high_blast_radius",
-    "high_risk_domain",
-    "evidence_conflict",
-    "non_reproducible",
-}
-EVENT_FIELDS = {
+})
+DISTRIBUTION_SCHEMA_VERSION = 3
+DISTRIBUTION_EVENT_TYPE = "qa_task_distribution"
+LEGACY_OUTCOME_SCHEMA_VERSIONS = frozenset({1, 2})
+LEGACY_OUTCOME_EVENT_TYPE = "qa_task_outcome"
+DISTRIBUTION_EVENT_FIELDS = {
     "schema_version",
     "event_type",
     "timestamp",
     "task_type",
-    "outcome",
-    "deep_analysis_used",
-    "deep_model",
-    "deep_reasoning",
-    "deep_duration_ms",
-    "deep_input_tokens",
-    "deep_output_tokens",
-    "deep_escalation_recommended",
-    "deep_escalation_reason_codes",
-    "orchestration_used",
-    *QA_TASK_COUNTERS,
-    *QA_TASK_TOKEN_COUNTERS,
-    *MODEL_TOKEN_COUNTERS,
-    *STAGE_CALL_COUNTERS,
-    *STAGE_TOKEN_COUNTERS,
-    *SCOPE_COUNTERS,
-    *DEEP_VALUE_COUNTERS,
-    *ORCHESTRATION_COUNTERS,
 }
 
 
@@ -138,38 +48,41 @@ class JsonEventSink:
         self.retention_days = retention_days
         self.max_events = max_events
 
+    def sanitize_existing_records(self) -> bool:
+        """Rewrite stored events to the task-distribution-only schema."""
+        if self.path is None:
+            return True
+        if self.path.is_symlink():
+            return False
+        if not self.path.exists():
+            return True
+        if not self.path.is_file():
+            return False
+        try:
+            with self._locked_events() as events:
+                cutoff = datetime.now(UTC) - timedelta(days=self.retention_days)
+                retained = []
+                for item in events:
+                    distribution_event = normalize_task_distribution_event(item)
+                    if distribution_event is None:
+                        continue
+                    timestamp = _event_timestamp(distribution_event)
+                    if timestamp is not None and timestamp >= cutoff:
+                        retained.append(distribution_event)
+                _atomic_write_events(self.path, retained[-self.max_events :])
+            return True
+        except OSError:
+            return False
+
     def record_qa_task_outcome(self, event: dict[str, object]) -> QaTaskOutcomeReceipt:
         if self.path is None:
             return QaTaskOutcomeReceipt(status="unavailable")
-        fields = {
-            "task_type",
-            "outcome",
-            "deep_analysis_used",
-            "deep_model",
-            "deep_reasoning",
-            "deep_duration_ms",
-            "deep_input_tokens",
-            "deep_output_tokens",
-            "deep_escalation_recommended",
-            "deep_escalation_reason_codes",
-            "orchestration_used",
-            *QA_TASK_COUNTERS,
-            *QA_TASK_TOKEN_COUNTERS,
-            *MODEL_TOKEN_COUNTERS,
-            *STAGE_CALL_COUNTERS,
-            *STAGE_TOKEN_COUNTERS,
-            *SCOPE_COUNTERS,
-            *DEEP_VALUE_COUNTERS,
-            *ORCHESTRATION_COUNTERS,
+        payload = {
+            "schema_version": DISTRIBUTION_SCHEMA_VERSION,
+            "event_type": DISTRIBUTION_EVENT_TYPE,
+            "timestamp": datetime.now(UTC).isoformat(),
+            "task_type": event.get("task_type"),
         }
-        payload = {key: event[key] for key in fields if key in event}
-        payload.update(
-            {
-                "schema_version": event["schema_version"],
-                "event_type": "qa_task_outcome",
-                "timestamp": datetime.now(UTC).isoformat(),
-            }
-        )
         return QaTaskOutcomeReceipt(status="recorded" if self._write(payload) else "unavailable")
 
     @contextmanager
@@ -186,16 +99,22 @@ class JsonEventSink:
             yield events
 
     def _write(self, event: dict[str, object]) -> bool:
-        line = _serialize(event)
+        normalized_event = normalize_task_distribution_event(event)
+        if normalized_event is None:
+            return False
+        line = _serialize(normalized_event)
         print(line, file=sys.stderr, flush=True)
         try:
             with self._locked_events() as events:
                 cutoff = datetime.now(UTC) - timedelta(days=self.retention_days)
-                retained = [
-                    item
-                    for item in [*events, event]
-                    if (timestamp := _event_timestamp(item)) is not None and timestamp >= cutoff
-                ]
+                retained = []
+                for item in [*events, normalized_event]:
+                    distribution_event = normalize_task_distribution_event(item)
+                    if distribution_event is None:
+                        continue
+                    timestamp = _event_timestamp(distribution_event)
+                    if timestamp is not None and timestamp >= cutoff:
+                        retained.append(distribution_event)
                 _atomic_write_events(self.path, retained[-self.max_events :])
             return True
         except OSError:
@@ -269,209 +188,37 @@ def _atomic_write_events(path: Path, events: list[dict[str, object]]) -> None:
             pass
 
 
-def valid_qa_task_metrics(event: dict[str, object]) -> bool:
-    schema_version = event.get("schema_version", 1)
-    if type(schema_version) is not int or schema_version not in {1, 2}:
-        return False
-    task_type = event.get("task_type")
-    outcome = event.get("outcome")
-    if (
-        not isinstance(task_type, str)
-        or task_type not in QA_TASK_TYPES
-        or not isinstance(outcome, str)
-        or outcome not in QA_TASK_OUTCOMES
-    ):
-        return False
-    if set(event) - EVENT_FIELDS:
-        return False
-    if schema_version == 1 and (STAGE_CALL_COUNTERS | STAGE_TOKEN_COUNTERS) & event.keys():
-        return False
-    if schema_version == 2 and LEGACY_MODEL_COUNTERS & event.keys():
-        return False
-    deep_used = event.get("deep_analysis_used")
-    if type(deep_used) is not bool:
-        return False
-    if deep_used and not {"deep_model", "deep_reasoning"} <= event.keys():
-        return False
-    orchestration_used = event.get("orchestration_used", False)
-    if type(orchestration_used) is not bool:
-        return False
-    escalation_fields_present = {
-        "deep_escalation_recommended",
-        "deep_escalation_reason_codes",
-    } & event.keys()
-    if escalation_fields_present and escalation_fields_present != {
-        "deep_escalation_recommended",
-        "deep_escalation_reason_codes",
-    }:
-        return False
-    if escalation_fields_present:
-        recommended = event["deep_escalation_recommended"]
-        reasons = event["deep_escalation_reason_codes"]
-        if type(recommended) is not bool or not isinstance(reasons, list):
-            return False
-        if any(
-            not isinstance(reason, str) or reason not in DEEP_ESCALATION_REASON_CODES
-            for reason in reasons
-        ) or len(reasons) != len(set(reasons)):
-            return False
-        if recommended is False and reasons:
-            return False
-        if recommended is True and not reasons:
-            return False
-    if "deep_model" in event:
-        if not deep_used or not isinstance(event["deep_model"], str):
-            return False
-        allowed_models = DEEP_MODELS_BY_SCHEMA[schema_version]
-        if allowed_models is not None and event["deep_model"] not in allowed_models:
-            return False
-        if schema_version == 2 and not is_valid_model_id(event["deep_model"]):
-            return False
-    if "deep_reasoning" in event and (
-        not deep_used
-        or not isinstance(event["deep_reasoning"], str)
-        or event["deep_reasoning"] not in DEEP_REASONING
-    ):
-        return False
-    if any(
-        field in event and (type(event[field]) is not int or event[field] < 0)
-        for field in ("deep_duration_ms", "deep_input_tokens", "deep_output_tokens")
-    ):
-        return False
-    if not deep_used and any(
-        event.get(field, 0) > 0
-        for field in ("deep_duration_ms", "deep_input_tokens", "deep_output_tokens")
-    ):
-        return False
-    if any(type(event.get(field)) is not int or event[field] < 0 for field in QA_TASK_COUNTERS):
-        return False
-    if any(
-        field in event and (type(event[field]) is not int or event[field] < 0)
-        for field in QA_TASK_TOKEN_COUNTERS
-    ):
-        return False
-    if any(
-        field in event and (type(event[field]) is not int or event[field] < 0)
-        for field in (
-            *MODEL_TOKEN_COUNTERS,
-            *STAGE_CALL_COUNTERS,
-            *STAGE_TOKEN_COUNTERS,
-            *SCOPE_COUNTERS,
-            *DEEP_VALUE_COUNTERS,
-        )
-    ):
-        return False
-    if not deep_used and any(event.get(field, 0) > 0 for field in DEEP_VALUE_COUNTERS):
-        return False
-    if event.get("deep_findings_new_confirmed", 0) + event.get(
-        "deep_findings_rejected", 0
-    ) > event.get("deep_findings_identified", 0):
-        return False
-    orchestration_counters = (
-        ORCHESTRATION_COUNTERS if schema_version == 1 else V2_ORCHESTRATION_COUNTERS
+def valid_task_distribution_event(event: dict[str, object]) -> bool:
+    return (
+        set(event) == DISTRIBUTION_EVENT_FIELDS
+        and type(event.get("schema_version")) is int
+        and event["schema_version"] == DISTRIBUTION_SCHEMA_VERSION
+        and event.get("event_type") == DISTRIBUTION_EVENT_TYPE
+        and isinstance(event.get("task_type"), str)
+        and event["task_type"] in QA_TASK_TYPES
+        and _event_timestamp(event) is not None
     )
-    if any(
-        field in event and (type(event[field]) is not int or event[field] < 0)
-        for field in orchestration_counters
-    ):
-        return False
-    if orchestration_used and not orchestration_counters <= event.keys():
-        return False
-    if not orchestration_used and any(
-        event.get(field, 0) > 0 for field in orchestration_counters
-    ):
-        return False
-    if schema_version == 1:
-        if orchestration_used and (event.get("sol_calls", 0) > 0) != deep_used:
-            return False
-        if orchestration_used and event["outcome"] == "completed" and (
-            event["luna_calls"] < 1
-            or event["terra_calls"] < 2
-            or event["orchestration_steps_completed"] < 3
-        ):
-            return False
-    else:
-        deep_calls = event.get("deep_review_calls", 0)
-        if orchestration_used and (deep_calls > 0) != deep_used:
-            return False
-        if orchestration_used and event["outcome"] == "completed" and (
-            event["triage_calls"] < 1
-            or event["primary_review_calls"] < 1
-            or event["synthesis_calls"] < 1
-            or event["orchestration_steps_completed"] < 3
-        ):
-            return False
-        if orchestration_used and event["outcome"] == "completed" and deep_used and (
-            event["orchestration_steps_completed"] < 4
-        ):
-            return False
-    if event["codegraph_calls"] == 0 and any(
-        event.get(field, 0) > 0
-        for field in ("codegraph_response_tokens", "avoided_source_read_tokens")
-    ):
-        return False
-    if event["source_mcp_calls"] == 0 and event.get("source_mcp_response_tokens", 0) > 0:
-        return False
-    if event["repeated_source_reads"] > event["source_mcp_calls"]:
-        return False
-    return event["findings_confirmed"] + event["findings_rejected"] <= event[
-        "findings_identified"
-    ]
 
 
-def qa_task_metric_errors(event: dict[str, object]) -> list[str]:
-    """Return actionable explanations for the common metric invariants."""
-    errors: list[str] = []
-
-    if event.get("orchestration_used") is True and event.get("outcome") == "completed":
-        fields = (
-            (
-                ("luna_calls", 1),
-                ("terra_calls", 2),
-                ("orchestration_steps_completed", 3),
-            )
-            if event.get("schema_version", 1) == 1
-            else (
-                ("triage_calls", 1),
-                ("primary_review_calls", 1),
-                ("synthesis_calls", 1),
-                ("orchestration_steps_completed", 3),
-            )
-        )
-        for field, minimum in fields:
-            value = event.get(field, 0)
-            if type(value) is int and value < minimum:
-                errors.append(f"{field} must be >= {minimum}")
-
+def normalize_task_distribution_event(event: dict[str, object]) -> dict[str, object] | None:
+    if valid_task_distribution_event(event):
+        return event
+    legacy_schema_version = event.get("schema_version", 1)
     if (
-        type(event.get("findings_confirmed")) is int
-        and type(event.get("findings_rejected")) is int
-        and type(event.get("findings_identified")) is int
-        and event["findings_confirmed"] + event["findings_rejected"]
-        > event["findings_identified"]
+        type(legacy_schema_version) is not int
+        or legacy_schema_version not in LEGACY_OUTCOME_SCHEMA_VERSIONS
+        or event.get("event_type") != LEGACY_OUTCOME_EVENT_TYPE
+        or not isinstance(event.get("task_type"), str)
+        or event["task_type"] not in QA_TASK_TYPES
+        or (timestamp := _event_timestamp(event)) is None
     ):
-        errors.append("findings_confirmed + findings_rejected must be <= findings_identified")
-
-    if (
-        type(event.get("repeated_source_reads")) is int
-        and type(event.get("source_mcp_calls")) is int
-        and event["repeated_source_reads"] > event["source_mcp_calls"]
-    ):
-        errors.append("repeated_source_reads must be <= source_mcp_calls")
-
-    if event.get("orchestration_used") is True:
-        deep_calls_field = (
-            "sol_calls" if event.get("schema_version", 1) == 1 else "deep_review_calls"
-        )
-        deep_calls = event.get(deep_calls_field, 0)
-        if type(deep_calls) is not int or deep_calls < 0:
-            errors.append(f"{deep_calls_field} must be a non-negative integer")
-        elif (deep_calls > 0) != (event.get("deep_analysis_used") is True):
-            errors.append(
-                f"{deep_calls_field} must be positive exactly when deep_analysis_used is true"
-            )
-
-    return errors or ["one or more metric values have an invalid type or value"]
+        return None
+    return {
+        "schema_version": DISTRIBUTION_SCHEMA_VERSION,
+        "event_type": DISTRIBUTION_EVENT_TYPE,
+        "timestamp": timestamp.isoformat(),
+        "task_type": event["task_type"],
+    }
 
 
 def _parse_events(metrics: IO[str]) -> list[dict[str, object]]:

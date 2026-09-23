@@ -4,7 +4,7 @@
 
 Please report suspected vulnerabilities privately through a [GitHub Security
 Advisory](https://github.com/Rbkmen/qa-orchestrator/security/advisories/new).
-Do not publish credentials, private logs, tokens, or an exploit before the
+Do not publish credentials, private logs, or an exploit before the
 maintainers have had a chance to investigate.
 
 Include the affected version, a minimal reproduction, impact, and any safe

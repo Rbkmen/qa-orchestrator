@@ -8,16 +8,6 @@ from qa_orchestrator.server import build_server
 from qa_orchestrator.service import OrchestratorService
 
 
-def _schema_contains_value(schema, value):
-    if schema.get("const") == value or value in schema.get("enum", []):
-        return True
-    return any(
-        _schema_contains_value(branch, value)
-        for branch_name in ("anyOf", "oneOf", "allOf")
-        for branch in schema.get(branch_name, [])
-    )
-
-
 @pytest.mark.asyncio
 async def test_server_exposes_six_tools(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
@@ -72,29 +62,19 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     assert (
         tools["get_metrics_report"].inputSchema["properties"]["days"]["minimum"] == 1
     )
-    assert (
-        tools["record_qa_task_outcome"].inputSchema["properties"]["codegraph_calls"][
-            "minimum"
-        ]
-        == 0
-    )
-    assert (
-        tools["record_qa_task_outcome"].inputSchema["properties"]["triage_calls"][
-            "minimum"
-        ]
-        == 0
-    )
-    assert "luna_calls" not in tools["record_qa_task_outcome"].inputSchema["properties"]
-    deep_model_schema = tools["record_qa_task_outcome"].inputSchema["properties"]["deep_model"]
-    assert deep_model_schema["anyOf"][0]["pattern"] == r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
-    assert _schema_contains_value(
-        tools["record_qa_task_outcome"].inputSchema["properties"]["deep_reasoning"],
-        "high",
-    )
+    assert set(tools["record_qa_task_outcome"].inputSchema["properties"]) == {
+        "task_type",
+        "outcome",
+        "run_id",
+    }
 
     report_schema = tools["get_metrics_report"].outputSchema
-    assert report_schema["properties"]["qa_tasks"]["additionalProperties"] is False
-    assert report_schema["properties"]["data_quality"]["additionalProperties"] is False
+    assert set(report_schema["properties"]) == {
+        "period_days",
+        "total_tasks",
+        "by_task_type",
+    }
+    assert report_schema["additionalProperties"] is False
 
 
 @pytest.mark.asyncio
@@ -292,18 +272,6 @@ async def test_orchestration_tools_complete_each_bundle(tmp_path, bundle: Review
             {
                 "task_type": "ordinary_review",
                 "outcome": "completed",
-                "codegraph_calls": 0,
-                "source_mcp_calls": 0,
-                "findings_identified": 0,
-                "findings_confirmed": 0,
-                "findings_rejected": 0,
-                "repeated_source_reads": 0,
-                "triage_calls": 1,
-                "primary_review_calls": len(REVIEW_BUNDLES[bundle]),
-                "deep_review_calls": 0,
-                "synthesis_calls": 1,
-                "orchestration_steps_completed": len(REVIEW_BUNDLES[bundle]) + 2,
-                "orchestration_retries": 0,
                 "run_id": run_id,
             },
         )
@@ -443,38 +411,22 @@ async def test_server_records_orchestration_metrics(tmp_path):
             {
                 "task_type": "ordinary_review",
                 "outcome": "completed",
-                "codegraph_calls": 0,
-                "source_mcp_calls": 0,
-                "findings_identified": 0,
-                "findings_confirmed": 0,
-                "findings_rejected": 0,
-                "repeated_source_reads": 0,
-                "orchestration_used": True,
-                "triage_calls": 1,
-                "primary_review_calls": 1,
-                "deep_review_calls": 0,
-                "synthesis_calls": 1,
-                "orchestration_steps_completed": 3,
-                "orchestration_retries": 0,
                 "run_id": run_id,
             },
         )
         report = await client.call_tool("get_metrics_report", {"days": 7})
         current = await client.call_tool("get_qa_orchestration", {"run_id": run_id})
 
-    assert report.structured_content["qa_tasks"]["orchestration"]["tasks"] == 1
-    assert report.structured_content["qa_tasks"]["orchestration"]["steps_completed"] == 3
-    assert report.structured_content["qa_tasks"]["stage_calls"] == {
-        "triage": 1,
-        "primary_review": 1,
-        "deep_review": 0,
-        "synthesis": 1,
+    assert report.structured_content == {
+        "period_days": 7,
+        "total_tasks": 1,
+        "by_task_type": {"ordinary_review": 1},
     }
     assert current.structured_content["status"] == "completed"
 
 
 @pytest.mark.asyncio
-async def test_task_outcome_and_report_are_model_free(tmp_path):
+async def test_task_outcome_and_report_only_expose_task_distribution(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
@@ -483,19 +435,16 @@ async def test_task_outcome_and_report_are_model_free(tmp_path):
             {
                 "task_type": "ordinary_review",
                 "outcome": "completed",
-                "codegraph_calls": 1,
-                "source_mcp_calls": 2,
-                "findings_identified": 2,
-                "findings_confirmed": 1,
-                "findings_rejected": 1,
-                "repeated_source_reads": 0,
             },
         )
         report = await client.call_tool("get_metrics_report", {"days": 7})
 
     assert outcome.structured_content == {"status": "recorded"}
-    assert report.structured_content["qa_tasks"]["events"] == 1
-    assert "generation_events" not in report.structured_content
+    assert report.structured_content == {
+        "period_days": 7,
+        "total_tasks": 1,
+        "by_task_type": {"ordinary_review": 1},
+    }
 
 
 @pytest.mark.asyncio
