@@ -22,14 +22,17 @@ QA Orchestrator owns only deterministic profile routing, content-free orchestrat
 ## Model policy
 
 The local console command `qa-orch setup` selects OpenAI or Anthropic and four
-model IDs. For OpenAI it also selects `reasoning.effort` for triage, primary
-review, synthesis, and deep review; `high` remains the default recommendation
-for deep escalation. The selected values are returned in each active
-session's `model_policy`; the orchestrator never calls the models and never
-stores API keys. The default remains OpenAI/Codex with `gpt-6-luna` for triage
-and `gpt-6-sol` for primary review, deep review, and synthesis.
+model IDs. It also selects provider-specific reasoning/effort for triage,
+primary review, synthesis, and deep review: OpenAI uses `reasoning.effort`,
+while Anthropic uses `output_config.effort`. `none` means that the
+provider-specific parameter is omitted. `high` remains the default
+recommendation for deep escalation when the selected model supports it. The
+selected values are returned in each active session's `model_policy`; the
+orchestrator never calls the models and never stores API keys. The default
+remains OpenAI/Codex with `gpt-6-luna` for triage and `gpt-6-sol` for primary
+review, deep review, and synthesis.
 
-| Stage | Selected model | Reasoning | Responsibility |
+| Stage | Selected model | Reasoning / effort | Responsibility |
 |---|---|---|---|
 | Triage | configured `triage_model` | configured `triage_reasoning` (default `max`) | Select a fixed review bundle or compatibility profile and identify evidence gaps |
 | Primary review | configured `primary_model` | configured `primary_reasoning` (default `medium`) | Perform sequential implementation-aware review of the selected profiles |

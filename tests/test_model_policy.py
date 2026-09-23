@@ -4,9 +4,11 @@ import pytest
 
 from qa_orchestrator.cli import PROVIDER_OPTIONS, main
 from qa_orchestrator.model_policy import (
+    MODEL_CATALOGS,
     ModelProvider,
     ModelSelection,
     load_model_selection,
+    reasoning_options_for,
     save_model_selection,
 )
 from qa_orchestrator.orchestration import OrchestrationStep, build_model_policies
@@ -53,6 +55,74 @@ def test_setup_offers_only_openai_and_anthropic():
         ModelProvider.OPENAI,
         ModelProvider.ANTHROPIC,
     )
+
+
+def test_model_catalog_contains_current_recommended_models():
+    assert [entry.model_id for entry in MODEL_CATALOGS[ModelProvider.OPENAI]] == [
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-4.1",
+    ]
+    assert [entry.model_id for entry in MODEL_CATALOGS[ModelProvider.ANTHROPIC]] == [
+        "claude-fable-5-1",
+        "claude-opus-5-5",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-haiku-4-5-20251001",
+    ]
+    assert reasoning_options_for(ModelProvider.OPENAI, "gpt-6-astra") == (
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    )
+    assert reasoning_options_for(ModelProvider.ANTHROPIC, "claude-haiku-4-5-20251001") == (
+        "none",
+    )
+
+
+@pytest.mark.parametrize(
+    ("provider", "model", "reasoning"),
+    [
+        (ModelProvider.OPENAI, "gpt-6-astra", "none"),
+        (ModelProvider.OPENAI, "gpt-5.4", "max"),
+        (ModelProvider.OPENAI, "gpt-4.1", "high"),
+        (ModelProvider.ANTHROPIC, "claude-haiku-4-5-20251001", "high"),
+    ],
+)
+def test_model_selection_rejects_unsupported_reasoning(provider, model, reasoning):
+    with pytest.raises(ValueError, match="triage_reasoning"):
+        ModelSelection(
+            provider=provider,
+            triage_model=model,
+            primary_model=("gpt-6-sol" if provider is ModelProvider.OPENAI else "claude-sonnet-5"),
+            deep_model=("gpt-6-sol" if provider is ModelProvider.OPENAI else "claude-sonnet-5"),
+            synthesis_model=("gpt-6-sol" if provider is ModelProvider.OPENAI else "claude-sonnet-5"),
+            triage_reasoning=reasoning,
+        )
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [
+        (ModelProvider.OPENAI, "claude-sonnet-5"),
+        (ModelProvider.ANTHROPIC, "gpt-6-sol"),
+    ],
+)
+def test_model_selection_rejects_known_cross_provider_model(provider, model):
+    with pytest.raises(ValueError, match="does not belong"):
+        ModelSelection(
+            provider=provider,
+            triage_model=model,
+            primary_model="review",
+            deep_model="deep",
+            synthesis_model="synthesis",
+        )
 
 
 def test_openai_reasoning_reaches_each_configured_stage():
@@ -168,13 +238,13 @@ def test_setup_menu_orders_each_model_before_its_reasoning(tmp_path, monkeypatch
     assert prompts == [
         "Номер [1]: ",
         "Выбор [3]: ",
-        "Выбор [7]: ",
+        "Выбор [6]: ",
+        "Выбор [2]: ",
+        "Выбор [3]: ",
         "Выбор [2]: ",
         "Выбор [4]: ",
         "Выбор [2]: ",
-        "Выбор [5]: ",
-        "Выбор [2]: ",
-        "Выбор [4]: ",
+        "Выбор [3]: ",
     ]
     output = capsys.readouterr().out
     assert "Reasoning для глубокой проверки" in output
@@ -183,7 +253,7 @@ def test_setup_menu_orders_each_model_before_its_reasoning(tmp_path, monkeypatch
 
 def test_setup_menu_can_go_back_to_provider(tmp_path, monkeypatch):
     monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
-    answers = iter(("1", "b", "2", "1", "1", "1", "1"))
+    answers = iter(("1", "b", "2", "1", "1", "1", "1", "1", "1", "1", "1"))
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
     assert main(["setup"]) == 0
@@ -227,7 +297,7 @@ def test_reload_command_reads_current_policy(tmp_path, monkeypatch, capsys):
 
 def test_setup_menu_offers_anthropic_model_ids(tmp_path, monkeypatch):
     monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
-    answers = iter(("2", "6", "7", "9", "1"))
+    answers = iter(("2", "4", "3", "3", "2", "5", "1", "2", "2"))
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
     assert main(["setup"]) == 0
@@ -235,9 +305,13 @@ def test_setup_menu_offers_anthropic_model_ids(tmp_path, monkeypatch):
     selection = load_model_selection(tmp_path / "model-policy.json")
     assert selection.provider is ModelProvider.ANTHROPIC
     assert selection.triage_model == "claude-sonnet-5"
-    assert selection.primary_model == "claude-sonnet-4-6"
+    assert selection.primary_model == "claude-opus-5"
     assert selection.deep_model == "claude-haiku-4-5-20251001"
     assert selection.synthesis_model == "claude-opus-5-5"
+    assert selection.triage_reasoning == "high"
+    assert selection.primary_reasoning == "medium"
+    assert selection.deep_reasoning == "none"
+    assert selection.synthesis_reasoning == "medium"
 
 
 @pytest.mark.parametrize("model", ["secret/path", "model with spaces", "../model"])

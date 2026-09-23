@@ -29,7 +29,7 @@ The full test suite must not require network access, credentials, or a separate 
 - `prepare_review_route` returns only static metadata for the selected profile.
 - `start_qa_orchestration`, `advance_qa_orchestration`, and `get_qa_orchestration` manage content-free state only.
 - The orchestrator does not call models, create threads or agents, write user-requested files, or perform writes to external systems.
-- The model policy is configured locally with `qa-orch setup`; the default is GPT-6 Luna/max for triage, GPT-6 Sol/medium for primary review and synthesis, and optional GPT-6 Sol/high for read-only deep analysis. OpenAI reasoning effort can be adjusted for triage, primary review, and synthesis; deep review remains high. Every stage uses `speed=1.0`.
+- The model policy is configured locally with `qa-orch setup`; the default is GPT-6 Luna/max for triage, GPT-6 Sol/medium for primary review and synthesis, and optional GPT-6 Sol/high for read-only deep analysis. Provider-specific reasoning/effort can be adjusted for all four stages; deep review defaults to high when the selected model supports it. Every stage uses `speed=1.0`.
 - Metrics are content-free and limited to schema-defined metadata and aggregate counters; never store task content such as issue keys, paths, source, logs, prompts, or model responses.
 - Do not add persistent QA memory, a source cache, a learning layer, or hidden external calls.
 

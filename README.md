@@ -144,22 +144,33 @@ The launcher first uses the project's `.venv`, then the active `VIRTUAL_ENV`, or
 For a POSIX client that supports `uvx`, a checkout is optional:
 
 ```bash
-uvx --from git+https://github.com/Rbkmen/qa-orchestrator.git qa-orchestrator
-# one-time model policy setup
 uvx --from git+https://github.com/Rbkmen/qa-orchestrator.git qa-orch setup
+```
+
+This saves the model policy in your user configuration. Register the server command with your
+MCP client so the client starts it when needed; do not run the server command
+directly in a terminal. For Codex without a checkout:
+
+```bash
+codex mcp add qa-orchestrator -- uvx \
+  --from git+https://github.com/Rbkmen/qa-orchestrator.git \
+  qa-orchestrator
 ```
 
 Pin a release tag or commit instead of the default branch for reproducible
 team configuration.
 
-The setup wizard stores only the provider label, model IDs, and selected OpenAI
-reasoning effort in the local `model-policy.json`; it never asks for or stores API keys. Use
-`uv run qa-orch config show` to inspect the active selection.
-Use `uv run qa-orch reload` to re-read and validate the saved policy. Colors in
-the wizard distinguish providers, model IDs, and reasoning values; set
-`NO_COLOR=1` to disable them or `FORCE_COLOR=1` to force them.
+The setup wizard stores only the provider label, model IDs, and the selected
+provider-specific reasoning/effort values in the local `model-policy.json`; it
+never asks for or stores API keys. Choose a provider and model that your host
+client can use; the wizard records the policy but does not configure provider
+access. From a checkout, use `uv run qa-orch config show` and
+`uv run qa-orch reload`. Without a checkout, prefix those commands with
+`uvx --from git+https://github.com/Rbkmen/qa-orchestrator.git`. Colors in the
+wizard distinguish providers, model IDs, and reasoning values; set `NO_COLOR=1`
+to disable them or `FORCE_COLOR=1` to force them.
 
-Example for Codex:
+Example for Codex with a local checkout:
 
 ```bash
 codex mcp add qa-orchestrator -- "$(pwd)/scripts/qa-orchestrator"

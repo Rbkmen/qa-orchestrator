@@ -11,11 +11,14 @@ from collections.abc import Sequence
 from qa_orchestrator.config import Settings
 from qa_orchestrator.model_policy import (
     DEFAULT_MODEL_SELECTION,
+    MODEL_CATALOGS,
     REASONING_EFFORTS,
+    ModelCatalogEntry,
     ModelProvider,
     ModelSelection,
     ReasoningEffort,
     load_model_selection,
+    reasoning_options_for,
     save_model_selection,
 )
 from qa_orchestrator.server import main as serve
@@ -36,39 +39,15 @@ REASONING_ROLE_LABELS = (
     ("deep_reasoning", "Reasoning для глубокой проверки"),
     ("synthesis_reasoning", "Reasoning для синтеза"),
 )
-MODEL_CATALOGS: dict[ModelProvider, tuple[tuple[str, str], ...]] = {
-    ModelProvider.OPENAI: (
-        ("GPT-6 Astra — максимальное качество", "gpt-6-astra"),
-        ("GPT-6 Sol — сложный код и агентные задачи", "gpt-6-sol"),
-        ("GPT-6 Luna — быстрее и экономичнее", "gpt-6-luna"),
-        ("GPT-5.6 Sol", "gpt-5.6-sol"),
-        ("GPT-5.6 Terra — баланс качества и цены", "gpt-5.6-terra"),
-        ("GPT-5.6 Luna — экономичный вариант", "gpt-5.6-luna"),
-        ("GPT-5.5", "gpt-5.5"),
-        ("GPT-5.4", "gpt-5.4"),
-        ("GPT-4.1 — без reasoning", "gpt-4.1"),
-    ),
-    ModelProvider.ANTHROPIC: (
-        ("Claude Opus 5.5 — максимальное качество", "claude-opus-5-5"),
-        ("Claude Opus 5", "claude-opus-5"),
-        ("Claude Opus 4.8", "claude-opus-4-8"),
-        ("Claude Opus 4.7", "claude-opus-4-7"),
-        ("Claude Opus 4.6", "claude-opus-4-6"),
-        ("Claude Sonnet 5 — баланс качества и скорости", "claude-sonnet-5"),
-        ("Claude Sonnet 4.6", "claude-sonnet-4-6"),
-        ("Claude Sonnet 4.5 — snapshot", "claude-sonnet-4-5-20250929"),
-        ("Claude Haiku 4.5 — быстрый и экономичный", "claude-haiku-4-5-20251001"),
-    ),
+REASONING_DESCRIPTIONS = {
+    "none": "не передавать параметр reasoning/effort",
+    "minimal": "минимальный уровень рассуждений",
+    "low": "быстрее и дешевле, подходит для простых задач",
+    "medium": "сбалансированный вариант по умолчанию",
+    "high": "сложный код, отладка и глубокий анализ",
+    "xhigh": "длинные и сложные агентные задачи",
+    "max": "максимальный уровень reasoning",
 }
-REASONING_OPTIONS: tuple[tuple[ReasoningEffort, str], ...] = (
-    ("none", "без дополнительного reasoning, минимальная задержка"),
-    ("minimal", "минимальный уровень рассуждений"),
-    ("low", "быстрее и дешевле, подходит для простых задач"),
-    ("medium", "сбалансированный вариант по умолчанию"),
-    ("high", "сложный код, отладка и глубокий анализ"),
-    ("xhigh", "длинные и сложные агентные задачи"),
-    ("max", "максимальный уровень reasoning"),
-)
 _BACK_INPUTS = frozenset({"b", "back", "назад"})
 _COLORS = {
     "provider": "\033[36m",
@@ -139,25 +118,32 @@ def _model_value(
     else:
         print(f"\nШаг 2/3. {_paint(label, _COLORS['model'])}:")
         catalog = list(MODEL_CATALOGS.get(provider, ()))
-        catalog_ids = {model_id for _, model_id in catalog}
+        catalog_ids = {entry.model_id for entry in catalog}
         if selected_default and selected_default not in catalog_ids:
-            catalog.insert(0, (f"Текущая модель: {selected_default}", selected_default))
+            catalog.insert(
+                0,
+                ModelCatalogEntry(
+                    f"Текущая модель: {selected_default}",
+                    selected_default,
+                    reasoning_options_for(provider, selected_default),
+                ),
+            )
 
         if catalog:
             default_index = next(
                 (
                     index
-                    for index, (_, model_id) in enumerate(catalog, start=1)
-                    if model_id == selected_default
+                    for index, entry in enumerate(catalog, start=1)
+                    if entry.model_id == selected_default
                 ),
                 1,
             )
-            for index, (model_label, model_id) in enumerate(catalog, start=1):
-                suffix = " (текущая/по умолчанию)" if model_id == selected_default else ""
-                color = _COLORS["selected"] if model_id == selected_default else _COLORS["model"]
+            for index, entry in enumerate(catalog, start=1):
+                suffix = " (текущая/по умолчанию)" if entry.model_id == selected_default else ""
+                color = _COLORS["selected"] if entry.model_id == selected_default else _COLORS["model"]
                 print(
-                    f"  {index}. {_paint(model_label, color)}: "
-                    f"{_paint(model_id, color)}{suffix}"
+                    f"  {index}. {_paint(entry.label, color)}: "
+                    f"{_paint(entry.model_id, color)}{suffix}"
                 )
             print(_paint("  0. Ввести другой model ID", _COLORS["model"]))
             print(_paint("  b. Назад", _COLORS["muted"]))
@@ -165,7 +151,7 @@ def _model_value(
             if _is_back(answer):
                 raise _BackRequested
             if not answer:
-                value = selected_default or catalog[default_index - 1][1]
+                value = selected_default or catalog[default_index - 1].model_id
             elif answer == "0":
                 value = input("Model ID (b — назад): ").strip()
                 if _is_back(value):
@@ -173,7 +159,7 @@ def _model_value(
             else:
                 try:
                     index = int(answer)
-                    value = catalog[index - 1][1]
+                    value = catalog[index - 1].model_id
                 except (ValueError, IndexError) as exc:
                     raise ValueError(f"{label}: нужно выбрать номер из меню моделей") from exc
         else:
@@ -195,35 +181,67 @@ def _model_value(
     return value
 
 
+def _reasoning_parameter_name(provider: ModelProvider) -> str:
+    if provider is ModelProvider.OPENAI:
+        return "OpenAI reasoning.effort"
+    return "Anthropic output_config.effort"
+
+
+def _selected_reasoning_default(
+    options: tuple[ReasoningEffort, ...],
+    current: ReasoningEffort | None,
+    default: ReasoningEffort,
+) -> ReasoningEffort:
+    if current in options:
+        return current
+    if default in options:
+        return default
+    if "medium" in options:
+        return "medium"
+    return options[-1]
+
+
 def _reasoning_value(
     *,
     label: str,
+    provider: ModelProvider,
     model: str,
     current: ReasoningEffort | None,
     default: ReasoningEffort,
     override: ReasoningEffort | None,
 ) -> ReasoningEffort:
-    selected_default = "none" if model == "gpt-4.1" else current or default
+    options = reasoning_options_for(provider, model)
+    selected_default = _selected_reasoning_default(options, current, default)
     if override is not None:
+        if override not in options:
+            allowed = ", ".join(options)
+            raise ValueError(
+                f"{label}: значение {override!r} не поддерживается моделью {model!r}; "
+                f"доступно: {allowed}"
+            )
         return override
 
-    print(f"\nШаг 3/3. {_paint(label, _COLORS['reasoning'])} (OpenAI reasoning.effort):")
+    parameter_name = _reasoning_parameter_name(provider)
+    print(f"\nШаг 3/3. {_paint(label, _COLORS['reasoning'])} ({parameter_name}):")
     default_index = next(
         (
             index
-            for index, (value, _) in enumerate(REASONING_OPTIONS, start=1)
+            for index, value in enumerate(options, start=1)
             if value == selected_default
         ),
         1,
     )
-    for index, (value, description) in enumerate(REASONING_OPTIONS, start=1):
+    for index, value in enumerate(options, start=1):
+        description = REASONING_DESCRIPTIONS[value]
         suffix = " (текущий/по умолчанию)" if value == selected_default else ""
         color = _COLORS["selected"] if value == selected_default else _COLORS["reasoning"]
         print(f"  {index}. {_paint(value, color)} — {description}{suffix}")
-    if label == "Reasoning для глубокой проверки":
+    if label == "Reasoning для глубокой проверки" and "high" in options:
         print("Рекомендация: high для сложных и рискованных проверок.")
-    elif model == "gpt-4.1":
-        print("Подсказка: gpt-4.1 — non-reasoning модель; используй none.")
+    if options == ("none",):
+        print(f"Подсказка: {model} не поддерживает {parameter_name}; будет сохранено none.")
+    elif provider is ModelProvider.ANTHROPIC:
+        print("Подсказка: Anthropic effort задаёт глубину рассуждений для этой модели.")
     elif model == "gpt-6-astra":
         print("Подсказка: GPT-6 Astra не поддерживает none; начни с low или medium.")
     else:
@@ -235,7 +253,7 @@ def _reasoning_value(
     if not answer:
         return selected_default
     try:
-        return REASONING_OPTIONS[int(answer) - 1][0]
+        return options[int(answer) - 1]
     except (ValueError, IndexError) as exc:
         raise ValueError(f"{label}: нужно выбрать уровень reasoning из меню") from exc
 
@@ -263,9 +281,15 @@ def _setup(argv: Sequence[str]) -> int:
                 file=sys.stderr,
             )
 
-    reasoning_overrides = [getattr(args, field) for field, _ in REASONING_ROLE_LABELS]
     provider_is_interactive = args.provider is None
     reasoning_labels = dict(REASONING_ROLE_LABELS)
+    all_model_flags_supplied = all(getattr(args, field) is not None for field, _ in ROLE_LABELS)
+    no_reasoning_flags_supplied = all(
+        getattr(args, field) is None for field, _ in REASONING_ROLE_LABELS
+    )
+    use_model_defaults_without_prompts = (
+        args.provider is not None and all_model_flags_supplied and no_reasoning_flags_supplied
+    )
 
     while True:
         try:
@@ -278,20 +302,14 @@ def _setup(argv: Sequence[str]) -> int:
             print("\nНастройка отменена.")
             return 130
 
-        if provider is not ModelProvider.OPENAI and any(
-            value is not None for value in reasoning_overrides
-        ):
-            raise ValueError("параметры reasoning сейчас доступны только для OpenAI")
-
         defaults = DEFAULT_MODEL_SELECTION if provider is ModelProvider.OPENAI else None
         model_values: dict[str, str] = {}
         reasoning_values: dict[str, ReasoningEffort] = {}
         steps: list[tuple[str, str, str]] = []
         for field, label in ROLE_LABELS:
             steps.append(("model", field, label))
-            if provider is ModelProvider.OPENAI:
-                reasoning_field = f"{field.removesuffix('_model')}_reasoning"
-                steps.append(("reasoning", reasoning_field, reasoning_labels[reasoning_field]))
+            reasoning_field = f"{field.removesuffix('_model')}_reasoning"
+            steps.append(("reasoning", reasoning_field, reasoning_labels[reasoning_field]))
 
         step_index = 0
         back_to_provider = False
@@ -323,13 +341,21 @@ def _setup(argv: Sequence[str]) -> int:
                         )
                         else None
                     )
-                    reasoning_values[field] = _reasoning_value(
-                        label=label,
-                        model=model_values[model_field],
-                        current=current_reasoning,
-                        default=getattr(DEFAULT_MODEL_SELECTION, field),
-                        override=getattr(args, field),
-                    )
+                    if use_model_defaults_without_prompts:
+                        reasoning_values[field] = _selected_reasoning_default(
+                            reasoning_options_for(provider, model_values[model_field]),
+                            current_reasoning,
+                            getattr(DEFAULT_MODEL_SELECTION, field),
+                        )
+                    else:
+                        reasoning_values[field] = _reasoning_value(
+                            label=label,
+                            provider=provider,
+                            model=model_values[model_field],
+                            current=current_reasoning,
+                            default=getattr(DEFAULT_MODEL_SELECTION, field),
+                            override=getattr(args, field),
+                        )
             except _BackRequested:
                 if step_index == 0:
                     if not provider_is_interactive:
@@ -350,9 +376,8 @@ def _setup(argv: Sequence[str]) -> int:
     print(f"Провайдер: {_paint(selection.provider.value, _COLORS['provider'])}")
     for field, label in ROLE_LABELS:
         print(f"{label}: {_paint(getattr(selection, field), _COLORS['model'])}")
-    if provider is ModelProvider.OPENAI:
-        for field, label in REASONING_ROLE_LABELS:
-            print(f"{label}: {_paint(getattr(selection, field), _COLORS['reasoning'])}")
+    for field, label in REASONING_ROLE_LABELS:
+        print(f"{label}: {_paint(getattr(selection, field), _COLORS['reasoning'])}")
     print("Проверь политику командой: qa-orch reload")
     print("Если MCP-клиент уже подключён, перезапусти его соединение.")
     return 0
@@ -381,7 +406,7 @@ def _reload_config() -> int:
 
 def _help() -> int:
     print("Использование:")
-    print("  qa-orch setup          провайдер -> модель -> reasoning")
+    print("  qa-orch setup          провайдер -> модель -> reasoning/effort")
     print("  qa-orch config show    показать текущую модельную политику")
     print("  qa-orch reload         перечитать и проверить модельную политику")
     print("  qa-orch                запустить MCP STDIO-сервер")

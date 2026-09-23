@@ -43,59 +43,81 @@ installed dependencies, metrics-directory permissions, and the source launcher.
 It does not contact external services or create files. Use `--json` in scripts.
 
 `qa-orch setup` opens the local console wizard. It asks for the AI environment
-(`OpenAI / Codex` or `Anthropic / Claude`) and the model ID for triage, primary
-review, deep review, and synthesis. For each role, the menu offers the
-current/default model or an option to enter another ID. Enter an ID supported
-by that user's account; the MCP cannot reliably expose every provider's live
-model catalog. It stores
-only these non-secret values in `$HOME/.qa-orchestrator/model-policy.json` (or
-the path from `QA_ORCHESTRATOR_MODEL_POLICY_PATH`). API keys are never
-requested or stored. Inspect the result with:
-
-Interactive order: provider → model for a role → reasoning for that model.
-For Anthropic, the OpenAI-specific reasoning question is skipped. For OpenAI,
-deep-review reasoning is configurable too, with `high` as the recommendation
-for complex and risky checks.
-
-For OpenAI the wizard includes common IDs such as `gpt-6-astra`, `gpt-6-sol`,
-`gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`,
-`gpt-5.4`, and `gpt-4.1`. It then offers `reasoning.effort` values from
-`none` through `max` for triage, primary review, deep review, and synthesis;
-`high` is the deep-review recommendation. For Anthropic it includes current
-examples such as `claude-opus-5-5`, `claude-opus-5`, `claude-opus-4-8`,
-`claude-sonnet-5`, `claude-sonnet-4-6`, and `claude-haiku-4-5-20251001`.
-The exact ID must be available in the selected account; use the custom option
-when a model is not in the menu. See the [OpenAI model catalog](https://developers.openai.com/api/docs/models/all),
-[OpenAI reasoning guide](https://developers.openai.com/api/docs/guides/reasoning),
-and [Anthropic model status](https://platform.claude.com/docs/en/about-claude/model-deprecations)
-for current lists.
+(`OpenAI / Codex` or `Anthropic / Claude`), then walks through
+`provider → model → reasoning/effort` for triage, primary review, deep review,
+and synthesis. The menu contains a short list of recommended model IDs and an
+option to enter another exact ID. Enter an ID supported by that user's
+account; the MCP cannot reliably expose every provider's live model catalog.
+The wizard saves the model policy; it does not configure provider access in
+Codex or Claude Code. Make sure the selected host can use the chosen provider
+and model. It stores only these non-secret values in
+`$HOME/.qa-orchestrator/model-policy.json` (or the path from
+`QA_ORCHESTRATOR_MODEL_POLICY_PATH`). API keys are never requested or stored.
+Inspect the result with:
 
 ```bash
 uv run qa-orch config show
 uv run qa-orch reload
 ```
 
+For OpenAI, the recommended menu currently includes `gpt-6-astra`,
+`gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`,
+and `gpt-4.1`. The wizard offers model-specific `reasoning.effort` values:
+`gpt-6-astra` starts at `low`, while `gpt-4.1` uses `none` because it does
+not support reasoning. Other exact OpenAI IDs, such as `gpt-5.5` or `gpt-5.4`,
+can be entered through the custom-ID option; unsupported combinations are
+rejected before saving.
+
+For Anthropic, the recommended menu currently includes `claude-fable-5-1`,
+`claude-opus-5-5`, `claude-opus-5`, `claude-sonnet-5`, and
+`claude-haiku-4-5-20251001`. Supported models use Anthropic's
+`output_config.effort`; Haiku 4.5 does not support effort and therefore uses
+`none`. Here `none` is a local sentinel meaning that the provider-specific
+parameter must be omitted. `high` remains the recommendation for complex and
+risky deep checks when the selected model supports it. Use the exact ID
+available in the selected account. See the [OpenAI model catalog](https://developers.openai.com/api/docs/models/all),
+[OpenAI reasoning guide](https://developers.openai.com/api/docs/guides/reasoning),
+and [Anthropic model documentation](https://platform.claude.com/docs/en/models/overview)
+for current provider details.
+
 `reload` re-reads and validates the saved policy. If an MCP client is already
 connected, restart its MCP connection after changing the policy. The wizard
 colors providers, model IDs, and reasoning values; use `NO_COLOR=1` to disable
 colors or `FORCE_COLOR=1` to force them.
 
-### Optional: run from Git without a checkout
+### Alternative: use GitHub without a checkout
 
-On a POSIX system with `uv`, an MCP client can start the published repository
-directly through `uvx`:
+On macOS or Linux, `uvx` can run the commands directly from GitHub. First,
+save the model policy in your user configuration:
 
 ```bash
-uvx --from git+https://github.com/Rbkmen/qa-orchestrator.git qa-orchestrator
-# one-time model policy setup
 uvx --from git+https://github.com/Rbkmen/qa-orchestrator.git qa-orch setup
 ```
 
-For a team or CI configuration, pin a release tag or commit instead of the
-default branch. This command is suitable as the client command with arguments
-`--from git+https://github.com/Rbkmen/qa-orchestrator.git qa-orchestrator`.
+To inspect the saved policy or validate it again without a checkout, run:
 
-Optional maintainer checks:
+```bash
+uvx --from git+https://github.com/Rbkmen/qa-orchestrator.git qa-orch config show
+uvx --from git+https://github.com/Rbkmen/qa-orchestrator.git qa-orch reload
+```
+
+Then register the MCP command in the client as shown below. The `qa-orchestrator`
+command starts the STDIO server and should be launched by the MCP client, not
+run by itself as a setup command. The Codex guide includes the `uvx`
+registration command; the [Claude Code guide](clients/claude-code.md) includes
+its equivalent. For a team setup, pin a release tag or commit instead of using
+the default branch by appending `@<tag-or-commit>` to the Git URL. Replace the
+placeholder and use the exact same pinned URL in both the one-time setup and
+the MCP server command, for example:
+
+```bash
+uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<tag-or-commit>' qa-orch setup
+```
+
+`uvx` supports Git sources and pinned refs; see the [uv
+documentation](https://docs.astral.sh/uv/guides/tools/).
+
+Optional maintainer checks (from the checkout):
 
 ```bash
 uv run pytest -q
@@ -112,7 +134,21 @@ codex mcp add qa-orchestrator -- "$(pwd)/scripts/qa-orchestrator"
 codex mcp list
 ```
 
-The command registers the executable launcher in your local Codex configuration. Codex CLI and the IDE extension share that configuration. If you use Codex Desktop, verify the server in the app's MCP/settings UI instead of assuming that a CLI registration is visible there. `codex mcp list` should show `qa-orchestrator` as enabled. Restart Codex if it was already open. See the [official Codex MCP documentation](https://developers.openai.com/codex/mcp) for CLI and `config.toml` options.
+If you use `uvx` without a checkout, register this command instead:
+
+```bash
+codex mcp add qa-orchestrator -- uvx \
+  --from git+https://github.com/Rbkmen/qa-orchestrator.git \
+  qa-orchestrator
+codex mcp list
+```
+
+These commands save the MCP server in your local Codex configuration. The
+ChatGPT desktop app, Codex CLI, and IDE extension share that configuration.
+For the desktop UI steps and command/argument values for both installation
+methods, see the [Codex setup guide](clients/codex.md). See the [official Codex
+MCP guide](https://developers.openai.com/codex/mcp) for current UI and
+configuration options.
 
 Each user must register the server in their own local Codex environment. Use
 either the checkout launcher or the `uvx` command; MCP configuration is not
@@ -129,12 +165,18 @@ For implementation-aware QA reviews, read and follow the canonical QA Orchestrat
 
 If the target `AGENTS.md` already exists, merge the rule instead of replacing the file. The linked file is the canonical source for orchestration stages, risk escalation, and metrics; keep workspace-specific routing and output requirements in the workspace rules.
 
+If you installed with `uvx` and do not have a checkout, use the canonical
+[Codex host instructions on GitHub](https://github.com/Rbkmen/qa-orchestrator/blob/main/client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md)
+from the same branch, tag, or commit as the server, then merge them into the
+appropriate `AGENTS.md` or persistent instructions. For a pinned version,
+replace `main` in the link with the matching tag or commit.
+
 For Anthropic/Claude Code, use the [Claude Code setup guide](clients/claude-code.md).
 
 ## 4. Verify the connection
 
-1. In Codex, run `codex mcp list` and confirm `qa-orchestrator` is enabled.
-2. Restart Codex, then confirm that the six tools are available: `prepare_review_route`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `record_qa_task_outcome`, and `get_metrics_report`.
+1. In Codex CLI, run `codex mcp list`; in Claude Code, run `claude mcp get qa-orchestrator` or `/mcp`. In the ChatGPT desktop app, check **Settings → MCP servers** or use `/mcp`.
+2. Restart the client if needed, then confirm that all six tools are available: `prepare_review_route`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `record_qa_task_outcome`, and `get_metrics_report`.
 3. For a read-only smoke check, call `prepare_review_route` with `agent_profile="code_explorer"`. It should return the Faraday evidence-investigator route with `read_only=true` and `host_owns_decisions=true`.
 
 The server is started on demand by the MCP client. Do not start a second background server manually.
@@ -152,7 +194,12 @@ git pull --ff-only
 uv sync
 ```
 
-Restart Codex after updating so the client starts the current launcher and code.
+Restart the MCP client after updating so it starts the current launcher and
+code.
+
+For a no-checkout installation, update the Git ref in both the one-time setup
+command and the MCP server command, rerun `qa-orch setup` from that ref, then
+restart the client. Keep both commands on the same tag or commit.
 
 ## Troubleshooting
 
@@ -161,4 +208,6 @@ Restart Codex after updating so the client starts the current launcher and code.
 | `QA Orchestrator is not installed` | Run `uv sync` from the cloned repository and check that `scripts/qa-orchestrator` points to that checkout. |
 | Server is missing from Codex | Run `codex mcp list` and `codex mcp get qa-orchestrator`; if the checkout moved, remove the stale entry with `codex mcp remove qa-orchestrator`, add it again using the current absolute path, then restart Codex. |
 | Server is enabled but tools do not appear | Restart Codex and confirm the launcher exists and is executable. |
+| Server is missing or disconnected in Claude Code | Run `claude mcp list`, `claude mcp get qa-orchestrator`, or `/mcp`; verify the command and arguments in the client guide. |
+| `uvx` cannot fetch the GitHub source | Confirm `uv` and Git are installed and that this machine can reach GitHub; for a stable team setup, use a published tag or commit. |
 | Python or dependency error | Confirm Python is 3.12+ and run `uv sync` from the repository root. |
