@@ -1,7 +1,6 @@
 import json
 import os
 import stat
-import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -52,13 +51,10 @@ class JsonEventSink:
         """Rewrite stored events to the task-distribution-only schema."""
         if self.path is None:
             return True
-        if self.path.is_symlink():
-            return False
-        if not self.path.exists():
-            return True
-        if not self.path.is_file():
-            return False
         try:
+            validate_metrics_storage(self.path)
+            if not self.path.exists():
+                return True
             with self._locked_events() as events:
                 cutoff = datetime.now(UTC) - timedelta(days=self.retention_days)
                 retained = []
@@ -102,8 +98,6 @@ class JsonEventSink:
         normalized_event = normalize_task_distribution_event(event)
         if normalized_event is None:
             return False
-        line = _serialize(normalized_event)
-        print(line, file=sys.stderr, flush=True)
         try:
             with self._locked_events() as events:
                 cutoff = datetime.now(UTC) - timedelta(days=self.retention_days)
@@ -137,12 +131,51 @@ def _prepare_metrics_directory(path: Path) -> None:
     try:
         path.mkdir(parents=True, exist_ok=False, mode=0o700)
     except FileExistsError:
-        if path.is_symlink() or not path.is_dir():
-            raise OSError("metrics directory must be a real directory")
-        if stat.S_IMODE(path.stat().st_mode) & 0o077:
-            raise OSError("metrics directory must be private")
+        _validate_existing_metrics_directory(path)
         return
     path.chmod(0o700)
+    _validate_existing_metrics_directory(path)
+
+
+def validate_metrics_storage(path: Path) -> None:
+    """Check metrics path safety and writability without creating or changing files."""
+
+    directory = path.parent
+    if directory.is_symlink():
+        raise OSError("metrics directory must be a real directory")
+    if directory.exists():
+        _validate_existing_metrics_directory(directory)
+    else:
+        candidate = directory
+        while (
+            not candidate.exists()
+            and not candidate.is_symlink()
+            and candidate != candidate.parent
+        ):
+            candidate = candidate.parent
+        if candidate == directory and candidate.is_symlink():
+            raise OSError("metrics directory must be a real directory")
+        if not candidate.is_dir():
+            raise OSError("metrics directory parent must be a directory")
+        if not os.access(candidate, os.W_OK | os.X_OK):
+            raise OSError("metrics directory parent must be writable")
+
+    if path.is_symlink():
+        raise OSError("metrics file must not be a symlink")
+    if path.exists():
+        if not path.is_file():
+            raise OSError("metrics path must be a regular file")
+        if not os.access(path, os.R_OK):
+            raise OSError("metrics file must be readable")
+
+
+def _validate_existing_metrics_directory(path: Path) -> None:
+    if path.is_symlink() or not path.is_dir():
+        raise OSError("metrics directory must be a real directory")
+    if stat.S_IMODE(path.stat().st_mode) & 0o077:
+        raise OSError("metrics directory must be private")
+    if not os.access(path, os.W_OK | os.X_OK):
+        raise OSError("metrics directory must be writable")
 
 
 @contextmanager

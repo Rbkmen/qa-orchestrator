@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .config import Settings
+from .events import validate_metrics_storage
 from .model_policy import load_model_selection
 
 MINIMUM_PYTHON = (3, 12)
@@ -25,13 +26,6 @@ class CheckResult:
     @property
     def ok(self) -> bool:
         return self.status != "fail"
-
-
-def _existing_parent(path: Path) -> Path:
-    candidate = path
-    while not candidate.exists() and candidate != candidate.parent:
-        candidate = candidate.parent
-    return candidate
 
 
 def collect_checks() -> list[CheckResult]:
@@ -71,17 +65,22 @@ def collect_checks() -> list[CheckResult]:
         checks.append(CheckResult("configuration", "fail", f"invalid environment value: {exc}"))
     else:
         data_dir = settings.data_dir
-        parent = _existing_parent(data_dir)
-        writable = parent.is_dir() and os.access(parent, os.W_OK)
         if data_dir.exists():
             detail = f"{data_dir} exists"
         else:
             detail = f"{data_dir} will be created on first metrics write"
+        try:
+            validate_metrics_storage(settings.metrics_path)
+        except OSError as exc:
+            metrics_status = "fail"
+            detail = str(exc)
+        else:
+            metrics_status = "pass"
         checks.append(
             CheckResult(
                 name="metrics directory",
-                status="pass" if writable else "fail",
-                detail=detail if writable else f"{detail}; nearest existing parent is not writable",
+                status=metrics_status,
+                detail=detail,
             )
         )
         try:

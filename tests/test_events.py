@@ -174,6 +174,35 @@ def test_startup_sanitizer_rewrites_existing_data_to_distribution_only(tmp_path)
     ]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="metrics directory permissions use POSIX modes")
+def test_startup_sanitizer_checks_directory_permissions_without_existing_metrics(tmp_path):
+    data_dir = tmp_path / "shared"
+    data_dir.mkdir()
+    data_dir.chmod(0o755)
+
+    assert not JsonEventSink(data_dir / "metrics.jsonl").sanitize_existing_records()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="metrics symlinks use POSIX semantics")
+def test_startup_sanitizer_rejects_symlinked_directory_without_existing_metrics(tmp_path):
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    target_dir.chmod(0o700)
+    data_dir = tmp_path / "shared"
+    data_dir.symlink_to(target_dir, target_is_directory=True)
+
+    assert not JsonEventSink(data_dir / "metrics.jsonl").sanitize_existing_records()
+
+
+def test_task_distribution_write_does_not_log_event_to_stderr(capsys, tmp_path):
+    receipt = JsonEventSink(tmp_path / "metrics.jsonl").record_qa_task_outcome(
+        {"task_type": "ordinary_review"}
+    )
+
+    assert receipt.status == "recorded"
+    assert capsys.readouterr().err == ""
+
+
 def test_metrics_rewrite_discards_malformed_lines(tmp_path):
     metrics_path = tmp_path / "metrics.jsonl"
     metrics_path.write_text("not-json\n", encoding="utf-8")
