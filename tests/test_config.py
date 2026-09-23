@@ -69,4 +69,5 @@ def test_launcher_does_not_reference_model_runtime():
         "QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS",
         "QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS",
         "QA_ORCHESTRATOR_DATA_DIR",
+        "QA_ORCHESTRATOR_MODEL_POLICY_PATH",
     }

@@ -34,6 +34,9 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --locked
 
+      - name: Run installation doctor
+        run: uv run qa-orchestrator-doctor --json
+
       - name: Build wheel
         run: uv build --wheel --out-dir dist
 

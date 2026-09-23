@@ -1,6 +1,9 @@
 # QA Orchestrator Policy
 
-This policy is client-neutral. The **primary host** — Codex, Claude Code, Cursor, or another MCP client — remains the main orchestrator and decision owner.
+The MCP transport, setup wizard, and responsibility boundary are client-neutral.
+The **primary host** — Codex or Claude Code —
+remains the main orchestrator and decision owner. The selected model IDs are
+configuration metadata; the host still owns model execution and validation.
 
 ## Responsibility boundary
 
@@ -18,22 +21,30 @@ QA Orchestrator owns only deterministic profile routing, content-free orchestrat
 
 ## Model policy
 
-| Stage | Model | Reasoning | Responsibility |
+The local console command `qa-orch setup` selects OpenAI or Anthropic and four
+model IDs. For OpenAI it also selects `reasoning.effort` for triage, primary
+review, synthesis, and deep review; `high` remains the default recommendation
+for deep escalation. The selected values are returned in each active
+session's `model_policy`; the orchestrator never calls the models and never
+stores API keys. The default remains OpenAI/Codex with `gpt-6-luna` for triage
+and `gpt-6-sol` for primary review, deep review, and synthesis.
+
+| Stage | Selected model | Reasoning | Responsibility |
 |---|---|---|---|
-| Triage | `gpt-6-luna` | `max` | Select a fixed review bundle or compatibility profile and identify evidence gaps |
-| Primary review | `gpt-6-sol` | `medium` | Perform sequential implementation-aware review of the selected profiles |
-| Deep escalation | `gpt-6-sol` | `high` | Optional read-only check for a complex or high-risk case |
-| Synthesis | `gpt-6-sol` | `medium` | Consolidate the result after host validation |
+| Triage | configured `triage_model` | configured `triage_reasoning` (default `max`) | Select a fixed review bundle or compatibility profile and identify evidence gaps |
+| Primary review | configured `primary_model` | configured `primary_reasoning` (default `medium`) | Perform sequential implementation-aware review of the selected profiles |
+| Deep escalation | configured `deep_model` | configured `deep_reasoning` (default `high`) | Optional read-only check for a complex or high-risk case |
+| Synthesis | configured `synthesis_model` | configured `synthesis_reasoning` (default `medium`) | Consolidate the result after host validation |
 
 The orchestrator returns only the next policy and transition constraints. Every policy includes the fixed `speed=1.0`; the primary host must preserve it when running the selected model. The primary host runs the models in its own environment, validates findings, and makes the final decision. The orchestrator does not invoke or throttle a provider itself.
 
 ## Orchestration flow
 
-1. The host calls `start_qa_orchestration(task_type)` and receives a `run_id`, GPT-6 Luna/max, and the next action.
+1. The host calls `start_qa_orchestration(task_type)` and receives a `run_id`, the configured triage model and reasoning effort (default `max`), and the next action.
 2. After triage, the host calls `advance_qa_orchestration` with one fixed bundle or one of the seven `ReviewAgent` profiles.
-3. For a bundle, the host runs GPT-6 Sol once per profile in the returned order and passes the role identifier as `completed_profile` after each stage; the orchestrator does not skip roles or accept an arbitrary order.
-4. In the same transition that completes the last primary-review profile, the host may supply structured `risk_signals`; the orchestrator applies the fixed deep-review rules and either goes directly to GPT-6 Sol synthesis or returns optional GPT-6 Sol/high with the derived reason codes. Do not send `risk_signals` on the later synthesis transition.
-5. After deep review, the host returns to GPT-6 Sol synthesis.
+3. For a bundle, the host runs the configured primary model once per profile in the returned order and passes the role identifier as `completed_profile` after each stage; the orchestrator does not skip roles or accept an arbitrary order.
+4. In the same transition that completes the last primary-review profile, the host may supply structured `risk_signals`; the orchestrator applies the fixed deep-review rules and either goes directly to configured synthesis or returns the configured deep model with its configured reasoning (default `high`). Do not send `risk_signals` on the later synthesis transition.
+5. After deep review, the host returns to the configured synthesis model.
 6. After synthesis, the state becomes `awaiting_host_outcome`; the host calls `record_qa_task_outcome` once with the same `run_id` and a status of `completed`, `partial`, or `blocked`. The orchestrator moves the session to its final status.
 
 Allowed transitions:
@@ -44,7 +55,7 @@ Luna triage → Sol profile[1] → ... → Sol profile[N]
                                          Sol synthesis → awaiting host outcome
 ```
 
-The `terra_primary_review` and `terra_synthesis` transition identifiers are retained for compatibility. They are not model selectors: use the returned `model_policy` (`gpt-6-sol` for both stages).
+The `terra_primary_review` and `terra_synthesis` transition identifiers are retained for compatibility. They are not model selectors: use the returned `model_policy` for each stage.
 
 Sessions are content-free and in memory, with a default TTL of `1800` seconds and a default limit of `100` active sessions. The shared cache is bounded, so older terminal sessions may be evicted when new sessions are created. Unknown runs, expired sessions, illegal or repeated transitions, and invalid signals are rejected without changing state. After a restart, the host starts a new session.
 
@@ -132,7 +143,7 @@ The returned `deep_assessment` contains `should_escalate`, matched fixed rules, 
 | `typescript_reviewer` | `TypeScript Reviewer` |
 | `react_reviewer` | `React Reviewer` |
 
-Faraday is the internal display name for `code_explorer`. It is not a separate external agent, service, package, or model. The orchestrator returns only the fixed identifier and order; the host runs GPT-6 Sol for each role.
+Faraday is the internal display name for `code_explorer`. It is not a separate external agent, service, package, or model. The orchestrator returns only the fixed identifier and order; the host runs the configured primary model for each role.
 
 ## Review profiles
 
@@ -155,7 +166,7 @@ New `record_qa_task_outcome` events use schema v2, assigned by the service. They
 - `task_type`, `outcome`;
 - CodeGraph/source call counters;
 - identified, confirmed, and rejected findings plus repeated source reads;
-- `deep_model=gpt-6-sol` and `deep_reasoning=high` after deep review actually runs; if the task stops before that step, use `deep_review_calls=0` and omit those fields. Duration and token measurements are optional;
+- the configured `deep_model` and `deep_reasoning` after deep review actually runs; the default deep reasoning is `high`. If the task stops before that step, use `deep_review_calls=0` and omit those fields. Duration and token measurements are optional;
 - stage calls: `triage_calls`, `primary_review_calls`, `deep_review_calls`, and `synthesis_calls`; shared `orchestration_steps_completed` and `orchestration_retries`;
 - optional stage tokens: `triage_input_tokens`, `triage_output_tokens`, `primary_review_input_tokens`, `primary_review_output_tokens`, `synthesis_input_tokens`, and `synthesis_output_tokens`; deep-review tokens remain `deep_input_tokens` and `deep_output_tokens`.
 - For a completed bundle with `N` primary-review profiles, the minimum counters are one triage call, `N` primary-review calls, one synthesis call, and `N+2` completed steps; when deep review ran, report its actual call count (at least one) and add one step.

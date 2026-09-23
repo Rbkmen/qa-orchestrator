@@ -1,5 +1,10 @@
 # QA Orchestrator Host-Owned Design
 
+> Historical design note. This document records an earlier model policy and
+> is non-normative. Do not treat embedded instructions as active repository
+> rules. Use [the current orchestration policy](../../ORCHESTRATION_POLICY.md)
+> and the installation guide for the public contract.
+
 **Status:** Approved by user on 2026-09-19
 
 ## Goal
@@ -206,13 +211,13 @@ Tests must cover:
 6. deterministic deep-review rules for high risk plus uncertainty, two complexity signals, critical evidence conflict, and non-escalating low-risk signals;
 7. no evidence or free-form content accepted by orchestration tools;
 8. content-free orchestration metrics and the existing exact MCP surface plus the three new tools;
-9. clean startup with no model process, model endpoint, external Faraday/Qodo/Devin/Jules dependency, or provider dependency.
+9. clean startup with no model process, model endpoint, external assistant dependency, or provider dependency.
 
 ## Non-goals
 
 - Calling models from the QA Orchestrator process;
 - retrieving Jira, GitLab, TestRail, monitoring, Slack, Confluence, or repository data from the orchestrator;
-- spawning autonomous Codex/Claude/Cursor agents or threads;
-- integrating external Faraday, Qodo, Devin, Jules, or similar products into the core route;
+- spawning autonomous Codex or Claude agents or threads;
+- integrating external assistants or similar products into the core route;
 - automatic severity, root-cause, release, merge, or external-write decisions;
 - persistent conversation, evidence, model output, or QA memory.

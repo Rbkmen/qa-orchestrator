@@ -286,11 +286,8 @@ else:
 - Modify: `docs/ORCHESTRATION_POLICY.md`
 - Modify: `docs/clients/codex.md`
 - Modify: `docs/clients/claude-code.md`
-- Modify: `docs/clients/cursor.md`
-- Modify: `docs/clients/generic-mcp.md`
 - Modify: `client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md`
 - Modify: `client-rules/claude-code/CLAUDE.md`
-- Modify: `client-rules/cursor/qa-orchestrator.mdc`
 - Test: `tests/test_install_artifacts.py`
 
 **Interfaces:**
@@ -301,7 +298,7 @@ else:
 
 - [x] **Step 1: Add documentation contract assertions before editing the current copies.**
 
-  Update `CLIENT_RULE_CONTRACT` in `tests/test_install_artifacts.py` from GPT-5.6/Luna-Terra-Sol patterns to `gpt-6-luna`/Luna-max, `gpt-6-sol`/Sol-medium, and `gpt-6-sol`/Sol-high. Extend the artifact list in `test_operational_artifacts_describe_host_orchestration` to include `docs/clients/codex.md`, `docs/clients/claude-code.md`, `docs/clients/cursor.md`, and `docs/clients/generic-mcp.md`; require GPT-6 IDs and `speed=1.0` in those documents too. Update `test_operational_artifacts_describe_review_bundles_and_statuses` from `terra / medium` to `sol / medium`. Extend `test_client_rule_templates_preserve_orchestration_contract` to require every v2 stage-call/token field and to reject old model-family counter names in each current client template.
+  Update `CLIENT_RULE_CONTRACT` in `tests/test_install_artifacts.py` from GPT-5.6/Luna-Terra-Sol patterns to `gpt-6-luna`/Luna-max, `gpt-6-sol`/Sol-medium, and `gpt-6-sol`/Sol-high. Extend the artifact list in `test_operational_artifacts_describe_host_orchestration` to include the Codex and Claude Code guides; require GPT-6 IDs and `speed=1.0` in those documents too. Update `test_operational_artifacts_describe_review_bundles_and_statuses` from `terra / medium` to `sol / medium`. Extend `test_client_rule_templates_preserve_orchestration_contract` to require every v2 stage-call/token field and to reject old model-family counter names in each current client template.
 
 ```python
 for required in (

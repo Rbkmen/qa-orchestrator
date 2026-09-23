@@ -67,7 +67,7 @@ the existing legacy keys.
 
 ## Client and documentation updates
 
-Update the canonical QA Orchestrator instructions, Codex/Claude/Cursor client
+Update the canonical QA Orchestrator instructions and Codex/Claude client
 rules, current README and orchestration policy, MCP metric input, and tests to
 use the GPT-6 policy and v2 stage fields. Preserve dated design/plan documents
 as records of the earlier GPT-5.6 policy rather than rewriting history. Keep

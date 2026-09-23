@@ -1,0 +1,252 @@
+import json
+
+import pytest
+
+from qa_orchestrator.cli import PROVIDER_OPTIONS, main
+from qa_orchestrator.model_policy import (
+    ModelProvider,
+    ModelSelection,
+    load_model_selection,
+    save_model_selection,
+)
+from qa_orchestrator.orchestration import OrchestrationStep, build_model_policies
+from qa_orchestrator.service import OrchestratorService
+
+
+def test_model_selection_round_trips_without_credentials(tmp_path):
+    path = tmp_path / "model-policy.json"
+    selection = ModelSelection(
+        provider=ModelProvider.ANTHROPIC,
+        triage_model="claude-fast",
+        primary_model="claude-balanced",
+        deep_model="claude-deep",
+        synthesis_model="claude-balanced",
+    )
+
+    save_model_selection(path, selection)
+
+    assert load_model_selection(path) == selection
+    assert "api_key" not in json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_service_uses_selected_models(tmp_path):
+    save_model_selection(
+        tmp_path / "model-policy.json",
+        ModelSelection(
+            provider=ModelProvider.ANTHROPIC,
+            triage_model="claude-triage",
+            primary_model="claude-review",
+            deep_model="claude-deep",
+            synthesis_model="claude-synthesis",
+        ),
+    )
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+
+    session = service.start_qa_orchestration("ordinary_review")
+
+    assert session.model_policy.model == "claude-triage"
+    assert session.model_policy.provider is ModelProvider.ANTHROPIC
+
+
+def test_setup_offers_only_openai_and_anthropic():
+    assert tuple(provider for provider, _ in PROVIDER_OPTIONS) == (
+        ModelProvider.OPENAI,
+        ModelProvider.ANTHROPIC,
+    )
+
+
+def test_openai_reasoning_reaches_each_configured_stage():
+    selection = ModelSelection(
+        provider=ModelProvider.OPENAI,
+        triage_model="gpt-5.5",
+        primary_model="gpt-6-sol",
+        deep_model="gpt-6-sol",
+        synthesis_model="gpt-5.5",
+        triage_reasoning="low",
+        primary_reasoning="high",
+        deep_reasoning="xhigh",
+        synthesis_reasoning="xhigh",
+    )
+
+    policies = build_model_policies(selection)
+
+    assert policies[OrchestrationStep.LUNA_TRIAGE].reasoning == "low"
+    assert policies[OrchestrationStep.TERRA_PRIMARY_REVIEW].reasoning == "high"
+    assert policies[OrchestrationStep.SOL_DEEP_REVIEW].reasoning == "xhigh"
+    assert policies[OrchestrationStep.TERRA_SYNTHESIS].reasoning == "xhigh"
+
+
+def test_setup_command_writes_selected_policy(tmp_path, monkeypatch):
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+
+    assert (
+        main(
+            [
+                "setup",
+                "--provider",
+                "anthropic",
+                "--triage-model",
+                "claude-fast",
+                "--primary-model",
+                "claude-balanced",
+                "--deep-model",
+                "claude-deep",
+                "--synthesis-model",
+                "claude-balanced",
+            ]
+        )
+        == 0
+    )
+
+    selection = load_model_selection(tmp_path / "model-policy.json")
+    assert selection.provider is ModelProvider.ANTHROPIC
+    assert selection.primary_model == "claude-balanced"
+
+
+def test_setup_command_writes_openai_reasoning(tmp_path, monkeypatch):
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+
+    assert (
+        main(
+            [
+                "setup",
+                "--provider",
+                "openai",
+                "--triage-model",
+                "gpt-5.5",
+                "--primary-model",
+                "gpt-6-sol",
+                "--deep-model",
+                "gpt-6-sol",
+                "--synthesis-model",
+                "gpt-5.5",
+                "--triage-reasoning",
+                "low",
+                "--primary-reasoning",
+                "high",
+                "--deep-reasoning",
+                "xhigh",
+                "--synthesis-reasoning",
+                "xhigh",
+            ]
+        )
+        == 0
+    )
+
+    selection = load_model_selection(tmp_path / "model-policy.json")
+    assert selection.triage_reasoning == "low"
+    assert selection.primary_reasoning == "high"
+    assert selection.deep_reasoning == "xhigh"
+    assert selection.synthesis_reasoning == "xhigh"
+
+
+def test_setup_menu_can_keep_defaults_and_override_one_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+    answers = iter(("1", "", "", "0", "custom-primary", "", "", "", "", ""))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert main(["setup"]) == 0
+
+    selection = load_model_selection(tmp_path / "model-policy.json")
+    assert selection.triage_model == "gpt-6-luna"
+    assert selection.primary_model == "custom-primary"
+    assert selection.deep_model == "gpt-6-sol"
+
+
+def test_setup_menu_orders_each_model_before_its_reasoning(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+    answers = iter(("1", "", "", "", "", "", "", "", ""))
+    prompts: list[str] = []
+
+    def answer(prompt: str) -> str:
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", answer)
+
+    assert main(["setup"]) == 0
+    assert prompts == [
+        "Номер [1]: ",
+        "Выбор [3]: ",
+        "Выбор [7]: ",
+        "Выбор [2]: ",
+        "Выбор [4]: ",
+        "Выбор [2]: ",
+        "Выбор [5]: ",
+        "Выбор [2]: ",
+        "Выбор [4]: ",
+    ]
+    output = capsys.readouterr().out
+    assert "Reasoning для глубокой проверки" in output
+    assert "high" in output
+
+
+def test_setup_menu_can_go_back_to_provider(tmp_path, monkeypatch):
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+    answers = iter(("1", "b", "2", "1", "1", "1", "1"))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert main(["setup"]) == 0
+
+    selection = load_model_selection(tmp_path / "model-policy.json")
+    assert selection.provider is ModelProvider.ANTHROPIC
+
+
+def test_setup_uses_colors_when_forced(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    answers = iter(("1", "", "", "", "", "", "", "", ""))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert main(["setup"]) == 0
+
+    output = capsys.readouterr().out
+    assert "\033[36mOpenAI\033[0m" in output
+    assert "\033[34mGPT-6 Astra" in output
+    assert "\033[35mlow\033[0m" in output
+
+
+def test_reload_command_reads_current_policy(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+    selection = ModelSelection(
+        provider=ModelProvider.OPENAI,
+        triage_model="gpt-6-luna",
+        primary_model="gpt-6-sol",
+        deep_model="gpt-6-sol",
+        synthesis_model="gpt-6-sol",
+        deep_reasoning="low",
+    )
+    save_model_selection(tmp_path / "model-policy.json", selection)
+
+    assert main(["reload"]) == 0
+
+    output = capsys.readouterr().out
+    assert "перечитана и проверена" in output
+    assert '"deep_reasoning": "low"' in output
+
+
+def test_setup_menu_offers_anthropic_model_ids(tmp_path, monkeypatch):
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+    answers = iter(("2", "6", "7", "9", "1"))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert main(["setup"]) == 0
+
+    selection = load_model_selection(tmp_path / "model-policy.json")
+    assert selection.provider is ModelProvider.ANTHROPIC
+    assert selection.triage_model == "claude-sonnet-5"
+    assert selection.primary_model == "claude-sonnet-4-6"
+    assert selection.deep_model == "claude-haiku-4-5-20251001"
+    assert selection.synthesis_model == "claude-opus-5-5"
+
+
+@pytest.mark.parametrize("model", ["secret/path", "model with spaces", "../model"])
+def test_model_selection_rejects_path_like_or_free_form_values(model):
+    with pytest.raises(ValueError):
+        ModelSelection(
+            provider=ModelProvider.OPENAI,
+            triage_model=model,
+            primary_model="review",
+            deep_model="deep",
+            synthesis_model="synthesis",
+        )

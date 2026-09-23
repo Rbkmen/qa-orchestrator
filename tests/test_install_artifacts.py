@@ -43,6 +43,10 @@ CLIENT_RULE_CONTRACT = {
         r"pass no raw evidence.*model output",
         r"does not accept evidence, prompts, or model outputs",
     ),
+    "MCP failure fallback": (r"MCP is unavailable",),
+    "terminal metrics status": (r"final reported status",),
+    "no intermediate metrics": (r"intermediate continuations",),
+    "run-id consistency": (r"orchestration_used=false.*run_id",),
 }
 
 
@@ -65,6 +69,7 @@ def test_launcher_forwards_metrics_overrides():
     assert 'QA_ORCHESTRATOR_METRICS_MAX_EVENTS="${QA_ORCHESTRATOR_METRICS_MAX_EVENTS:-10000}"' in content
     assert 'QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS="${QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS:-1800}"' in content
     assert 'QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS="${QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS:-100}"' in content
+    assert 'QA_ORCHESTRATOR_MODEL_POLICY_PATH="$orchestrator_model_policy_path"' in content
 
 
 def test_client_rule_templates_preserve_orchestration_contract():
@@ -123,6 +128,15 @@ def test_ci_uses_immutable_action_refs_and_builds_wheel():
     assert "uv build --wheel --out-dir dist" in content
 
 
+def test_package_exposes_public_metadata_and_doctor():
+    content = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert 'readme = "README.md"' in content
+    assert 'qa-orchestrator-doctor = "qa_orchestrator.doctor:main"' in content
+    assert '[project.urls]' in content
+    assert 'Homepage = "https://github.com/Rbkmen/qa-orchestrator"' in content
+
+
 def test_operational_artifacts_describe_primary_agent_routing():
     artifacts = [
         ROOT / "README.md",
@@ -144,8 +158,6 @@ def test_operational_artifacts_describe_host_orchestration():
         ROOT / "client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md",
         ROOT / "docs/clients/codex.md",
         ROOT / "docs/clients/claude-code.md",
-        ROOT / "docs/clients/cursor.md",
-        ROOT / "docs/clients/generic-mcp.md",
     ]
     required_policy = (
         "gpt-6-luna",

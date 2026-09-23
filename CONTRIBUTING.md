@@ -16,6 +16,7 @@ Requirements:
 git clone https://github.com/Rbkmen/qa-orchestrator.git
 cd qa-orchestrator
 uv sync
+uv run qa-orchestrator-doctor --json
 uv run pytest -q
 uv run ruff check .
 ```
@@ -28,7 +29,7 @@ The full test suite must not require network access, credentials, or a separate 
 - `prepare_review_route` returns only static metadata for the selected profile.
 - `start_qa_orchestration`, `advance_qa_orchestration`, and `get_qa_orchestration` manage content-free state only.
 - The orchestrator does not call models, create threads or agents, write user-requested files, or perform writes to external systems.
-- The model policy is fixed: GPT-6 Luna/max for triage, GPT-6 Sol/medium for primary review and synthesis, and optional GPT-6 Sol/high for read-only deep analysis. Every stage uses `speed=1.0`.
+- The model policy is configured locally with `qa-orch setup`; the default is GPT-6 Luna/max for triage, GPT-6 Sol/medium for primary review and synthesis, and optional GPT-6 Sol/high for read-only deep analysis. OpenAI reasoning effort can be adjusted for triage, primary review, and synthesis; deep review remains high. Every stage uses `speed=1.0`.
 - Metrics are content-free and limited to schema-defined metadata and aggregate counters; never store task content such as issue keys, paths, source, logs, prompts, or model responses.
 - Do not add persistent QA memory, a source cache, a learning layer, or hidden external calls.
 
@@ -58,6 +59,10 @@ Tests must cover observable behavior: the exact MCP tool set, every profile, the
 ## Documentation and client rules
 
 Update [docs/ORCHESTRATION_POLICY.md](docs/ORCHESTRATION_POLICY.md) when responsibility boundaries change. When host behavior changes, update the guides in `docs/clients/` and the templates in `client-rules/`. Do not add internal URLs, credentials, issue data, local absolute paths, or source payloads to examples.
+
+Keep public setup examples provider-neutral and free of personal paths. If a
+change adds a platform or provider limitation, state it in the installation
+guide and support contract.
 
 ## Commits and review
 

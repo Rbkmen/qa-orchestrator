@@ -8,11 +8,11 @@ from qa_orchestrator.server import build_server
 from qa_orchestrator.service import OrchestratorService
 
 
-def _schema_contains_const(schema, value):
-    if schema.get("const") == value:
+def _schema_contains_value(schema, value):
+    if schema.get("const") == value or value in schema.get("enum", []):
         return True
     return any(
-        _schema_contains_const(branch, value)
+        _schema_contains_value(branch, value)
         for branch_name in ("anyOf", "oneOf", "allOf")
         for branch in schema.get(branch_name, [])
     )
@@ -85,11 +85,9 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
         == 0
     )
     assert "luna_calls" not in tools["record_qa_task_outcome"].inputSchema["properties"]
-    assert _schema_contains_const(
-        tools["record_qa_task_outcome"].inputSchema["properties"]["deep_model"],
-        "gpt-6-sol",
-    )
-    assert _schema_contains_const(
+    deep_model_schema = tools["record_qa_task_outcome"].inputSchema["properties"]["deep_model"]
+    assert deep_model_schema["anyOf"][0]["pattern"] == r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    assert _schema_contains_value(
         tools["record_qa_task_outcome"].inputSchema["properties"]["deep_reasoning"],
         "high",
     )
@@ -127,6 +125,7 @@ async def test_orchestration_tools_return_no_evidence_fields(tmp_path):
 
     payload = result.structured_content
     assert payload["model_policy"] == {
+        "provider": "openai",
         "model": "gpt-6-luna",
         "reasoning": "max",
         "speed": 1.0,

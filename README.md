@@ -5,12 +5,12 @@ QA Orchestrator is a small deterministic FastMCP service for host-owned QA revie
 ## How it works
 
 1. The primary host obtains authoritative evidence from the required systems and classifies the QA task.
-2. The host calls `start_qa_orchestration`. The orchestrator creates a content-free session and returns the first step: GPT-6 Luna with `max` reasoning.
+2. The host calls `start_qa_orchestration`. The orchestrator creates a content-free session and returns the first step from the locally selected model policy. The default is OpenAI GPT-6 Luna (`gpt-6-luna`) with `max` reasoning and GPT-6 Sol (`gpt-6-sol`) for review; run `qa-orch setup` to choose OpenAI or Anthropic and the model IDs.
 3. The host runs each stage in its configured model environment and sends the orchestrator only a structured signal after each stage:
-   - `gpt-6-luna` + `max` — triage and selection of one fixed review bundle or one compatibility profile;
-   - `gpt-6-sol` + `medium` — primary review of every profile in the fixed order;
-   - optional `gpt-6-sol` + `high` — one read-only deep analysis selected by fixed risk signals;
-   - `gpt-6-sol` + `medium` — synthesis.
+   - selected triage model + configured reasoning (default `max`) — selection of one fixed review bundle or one compatibility profile;
+   - selected primary model + configured reasoning (default `medium`) — primary review of every profile in the fixed order;
+   - optional selected deep model + configured reasoning (default `high`) — one read-only deep analysis selected by fixed risk signals;
+   - selected synthesis model + configured reasoning (default `medium`) — synthesis.
    Every returned model policy includes `speed=1.0`; the host must keep this value for the selected stage.
 4. The host validates findings, runtime evidence, and limitations, then calls `record_qa_task_outcome` once. For an orchestrated task it passes the same `run_id` so the orchestrator can close the session.
 
@@ -108,7 +108,7 @@ Common route sections are `Scope`, `Checklist`, `Candidate Coverage Gaps`, `Posi
 The primary host is responsible for:
 
 - obtaining and validating evidence;
-- calling Jira, GitLab, TestRail, Sentry, Grafana, OpenSearch, Slack, Confluence, CodeGraph, and the file system;
+- calling the issue tracker, code host, test-management system, observability and logging systems, documentation and chat systems, code index, and the file system;
 - running triage, primary-review, synthesis, and any optional deep-review stage under the policy;
 - confirmed findings, severity, release/readiness judgment, and the final QA response;
 - file changes and all external writes.
@@ -122,26 +122,50 @@ QA Orchestrator is responsible only for fixed routing, state transitions, read-o
 - an MCP client that supports STDIO;
 - a POSIX system: macOS or Linux.
 
+Native Windows is not supported by the current release because the source
+launcher and metrics locking use POSIX facilities. Windows users can run the
+server inside WSL2; native Windows support requires a separate compatibility
+change.
+
 ## Installation
 
-For the complete setup—including Codex registration, host instructions, verification, and troubleshooting—see the [installation guide](docs/INSTALLATION.md).
+For the complete setup—including Codex and Claude Code registration, host instructions, verification, and troubleshooting—see the [installation guide](docs/INSTALLATION.md).
 
 ```bash
 git clone https://github.com/Rbkmen/qa-orchestrator.git
 cd qa-orchestrator
 uv sync
+uv run qa-orchestrator-doctor
+uv run qa-orch setup
 ```
 
 The launcher first uses the project's `.venv`, then the active `VIRTUAL_ENV`, or an installed `qa-orchestrator` from `PATH`; no separate background process is required.
 
+For a POSIX client that supports `uvx`, a checkout is optional:
+
+```bash
+uvx --from git+https://github.com/Rbkmen/qa-orchestrator.git qa-orchestrator
+# one-time model policy setup
+uvx --from git+https://github.com/Rbkmen/qa-orchestrator.git qa-orch setup
+```
+
+Pin a release tag or commit instead of the default branch for reproducible
+team configuration.
+
+The setup wizard stores only the provider label, model IDs, and selected OpenAI
+reasoning effort in the local `model-policy.json`; it never asks for or stores API keys. Use
+`uv run qa-orch config show` to inspect the active selection.
+Use `uv run qa-orch reload` to re-read and validate the saved policy. Colors in
+the wizard distinguish providers, model IDs, and reasoning values; set
+`NO_COLOR=1` to disable them or `FORCE_COLOR=1` to force them.
+
 Example for Codex:
 
 ```bash
-codex mcp add qa-orchestrator -- \
-  /absolute/path/to/qa-orchestrator/scripts/qa-orchestrator
+codex mcp add qa-orchestrator -- "$(pwd)/scripts/qa-orchestrator"
 ```
 
-Other connection options are described in the [client guides](docs/clients/).
+The two supported host integrations are described in the [client guides](docs/clients/).
 
 ## Configuration
 
@@ -154,6 +178,7 @@ By default, metrics are written to `$HOME/.qa-orchestrator/metrics.jsonl`.
 | `QA_ORCHESTRATOR_METRICS_MAX_EVENTS` | `10000` |
 | `QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS` | `1800` |
 | `QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS` | `100` |
+| `QA_ORCHESTRATOR_MODEL_POLICY_PATH` | `$HOME/.qa-orchestrator/model-policy.json` |
 
 ## Metrics
 
@@ -161,7 +186,7 @@ Every `record_qa_task_outcome` call must include the base counters `codegraph_ca
 
 New `record_qa_task_outcome` events use schema v2; the service assigns the version. Send stage call counters `triage_calls`, `primary_review_calls`, `deep_review_calls`, and `synthesis_calls`, plus shared `orchestration_steps_completed` and `orchestration_retries`. For a completed bundle with `N` profiles, report at least one triage call, `N` primary-review calls, one synthesis call, and `N+2` completed steps. If deep review ran, report its actual call count (at least one) and one additional step. A selected deep branch that stops before the deep review has `deep_review_calls=0` and omits deep model metadata.
 
-When the deep review runs, send `deep_model=gpt-6-sol` and `deep_reasoning=high`. Stage token measurements are optional: `triage_input_tokens`, `triage_output_tokens`, `primary_review_input_tokens`, `primary_review_output_tokens`, `synthesis_input_tokens`, and `synthesis_output_tokens`; deep-review tokens use `deep_input_tokens` and `deep_output_tokens`. Evidence Packet token count, merge-request/repository counts, and deep-analysis finding counters are also optional. Do not send model-family call/token fields for new events.
+When the deep review runs, send the configured deep-stage model in `deep_model` and its configured `deep_reasoning` (default `high`). Stage token measurements are optional: `triage_input_tokens`, `triage_output_tokens`, `primary_review_input_tokens`, `primary_review_output_tokens`, `synthesis_input_tokens`, and `synthesis_output_tokens`; deep-review tokens use `deep_input_tokens` and `deep_output_tokens`. Evidence Packet token count, merge-request/repository counts, and deep-analysis finding counters are also optional. Do not send model-family call/token fields for new events.
 
 Other optional counters include `codegraph_response_tokens`, `source_mcp_response_tokens`, and `avoided_source_read_tokens`; deep-review duration is optional as well.
 
@@ -180,10 +205,9 @@ uv run qa-orchestrator-report --days 30
 
 - [Codex](docs/clients/codex.md)
 - [Claude Code](docs/clients/claude-code.md)
-- [Cursor](docs/clients/cursor.md)
-- [Generic MCP client](docs/clients/generic-mcp.md)
 - [Shared routing policy](docs/ORCHESTRATION_POLICY.md)
 - [Client-rule templates](client-rules/)
+- [Security policy](SECURITY.md)
 
 ## Development
 

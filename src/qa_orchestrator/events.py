@@ -11,6 +11,7 @@ from tempfile import mkstemp
 from typing import IO, Protocol
 
 from qa_orchestrator.contracts import QaTaskOutcomeReceipt
+from qa_orchestrator.model_policy import is_valid_model_id
 
 QA_TASK_TYPES = {
     "ordinary_review",
@@ -82,7 +83,7 @@ V2_ORCHESTRATION_COUNTERS = STAGE_CALL_COUNTERS | SHARED_ORCHESTRATION_COUNTERS
 DEEP_REASONING = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 DEEP_MODELS_BY_SCHEMA = {
     1: {"gpt-5.6-sol"},
-    2: {"gpt-6-sol"},
+    2: None,
 }
 DEEP_ESCALATION_REASON_CODES = {
     "evidence_gap",
@@ -318,19 +319,19 @@ def valid_qa_task_metrics(event: dict[str, object]) -> bool:
             return False
         if recommended is True and not reasons:
             return False
-    if "deep_model" in event and (
-        not deep_used
-        or not isinstance(event["deep_model"], str)
-        or event["deep_model"] not in DEEP_MODELS_BY_SCHEMA[schema_version]
-    ):
-        return False
+    if "deep_model" in event:
+        if not deep_used or not isinstance(event["deep_model"], str):
+            return False
+        allowed_models = DEEP_MODELS_BY_SCHEMA[schema_version]
+        if allowed_models is not None and event["deep_model"] not in allowed_models:
+            return False
+        if schema_version == 2 and not is_valid_model_id(event["deep_model"]):
+            return False
     if "deep_reasoning" in event and (
         not deep_used
         or not isinstance(event["deep_reasoning"], str)
         or event["deep_reasoning"] not in DEEP_REASONING
     ):
-        return False
-    if deep_used and event["deep_reasoning"] != "high":
         return False
     if any(
         field in event and (type(event[field]) is not int or event[field] < 0)

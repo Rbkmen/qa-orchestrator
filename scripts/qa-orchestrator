@@ -4,6 +4,7 @@ set -eu
 orchestrator_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 orchestrator_home=${HOME:?HOME must be set}
 orchestrator_data_dir=${QA_ORCHESTRATOR_DATA_DIR:-"$orchestrator_home/.qa-orchestrator"}
+orchestrator_model_policy_path=${QA_ORCHESTRATOR_MODEL_POLICY_PATH:-"$orchestrator_data_dir/model-policy.json"}
 orchestrator_command=
 
 if [ -x "$orchestrator_root/.venv/bin/qa-orchestrator" ]; then
@@ -27,4 +28,5 @@ exec /usr/bin/env -i \
   QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS="${QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS:-1800}" \
   QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS="${QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS:-100}" \
   QA_ORCHESTRATOR_DATA_DIR="$orchestrator_data_dir" \
+  QA_ORCHESTRATOR_MODEL_POLICY_PATH="$orchestrator_model_policy_path" \
   "$orchestrator_command"

@@ -17,9 +17,9 @@ from qa_orchestrator.events import (
     qa_task_metric_errors,
     valid_qa_task_metrics,
 )
+from qa_orchestrator.model_policy import load_model_selection
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
-    OrchestrationModel,
     OrchestrationStatus,
     QaOrchestrationSession,
     QaOrchestrator,
@@ -40,9 +40,11 @@ class OrchestratorService:
             settings.metrics_retention_days,
             settings.metrics_max_events,
         )
+        model_selection = load_model_selection(settings.model_policy_path)
         self.orchestrator = QaOrchestrator(
             ttl_seconds=settings.orchestration_session_ttl_seconds,
             max_sessions=settings.orchestration_max_sessions,
+            model_selection=model_selection,
         )
         self._outcome_lock = RLock()
 
@@ -210,8 +212,8 @@ class OrchestratorService:
                 )
             return receipt
 
-    @staticmethod
     def _orchestration_metric_errors(
+        self,
         event: dict[str, object],
         session: QaOrchestrationSession,
         outcome: QaTaskOutcome,
@@ -228,10 +230,10 @@ class OrchestratorService:
         if deep_review_was_used and not deep_branch_selected:
             errors.append("deep_review_calls does not match the deep-review branch")
         if deep_review_was_used and (
-            event.get("deep_model") != OrchestrationModel.SOL.value
-            or event.get("deep_reasoning") != "high"
+            event.get("deep_model") != self.orchestrator.model_selection.deep_model
+            or event.get("deep_reasoning") != self.orchestrator.model_selection.deep_reasoning
         ):
-            errors.append("deep_model and deep_reasoning must describe the GPT-6 Sol stage")
+            errors.append("deep_model and deep_reasoning must describe the configured deep stage")
         if outcome != "completed":
             return errors
 

@@ -127,27 +127,28 @@ def test_service_requires_deep_metadata(tmp_path, missing_field):
         )
 
 
-def test_service_rejects_non_high_deep_reasoning(tmp_path):
+def test_service_accepts_non_high_deep_reasoning_for_unorchestrated_task(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
-    with pytest.raises(ValueError, match="QA task metrics are inconsistent"):
-        service.record_qa_task_outcome(
-            task_type="ordinary_review",
-            outcome="partial",
-            codegraph_calls=0,
-            source_mcp_calls=0,
-            findings_identified=0,
-            findings_confirmed=0,
-            findings_rejected=0,
-            repeated_source_reads=0,
-            deep_analysis_used=True,
-            deep_model="gpt-6-sol",
-            deep_reasoning="medium",
-        )
+    receipt = service.record_qa_task_outcome(
+        task_type="ordinary_review",
+        outcome="partial",
+        codegraph_calls=0,
+        source_mcp_calls=0,
+        findings_identified=0,
+        findings_confirmed=0,
+        findings_rejected=0,
+        repeated_source_reads=0,
+        deep_analysis_used=True,
+        deep_model="gpt-6-sol",
+        deep_reasoning="medium",
+    )
+
+    assert receipt.status == "recorded"
 
 
-@pytest.mark.parametrize("deep_model", ["gpt-5.6-sol", "secret/path-or-issue-key"])
-def test_service_rejects_unapproved_deep_model(tmp_path, deep_model):
+@pytest.mark.parametrize("deep_model", ["secret/path-or-issue-key", "model with spaces"])
+def test_service_rejects_unsafe_deep_model(tmp_path, deep_model):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     with pytest.raises(ValueError, match="QA task metrics are inconsistent"):

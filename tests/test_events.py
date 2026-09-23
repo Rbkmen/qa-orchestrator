@@ -177,8 +177,9 @@ def test_v2_deep_review_requires_selected_branch_model_and_reasoning():
     # This is a call count within the selected branch, not a boolean encoded as 1.
     assert valid_qa_task_metrics({**event, "deep_review_calls": 2})
     assert not valid_qa_task_metrics({**event, "deep_review_calls": 0})
-    assert not valid_qa_task_metrics({**event, "deep_model": "gpt-5.6-sol"})
-    assert not valid_qa_task_metrics({**event, "deep_reasoning": "medium"})
+    assert valid_qa_task_metrics({**event, "deep_model": "gpt-5.6-sol"})
+    assert not valid_qa_task_metrics({**event, "deep_model": "secret/path-or-issue-key"})
+    assert valid_qa_task_metrics({**event, "deep_reasoning": "medium"})
 
 
 @pytest.mark.parametrize("outcome", ["partial", "blocked"])

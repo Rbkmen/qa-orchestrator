@@ -1,4 +1,4 @@
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastmcp import FastMCP
 from pydantic import AfterValidator, Field
@@ -13,6 +13,7 @@ from qa_orchestrator.contracts import (
     ReviewRoute,
 )
 from qa_orchestrator.events import JsonEventSink, read_metrics_lines
+from qa_orchestrator.model_policy import MODEL_ID_PATTERN, ReasoningEffort
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
     DeepReviewSignals,
@@ -36,8 +37,8 @@ STATE_TOOL_ANNOTATIONS = {
 }
 RunId = Annotated[str, Field(pattern=r"^qar-[0-9a-f]{32}$")]
 NonNegativeInt = Annotated[int, Field(ge=0)]
-SolModel = Literal["gpt-6-sol"]
-SolReasoning = Literal["high"]
+ModelId = Annotated[str, Field(min_length=1, max_length=128, pattern=MODEL_ID_PATTERN)]
+DeepReasoning = ReasoningEffort
 
 
 def _validate_positive_days(value: int) -> int:
@@ -119,8 +120,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
         findings_rejected: NonNegativeInt,
         repeated_source_reads: NonNegativeInt,
         deep_analysis_used: bool = False,
-        deep_model: SolModel | None = None,
-        deep_reasoning: SolReasoning | None = None,
+        deep_model: ModelId | None = None,
+        deep_reasoning: DeepReasoning | None = None,
         deep_duration_ms: NonNegativeInt | None = None,
         deep_input_tokens: NonNegativeInt | None = None,
         deep_output_tokens: NonNegativeInt | None = None,
@@ -154,7 +155,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
         a completed bundle with N primary-review profiles, the minimum is one
         triage call, N primary-review calls, one synthesis call, and N+2
         completed steps, plus one deep-review call and one additional step
-        when deep review ran.
+        when deep review ran. `deep_model` must match the configured deep-stage
+        model when an orchestrated run uses deep review.
         """
         return service.record_qa_task_outcome(
             task_type=task_type,

@@ -15,6 +15,15 @@ class Settings:
     def metrics_path(self) -> Path:
         return self.data_dir / "metrics.jsonl"
 
+    @property
+    def model_policy_path(self) -> Path:
+        return Path(
+            environ.get(
+                "QA_ORCHESTRATOR_MODEL_POLICY_PATH",
+                str(self.data_dir / "model-policy.json"),
+            )
+        )
+
     def __post_init__(self) -> None:
         if self.metrics_retention_days < 1 or self.metrics_max_events < 1:
             raise ValueError("metrics retention must be positive")

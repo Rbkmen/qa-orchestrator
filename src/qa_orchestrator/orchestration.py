@@ -6,9 +6,24 @@ from types import MappingProxyType
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from qa_orchestrator.contracts import QaTaskOutcome, QaTaskType, ReviewAgent, ReviewBundle
+from qa_orchestrator.model_policy import (
+    DEFAULT_MODEL_SELECTION,
+    ModelProvider,
+    ModelSelection,
+    ReasoningEffort,
+    is_valid_model_id,
+)
 from qa_orchestrator.review_profiles import REVIEW_BUNDLES, bundle_profiles
 
 
@@ -128,31 +143,54 @@ def assess_deep_review(signals: DeepReviewSignals) -> DeepReviewAssessment:
 class ModelPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    model: OrchestrationModel
-    reasoning: Literal["medium", "high", "max"]
+    provider: ModelProvider = ModelProvider.OPENAI
+    model: OrchestrationModel | str
+    reasoning: ReasoningEffort
     speed: Literal[1.0] = 1.0
 
+    @field_validator("model")
+    @classmethod
+    def validate_model_id(cls, value: OrchestrationModel | str) -> OrchestrationModel | str:
+        if not is_valid_model_id(str(value)):
+            raise ValueError("model must be a safe model identifier")
+        return value
 
-MODEL_POLICIES = MappingProxyType(
-    {
-        OrchestrationStep.LUNA_TRIAGE: ModelPolicy(
-            model=OrchestrationModel.LUNA,
-            reasoning="max",
-        ),
-        OrchestrationStep.TERRA_PRIMARY_REVIEW: ModelPolicy(
-            model=OrchestrationModel.SOL,
-            reasoning="medium",
-        ),
-        OrchestrationStep.SOL_DEEP_REVIEW: ModelPolicy(
-            model=OrchestrationModel.SOL,
-            reasoning="high",
-        ),
-        OrchestrationStep.TERRA_SYNTHESIS: ModelPolicy(
-            model=OrchestrationModel.SOL,
-            reasoning="medium",
-        ),
-    }
-)
+
+def _model_value(model: str) -> OrchestrationModel | str:
+    try:
+        return OrchestrationModel(model)
+    except ValueError:
+        return model
+
+
+def build_model_policies(selection: ModelSelection) -> MappingProxyType:
+    return MappingProxyType(
+        {
+            OrchestrationStep.LUNA_TRIAGE: ModelPolicy(
+                provider=selection.provider,
+                model=_model_value(selection.triage_model),
+                reasoning=selection.triage_reasoning,
+            ),
+            OrchestrationStep.TERRA_PRIMARY_REVIEW: ModelPolicy(
+                provider=selection.provider,
+                model=_model_value(selection.primary_model),
+                reasoning=selection.primary_reasoning,
+            ),
+            OrchestrationStep.SOL_DEEP_REVIEW: ModelPolicy(
+                provider=selection.provider,
+                model=_model_value(selection.deep_model),
+                reasoning=selection.deep_reasoning,
+            ),
+            OrchestrationStep.TERRA_SYNTHESIS: ModelPolicy(
+                provider=selection.provider,
+                model=_model_value(selection.synthesis_model),
+                reasoning=selection.synthesis_reasoning,
+            ),
+        }
+    )
+
+
+MODEL_POLICIES = build_model_policies(DEFAULT_MODEL_SELECTION)
 
 
 class QaOrchestrationSession(BaseModel):
@@ -281,6 +319,7 @@ class QaOrchestrator:
         *,
         ttl_seconds: int,
         max_sessions: int,
+        model_selection: ModelSelection | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if ttl_seconds <= 0:
@@ -289,10 +328,16 @@ class QaOrchestrator:
             raise ValueError("max_sessions must be positive")
         self._ttl_seconds = ttl_seconds
         self._max_sessions = max_sessions
+        self._model_selection = model_selection or DEFAULT_MODEL_SELECTION
+        self._model_policies = build_model_policies(self._model_selection)
         self._clock = clock
         self._sessions: dict[str, QaOrchestrationSession] = {}
         self._outcome_fingerprints: dict[str, str] = {}
         self._lock = RLock()
+
+    @property
+    def model_selection(self) -> ModelSelection:
+        return self._model_selection
 
     def start(self, task_type: QaTaskType) -> QaOrchestrationSession:
         try:
@@ -314,7 +359,7 @@ class QaOrchestrator:
                 current_step=OrchestrationStep.LUNA_TRIAGE,
                 allowed_profiles=list(ReviewAgent),
                 allowed_bundles=list(REVIEW_BUNDLES),
-                model_policy=MODEL_POLICIES[OrchestrationStep.LUNA_TRIAGE],
+                model_policy=self._model_policies[OrchestrationStep.LUNA_TRIAGE],
                 next_action=_NEXT_ACTIONS[OrchestrationStep.LUNA_TRIAGE],
                 expires_at=now + timedelta(seconds=self._ttl_seconds),
             )
@@ -481,7 +526,7 @@ class QaOrchestrator:
                     "completed_profiles": [],
                     "deep_assessment": None,
                     "deep_reason_code": None,
-                    "model_policy": MODEL_POLICIES[OrchestrationStep.TERRA_PRIMARY_REVIEW],
+                    "model_policy": self._model_policies[OrchestrationStep.TERRA_PRIMARY_REVIEW],
                     "next_action": _NEXT_ACTIONS[OrchestrationStep.TERRA_PRIMARY_REVIEW],
                 }
             )
@@ -512,7 +557,7 @@ class QaOrchestrator:
                     update={
                         "current_profile": next_profile,
                         "completed_profiles": completed_profiles,
-                        "model_policy": MODEL_POLICIES[OrchestrationStep.TERRA_PRIMARY_REVIEW],
+                        "model_policy": self._model_policies[OrchestrationStep.TERRA_PRIMARY_REVIEW],
                         "next_action": _NEXT_ACTIONS[OrchestrationStep.TERRA_PRIMARY_REVIEW],
                     }
                 )
@@ -540,7 +585,7 @@ class QaOrchestrator:
                         "completed_profiles": completed_profiles,
                         "deep_assessment": assessment,
                         "deep_reason_code": reason_code,
-                        "model_policy": MODEL_POLICIES[OrchestrationStep.SOL_DEEP_REVIEW],
+                        "model_policy": self._model_policies[OrchestrationStep.SOL_DEEP_REVIEW],
                         "next_action": _NEXT_ACTIONS[OrchestrationStep.SOL_DEEP_REVIEW],
                     }
                 )
@@ -551,7 +596,7 @@ class QaOrchestrator:
                     "completed_profiles": completed_profiles,
                     "deep_assessment": assessment,
                     "deep_reason_code": None,
-                    "model_policy": MODEL_POLICIES[OrchestrationStep.TERRA_SYNTHESIS],
+                    "model_policy": self._model_policies[OrchestrationStep.TERRA_SYNTHESIS],
                     "next_action": _NEXT_ACTIONS[OrchestrationStep.TERRA_SYNTHESIS],
                 }
             )
@@ -560,7 +605,7 @@ class QaOrchestrator:
             return session.model_copy(
                 update={
                     "current_step": OrchestrationStep.TERRA_SYNTHESIS,
-                    "model_policy": MODEL_POLICIES[OrchestrationStep.TERRA_SYNTHESIS],
+                    "model_policy": self._model_policies[OrchestrationStep.TERRA_SYNTHESIS],
                     "next_action": _NEXT_ACTIONS[OrchestrationStep.TERRA_SYNTHESIS],
                 }
             )

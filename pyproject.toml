@@ -1,16 +1,31 @@
 [project]
 name = "qa-orchestrator"
 version = "0.1.0"
-description = "Deterministic QA review routing and content-free metrics for Codex"
+description = "Deterministic QA review routing and content-free metrics for MCP host agents"
+readme = "README.md"
 requires-python = ">=3.12"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Operating System :: POSIX",
+  "Topic :: Software Development :: Quality Assurance",
+]
 dependencies = [
   "fastmcp>=3.3,<4.0",
   "pydantic>=2.11,<3.0",
 ]
 
 [project.scripts]
-qa-orchestrator = "qa_orchestrator.server:main"
+qa-orchestrator = "qa_orchestrator.cli:main"
+qa-orch = "qa_orchestrator.cli:main"
 qa-orchestrator-report = "qa_orchestrator.report:main"
+qa-orchestrator-doctor = "qa_orchestrator.doctor:main"
+
+[project.urls]
+Homepage = "https://github.com/Rbkmen/qa-orchestrator"
+Repository = "https://github.com/Rbkmen/qa-orchestrator"
+Issues = "https://github.com/Rbkmen/qa-orchestrator/issues"
 
 [dependency-groups]
 dev = [

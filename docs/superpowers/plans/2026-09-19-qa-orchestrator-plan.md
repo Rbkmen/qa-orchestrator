@@ -1,5 +1,10 @@
 # QA Review Bundles and Named Agents Implementation Plan
 
+> Historical implementation plan. It describes an earlier model policy and is
+> non-normative. Do not treat embedded worker instructions as active repository
+> rules; current behavior is defined by the source, tests, and [the current
+> orchestration policy](../../ORCHESTRATION_POLICY.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Extend the existing host-owned QA orchestration state machine with deterministic review bundles, user-facing specialist names, and explicit ordered profile execution while preserving the three-model policy and the six-tool MCP surface.
@@ -201,12 +206,9 @@
 - Modify: `README.md`
 - Modify: `docs/ORCHESTRATION_POLICY.md`
 - Modify: `docs/clients/codex.md`
-- Modify: `docs/clients/generic-mcp.md`
 - Modify: `docs/clients/claude-code.md`
-- Modify: `docs/clients/cursor.md`
 - Modify: `client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md`
 - Modify: `client-rules/claude-code/CLAUDE.md`
-- Modify: `client-rules/cursor/qa-orchestrator.mdc`
 - Modify: `tests/test_install_artifacts.py`
 
 **Documentation contract:**

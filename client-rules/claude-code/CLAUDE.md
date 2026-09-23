@@ -4,16 +4,36 @@ The generic QA Orchestrator instructions are canonical for orchestration mechani
 
 When the `qa-orchestrator` MCP server is available, use it as a deterministic QA-orchestration helper.
 
+- If the MCP is unavailable, a required call fails, or the session expires,
+  continue with the selected workspace and repository rules, mark orchestration
+  and metrics as unavailable, and never emulate or claim an orchestration call.
+- A partial result caused by missing orchestration input remains a valid
+  host-owned QA result; report the missing boundary.
 - Obtain evidence, run model stages, analyze the task, produce findings, make the final QA decision, and perform any changes or external writes in Claude Code.
 - Keep orchestration read-only: preserve `read_only=true` and `host_owns_decisions=true`; Claude Code owns evidence, decisions, and external writes.
 - For an implementation-aware review, call `start_qa_orchestration`, select exactly one fixed bundle or compatibility profile during Luna triage (not both fields), and then call `prepare_review_route` for each role: `pr_test_analyzer`, `code_reviewer`, `security_reviewer`, `silent_failure_hunter`, `code_explorer`, `typescript_reviewer`, or `react_reviewer`.
 - Fixed bundles are `ordinary_mr`, `widget`, `security`, `autotest`, and `requirements`; the order comes from the orchestrator and must not be changed by the host. `code_explorer` is displayed as `Faraday — Evidence Investigator`; this is an internal role name, not an external service.
-- Use `gpt-6-luna/max` for triage, `gpt-6-sol/medium` for primary review and synthesis, and optional `gpt-6-sol/high` for deep review with `speed=1.0` for every stage. After each primary-review role, pass its `completed_profile`; after the last role, pass only the boolean `risk_signals` object so the orchestrator applies the fixed deep-review rules. Deep review and synthesis start only after the last role. The `terra_primary_review` and `terra_synthesis` transition identifiers remain stable; select the model from `model_policy`, not the step name.
+- Use the returned `model_policy` for every stage: the configured triage model with its selected reasoning, primary model with its selected reasoning, optional deep model with its selected reasoning (default `high`), and synthesis model with its selected reasoning; keep `speed=1.0` for every stage. The default setup is OpenAI/Codex with `gpt-6-luna/max`, `gpt-6-sol/medium`, and optional `gpt-6-sol/high`; `qa-orch setup` selects OpenAI or Anthropic, model IDs, and OpenAI reasoning effort for triage, primary review, deep review, and synthesis. After each primary-review role, pass its `completed_profile`; after the last role, pass only the boolean `risk_signals` object so the orchestrator applies the fixed deep-review rules. Deep review and synthesis start only after the last role. The `terra_primary_review` and `terra_synthesis` transition identifiers remain stable; select the model from `model_policy`, not the step name.
 - For low-risk, narrow one-repository work, select one compatibility profile instead of a bundle; keep a compact Evidence Packet with stable `E1` references and bounded `F-01` candidates so roles do not repeat the full diff or logs.
 - Use `get_qa_orchestration` to read state and the next action. Do not pass evidence, prompts, or model outputs to the orchestrator.
 - Use the route only as a focus/checklist. Independently verify the diff, callers, contracts, runtime evidence, and unverified gaps.
-- After `completed`, `partial`, or `blocked`, call `record_qa_task_outcome` once with counters and no issue keys, source text, code, logs, or paths; for orchestration, pass the opaque `run_id`. New outcome events use schema v2: send `triage_calls`, `primary_review_calls`, `deep_review_calls`, `synthesis_calls`, shared `orchestration_steps_completed` and `orchestration_retries`, and optional `triage_input_tokens`, `triage_output_tokens`, `primary_review_input_tokens`, `primary_review_output_tokens`, `synthesis_input_tokens`, and `synthesis_output_tokens`; deep-review tokens remain `deep_input_tokens` and `deep_output_tokens`. Only report `deep_model=gpt-6-sol` and `deep_reasoning=high` after deep review runs; if the task stops before it starts, use `deep_review_calls=0` and omit those fields. Stored v1 history remains readable and is reported separately.
+- When the current QA task reaches its final reported status (`completed`,
+  `partial`, or `blocked`), call `record_qa_task_outcome` exactly once with
+  counters and no issue keys, source text, code, logs, or paths. Do not record
+  intermediate continuations; if the task resumes after a partial result,
+  record only the final status for that task. For orchestration, pass the
+  opaque `run_id`; do not pass `orchestration_used=false` with a `run_id`.
+  New outcome events use schema v2: send `triage_calls`,
+  `primary_review_calls`, `deep_review_calls`, `synthesis_calls`, shared
+  `orchestration_steps_completed` and `orchestration_retries`, and optional
+  `triage_input_tokens`, `triage_output_tokens`,
+  `primary_review_input_tokens`, `primary_review_output_tokens`,
+  `synthesis_input_tokens`, and `synthesis_output_tokens`. Deep-review tokens
+  remain `deep_input_tokens` and `deep_output_tokens`. Only report
+  the configured `deep_model` and
+  configured `deep_reasoning` (default `high`) after deep review runs; if the task stops before it
+  starts, use `deep_review_calls=0` and omit those fields. Stored v1 history
+  remains readable and is reported separately.
 - Use `get_metrics_report` only for aggregate read-only metrics.
-- New outcome events use schema v2: send `triage_calls`, `primary_review_calls`, `deep_review_calls`, `synthesis_calls`, shared `orchestration_steps_completed` and `orchestration_retries`, and optional `triage_input_tokens`, `triage_output_tokens`, `primary_review_input_tokens`, `primary_review_output_tokens`, `synthesis_input_tokens`, and `synthesis_output_tokens`; deep-review tokens remain `deep_input_tokens` and `deep_output_tokens`. Stored v1 history remains readable and is reported separately.
 - For implementation-aware reviews, use Findings, Changes, Manual Test Plan, and Open Questions / Could Not Verify; follow the workspace flow when it defines another output shape for requirements or planning.
 - Do not add persistent QA memory, a source cache, or hidden tool calls.
