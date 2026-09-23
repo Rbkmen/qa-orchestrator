@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 
 import pytest
 
@@ -29,6 +31,48 @@ def test_model_selection_round_trips_without_credentials(tmp_path):
 
     assert load_model_selection(path) == selection
     assert "api_key" not in json.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission modes are not available")
+def test_saving_policy_preserves_existing_parent_permissions(tmp_path):
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    parent.chmod(0o755)
+    path = parent / "model-policy.json"
+
+    save_model_selection(
+        path,
+        ModelSelection(
+            provider=ModelProvider.OPENAI,
+            triage_model="triage",
+            primary_model="primary",
+            deep_model="deep",
+            synthesis_model="synthesis",
+        ),
+    )
+
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o755
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission modes are not available")
+def test_saving_policy_creates_a_private_parent_directory(tmp_path):
+    parent = tmp_path / "private"
+    path = parent / "model-policy.json"
+
+    save_model_selection(
+        path,
+        ModelSelection(
+            provider=ModelProvider.OPENAI,
+            triage_model="triage",
+            primary_model="primary",
+            deep_model="deep",
+            synthesis_model="synthesis",
+        ),
+    )
+
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_service_uses_selected_models(tmp_path):
@@ -140,10 +184,10 @@ def test_openai_reasoning_reaches_each_configured_stage():
 
     policies = build_model_policies(selection)
 
-    assert policies[OrchestrationStep.LUNA_TRIAGE].reasoning == "low"
-    assert policies[OrchestrationStep.TERRA_PRIMARY_REVIEW].reasoning == "high"
-    assert policies[OrchestrationStep.SOL_DEEP_REVIEW].reasoning == "xhigh"
-    assert policies[OrchestrationStep.TERRA_SYNTHESIS].reasoning == "xhigh"
+    assert policies[OrchestrationStep.TRIAGE].reasoning == "low"
+    assert policies[OrchestrationStep.PRIMARY_REVIEW].reasoning == "high"
+    assert policies[OrchestrationStep.DEEP_REVIEW].reasoning == "xhigh"
+    assert policies[OrchestrationStep.SYNTHESIS].reasoning == "xhigh"
 
 
 def test_setup_command_writes_selected_policy(tmp_path, monkeypatch):

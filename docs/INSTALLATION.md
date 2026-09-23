@@ -48,8 +48,10 @@ choose the AI environment (`OpenAI / Codex` or `Anthropic / Claude`) and models
 for triage, primary review, deep review, and synthesis. Each stage includes a
 short explanation of its role. Choose the provider-specific reasoning/effort
 for each model; the menu contains recommended model IDs and an option to enter
-another exact ID. Enter an ID supported by that user's account; the MCP cannot
-reliably expose every provider's live model catalog.
+another exact ID. The wizard does not contact provider APIs or confirm account
+access. Its recommended catalog and custom-ID reasoning options are local
+guidance, not live capability checks; verify custom model availability and
+reasoning/effort support with the host's provider.
 The wizard saves the model policy; it does not configure provider access in
 Codex or Claude Code. Make sure the selected host can use the chosen provider
 and model. It stores only these non-secret values in
@@ -185,7 +187,7 @@ The server is started on demand by the MCP client. Do not start a second backgro
 
 ## Data and privacy
 
-Evidence, source code, logs, prompts, model responses, and final QA decisions stay with the host agent. Active orchestration state is bounded and held in process memory. Distribution records retain only task type and timestamp as task data and are written locally to `$HOME/.qa-orchestrator/metrics.jsonl` by default; set `QA_ORCHESTRATOR_DATA_DIR` to use another directory. On startup of the MCP server or report command, existing supported outcome records are reduced to those two data fields; unrelated fields and malformed or unsupported records are discarded.
+Evidence, source code, logs, prompts, model responses, and final QA decisions stay with the host agent. Active orchestration state is bounded and held in process memory. Distribution records retain only task type and timestamp as task data and are written locally to `$HOME/.qa-orchestrator/metrics.jsonl` by default; set `QA_ORCHESTRATOR_DATA_DIR` to use another directory. On startup of the MCP server or report command, existing supported outcome records are reduced to those two data fields; unrelated fields and malformed or unsupported records are discarded. If sanitization fails, the MCP server will not start and the report command will not produce a report; run `qa-orchestrator-doctor` to check local data-directory permissions. Local non-orchestrated records are not deduplicated; counts represent successful record calls, not verified unique tasks.
 
 ## Updating
 

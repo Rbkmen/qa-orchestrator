@@ -6,6 +6,7 @@ from qa_orchestrator.contracts import ReviewAgent, ReviewBundle
 from qa_orchestrator.events import DISTRIBUTION_EVENT_TYPE, DISTRIBUTION_SCHEMA_VERSION
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
+    DeepReviewSignals,
     OrchestrationStatus,
     OrchestrationStep,
 )
@@ -18,7 +19,7 @@ def _ready_for_host_outcome(service: OrchestratorService, task_type: str = "ordi
     primary = service.advance_qa_orchestration(
         AdvanceQaOrchestrationRequest(
             run_id=started.run_id,
-            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            completed_step=OrchestrationStep.TRIAGE,
             status="completed",
             selected_profile=ReviewAgent.CODE_REVIEWER,
         )
@@ -29,6 +30,7 @@ def _ready_for_host_outcome(service: OrchestratorService, task_type: str = "ordi
             completed_step=primary.current_step,
             status="completed",
             completed_profile=ReviewAgent.CODE_REVIEWER,
+            risk_signals=DeepReviewSignals(),
         )
     )
     awaiting_outcome = service.advance_qa_orchestration(
@@ -74,7 +76,7 @@ def test_service_advances_with_a_fixed_bundle(tmp_path):
     advanced = service.advance_qa_orchestration(
         AdvanceQaOrchestrationRequest(
             run_id=started.run_id,
-            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            completed_step=OrchestrationStep.TRIAGE,
             status="completed",
             selected_bundle=ReviewBundle.ORDINARY_MR,
         )
@@ -162,7 +164,7 @@ def test_service_records_a_stopped_orchestration(tmp_path, outcome):
     stopped = service.advance_qa_orchestration(
         AdvanceQaOrchestrationRequest(
             run_id=started.run_id,
-            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            completed_step=OrchestrationStep.TRIAGE,
             status=outcome,
         )
     )

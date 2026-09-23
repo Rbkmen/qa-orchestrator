@@ -206,8 +206,6 @@ def save_model_selection(path: Path, selection: ModelSelection) -> None:
     """Persist a selection atomically without storing credentials."""
 
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if os.name != "nt":
-        path.parent.chmod(0o700)
 
     file_descriptor, temporary_name = mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:

@@ -20,10 +20,10 @@ from qa_orchestrator.orchestration import (
 @pytest.mark.parametrize(
     ("step", "model", "reasoning"),
     [
-        (OrchestrationStep.LUNA_TRIAGE, "gpt-6-luna", "max"),
-        (OrchestrationStep.TERRA_PRIMARY_REVIEW, "gpt-6-sol", "medium"),
-        (OrchestrationStep.SOL_DEEP_REVIEW, "gpt-6-sol", "high"),
-        (OrchestrationStep.TERRA_SYNTHESIS, "gpt-6-sol", "medium"),
+        (OrchestrationStep.TRIAGE, "gpt-6-luna", "max"),
+        (OrchestrationStep.PRIMARY_REVIEW, "gpt-6-sol", "medium"),
+        (OrchestrationStep.DEEP_REVIEW, "gpt-6-sol", "high"),
+        (OrchestrationStep.SYNTHESIS, "gpt-6-sol", "medium"),
     ],
 )
 def test_model_policy_assigns_requested_models_and_reasoning(step, model, reasoning):
@@ -32,10 +32,10 @@ def test_model_policy_assigns_requested_models_and_reasoning(step, model, reason
     assert policy.reasoning == reasoning
     assert policy.speed == 1.0
     assert set(MODEL_POLICIES) == {
-        OrchestrationStep.LUNA_TRIAGE,
-        OrchestrationStep.TERRA_PRIMARY_REVIEW,
-        OrchestrationStep.SOL_DEEP_REVIEW,
-        OrchestrationStep.TERRA_SYNTHESIS,
+        OrchestrationStep.TRIAGE,
+        OrchestrationStep.PRIMARY_REVIEW,
+        OrchestrationStep.DEEP_REVIEW,
+        OrchestrationStep.SYNTHESIS,
     }
 
 
@@ -52,7 +52,7 @@ def test_orchestration_session_rejects_disabled_ownership_flags():
             run_id="qar-0123456789abcdef0123456789abcdef",
             task_type="ordinary_review",
             status=OrchestrationStatus.ACTIVE,
-            current_step=OrchestrationStep.LUNA_TRIAGE,
+            current_step=OrchestrationStep.TRIAGE,
             next_action="Host performs triage.",
             read_only=False,
         )
@@ -62,7 +62,7 @@ def test_orchestration_session_rejects_disabled_ownership_flags():
             run_id="qar-0123456789abcdef0123456789abcdef",
             task_type="ordinary_review",
             status=OrchestrationStatus.ACTIVE,
-            current_step=OrchestrationStep.LUNA_TRIAGE,
+            current_step=OrchestrationStep.TRIAGE,
             next_action="Host performs triage.",
             host_owns_decisions=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=5),
@@ -73,18 +73,25 @@ def test_advance_request_rejects_free_form_fields():
     with pytest.raises(ValidationError):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
-            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            completed_step=OrchestrationStep.TRIAGE,
             status="completed",
             selected_profile=ReviewAgent.CODE_REVIEWER,
             evidence="raw source text",
         )
 
 
+def test_legacy_step_values_are_accepted_as_model_neutral_steps():
+    assert OrchestrationStep("luna_triage") is OrchestrationStep.TRIAGE
+    assert OrchestrationStep("terra_primary_review") is OrchestrationStep.PRIMARY_REVIEW
+    assert OrchestrationStep("sol_deep_review") is OrchestrationStep.DEEP_REVIEW
+    assert OrchestrationStep("terra_synthesis") is OrchestrationStep.SYNTHESIS
+
+
 def test_deep_reason_requires_fixed_reason_code():
     with pytest.raises(ValidationError):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
-            completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
+            completed_step=OrchestrationStep.PRIMARY_REVIEW,
             status="completed",
             completed_profile=ReviewAgent.CODE_REVIEWER,
             needs_deep_analysis=True,
@@ -92,7 +99,7 @@ def test_deep_reason_requires_fixed_reason_code():
 
     request = AdvanceQaOrchestrationRequest(
         run_id="qar-0123456789abcdef0123456789abcdef",
-        completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
         status="completed",
         completed_profile=ReviewAgent.CODE_REVIEWER,
         needs_deep_analysis=True,
@@ -107,7 +114,7 @@ def test_risk_signals_are_final_terra_only_and_replace_manual_deep_request():
     with pytest.raises(ValidationError, match="final primary-review profile"):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
-            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            completed_step=OrchestrationStep.TRIAGE,
             status="completed",
             selected_profile=ReviewAgent.CODE_REVIEWER,
             risk_signals=signals,
@@ -116,7 +123,7 @@ def test_risk_signals_are_final_terra_only_and_replace_manual_deep_request():
     with pytest.raises(ValidationError, match="final primary-review profile"):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
-            completed_step=OrchestrationStep.TERRA_SYNTHESIS,
+            completed_step=OrchestrationStep.SYNTHESIS,
             status="completed",
             risk_signals=signals,
         )
@@ -124,7 +131,7 @@ def test_risk_signals_are_final_terra_only_and_replace_manual_deep_request():
     with pytest.raises(ValidationError, match="cannot be combined"):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
-            completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
+            completed_step=OrchestrationStep.PRIMARY_REVIEW,
             status="completed",
             completed_profile=ReviewAgent.CODE_REVIEWER,
             risk_signals=signals,
@@ -136,7 +143,7 @@ def test_risk_signals_require_a_completed_profile():
     with pytest.raises(ValidationError, match="completed_profile"):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
-            completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
+            completed_step=OrchestrationStep.PRIMARY_REVIEW,
             status="completed",
             risk_signals=DeepReviewSignals(cross_system_scope=True),
         )
@@ -146,7 +153,7 @@ def test_completed_terra_requires_completed_profile():
     with pytest.raises(ValidationError, match="completed_profile"):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
-            completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
+            completed_step=OrchestrationStep.PRIMARY_REVIEW,
             status="completed",
         )
 
@@ -155,7 +162,7 @@ def test_completed_profile_is_rejected_outside_terra():
     with pytest.raises(ValidationError, match="only be supplied"):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
-            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            completed_step=OrchestrationStep.TRIAGE,
             status="completed",
             selected_profile=ReviewAgent.CODE_REVIEWER,
             completed_profile=ReviewAgent.CODE_REVIEWER,
@@ -166,7 +173,7 @@ def test_partial_terra_rejects_ignored_completed_profile():
     with pytest.raises(ValidationError, match="completed_profile"):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
-            completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
+            completed_step=OrchestrationStep.PRIMARY_REVIEW,
             status="partial",
             completed_profile=ReviewAgent.CODE_REVIEWER,
         )
@@ -176,7 +183,7 @@ def test_non_deep_request_rejects_reason_code():
     with pytest.raises(ValidationError):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
-            completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
+            completed_step=OrchestrationStep.PRIMARY_REVIEW,
             status="completed",
             completed_profile=ReviewAgent.CODE_REVIEWER,
             reason_code=OrchestrationReason.ROOT_CAUSE,
@@ -187,14 +194,14 @@ def test_completed_luna_requires_exactly_one_selection():
     with pytest.raises(ValidationError, match="exactly one"):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
-            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            completed_step=OrchestrationStep.TRIAGE,
             status="completed",
         )
 
     with pytest.raises(ValidationError, match="exactly one"):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
-            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            completed_step=OrchestrationStep.TRIAGE,
             status="completed",
             selected_profile=ReviewAgent.CODE_REVIEWER,
             selected_bundle=ReviewBundle.ORDINARY_MR,
@@ -204,7 +211,7 @@ def test_completed_luna_requires_exactly_one_selection():
 def test_completed_luna_accepts_one_fixed_bundle():
     request = AdvanceQaOrchestrationRequest(
         run_id="qar-0123456789abcdef0123456789abcdef",
-        completed_step=OrchestrationStep.LUNA_TRIAGE,
+        completed_step=OrchestrationStep.TRIAGE,
         status="completed",
         selected_bundle=ReviewBundle.ORDINARY_MR,
     )
@@ -216,7 +223,7 @@ def test_selection_is_rejected_after_luna():
     with pytest.raises(ValidationError, match="only be supplied after triage"):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
-            completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,
+            completed_step=OrchestrationStep.PRIMARY_REVIEW,
             status="completed",
             completed_profile=ReviewAgent.CODE_REVIEWER,
             selected_bundle=ReviewBundle.ORDINARY_MR,
@@ -227,7 +234,7 @@ def test_arbitrary_profile_order_is_rejected():
     with pytest.raises(ValidationError):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
-            completed_step=OrchestrationStep.LUNA_TRIAGE,
+            completed_step=OrchestrationStep.TRIAGE,
             status="completed",
             selected_profile=ReviewAgent.CODE_REVIEWER,
             review_profiles=[ReviewAgent.CODE_REVIEWER, ReviewAgent.CODE_EXPLORER],

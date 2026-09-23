@@ -209,13 +209,18 @@ def test_documentation_contains_no_retired_runtime_terms():
 
 
 @pytest.mark.asyncio
-async def test_launcher_exposes_six_tools(monkeypatch):
+async def test_launcher_exposes_six_tools(monkeypatch, tmp_path):
     virtual_env = str(Path(sys.executable).parent.parent)
     monkeypatch.setenv("VIRTUAL_ENV", virtual_env)
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
     transport = StdioTransport(
         command=str(LAUNCHER),
         args=[],
-        env={**os.environ, "VIRTUAL_ENV": virtual_env},
+        env={
+            **os.environ,
+            "VIRTUAL_ENV": virtual_env,
+            "QA_ORCHESTRATOR_DATA_DIR": str(tmp_path),
+        },
     )
 
     try:

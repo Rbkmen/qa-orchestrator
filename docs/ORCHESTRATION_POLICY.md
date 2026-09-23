@@ -46,9 +46,9 @@ The orchestrator returns only the next policy and transition constraints. Every 
 1. The host calls `start_qa_orchestration(task_type)` and receives a `run_id`, the configured triage model and reasoning effort (default `max`), and the next action.
 2. After triage, the host calls `advance_qa_orchestration` with one fixed bundle or one of the seven `ReviewAgent` profiles.
 3. For a bundle, the host runs the configured primary model once per profile in the returned order and passes the role identifier as `completed_profile` after each stage; the orchestrator does not skip roles or accept an arbitrary order.
-4. In the same transition that completes the last primary-review profile, the host may supply structured `risk_signals`; the orchestrator applies the fixed deep-review rules and either goes directly to configured synthesis or returns the configured deep model with its configured reasoning (default `high`). Do not send `risk_signals` on the later synthesis transition.
+4. In the same transition that completes the last primary-review profile, the host must supply structured `risk_signals` (use an empty object when no signals apply); the orchestrator applies the fixed deep-review rules and either goes directly to configured synthesis or returns the configured deep model with its configured reasoning (default `high`). Do not send `risk_signals` on the later synthesis transition. The legacy explicit manual-escalation input remains accepted for older clients.
 5. After deep review, the host returns to the configured synthesis model.
-6. After synthesis, the state becomes `awaiting_host_outcome`; the host calls `record_qa_task_outcome` once with the same `run_id` and a status of `completed`, `partial`, or `blocked`. The orchestrator moves the session to its final status.
+6. After synthesis, the state becomes `awaiting_host_outcome`; the host calls `record_qa_task_outcome` once with the same `run_id` and a status of `completed`, `partial`, or `blocked`. The orchestrator moves the session to its final status. For non-orchestrated tasks, records have no deduplication key: do not retry after an uncertain response, and interpret counts as successful record calls rather than verified unique tasks.
 
 Allowed transitions:
 
@@ -58,7 +58,7 @@ Triage → Primary review[1] → ... → Primary review[N]
                                    Final synthesis → awaiting host outcome
 ```
 
-The `terra_primary_review` and `terra_synthesis` transition identifiers are retained for compatibility. They are not model selectors: use the returned `model_policy` for each stage.
+Transition identifiers are model-neutral, not model selectors: use the returned `model_policy` for each stage.
 
 Sessions are content-free and in memory, with a default TTL of `1800` seconds and a default limit of `100` active sessions. The shared cache is bounded, so older terminal sessions may be evicted when new sessions are created. Unknown runs, expired sessions, illegal or repeated transitions, and invalid signals are rejected without changing state. After a restart, the host starts a new session.
 

@@ -1,6 +1,5 @@
 import argparse
 import json
-import sys
 from collections import Counter
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
@@ -69,10 +68,9 @@ def main() -> None:
         settings.metrics_max_events,
     )
     if not events.sanitize_existing_records():
-        print(
-            "Existing task-distribution data could not be sanitized; "
-            "reporting remains aggregate-only.",
-            file=sys.stderr,
+        parser.exit(
+            1,
+            "qa-orchestrator-report: existing task-distribution data could not be sanitized; report not generated. Run qa-orchestrator-doctor to check local data-directory permissions.\n",
         )
     report = summarize_events(read_metrics_lines(settings.metrics_path), args.days)
     print(json.dumps(report, indent=2))

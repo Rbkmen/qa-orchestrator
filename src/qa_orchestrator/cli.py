@@ -109,7 +109,7 @@ SETUP_COPY = {
         "custom_model_only": "  1. Ввести model ID",
         "choose_prompt": "Выбор [{default}]: ",
         "model_id_prompt": "Model ID (b — назад): ",
-        "model_id_hint": "Подсказка: используй точный API model ID; для другого ID выбери 0.",
+        "model_id_hint": "Каталог локальный: доступность модели и поддержку reasoning у провайдера инструмент не проверяет.",
         "deep_recommendation": "Рекомендация: high для сложных и рискованных проверок.",
         "unsupported_reasoning": "Подсказка: {model} не поддерживает {parameter}; будет сохранено none.",
         "anthropic_reasoning": "Подсказка: Anthropic effort задаёт глубину рассуждений для этой модели.",
@@ -167,7 +167,7 @@ SETUP_COPY = {
         "custom_model_only": "  1. Enter a model ID",
         "choose_prompt": "Choose [{default}]: ",
         "model_id_prompt": "Model ID (b — back): ",
-        "model_id_hint": "Tip: use the exact API model ID; choose 0 to enter a different ID.",
+        "model_id_hint": "The catalog is local; provider availability and reasoning support are not checked here.",
         "deep_recommendation": "Recommendation: use high for complex and high-risk reviews.",
         "unsupported_reasoning": "Tip: {model} does not support {parameter}; none will be saved.",
         "anthropic_reasoning": "Tip: Anthropic effort controls reasoning depth for this model.",
@@ -341,8 +341,6 @@ def _model_value(
             if _is_back(value):
                 raise _BackRequested
 
-        if provider in MODEL_CATALOGS:
-            print(copy["model_id_hint"])
     if not value:
         raise ValueError(copy["empty_model"].format(label=label))
     return value
@@ -492,6 +490,7 @@ def _setup(argv: Sequence[str]) -> int:
             print(f"\n{copy['cancelled']}")
             return 130
 
+        print(copy["model_id_hint"])
         defaults = DEFAULT_MODEL_SELECTION if provider is ModelProvider.OPENAI else None
         model_values: dict[str, str] = {}
         reasoning_values: dict[str, ReasoningEffort] = {}

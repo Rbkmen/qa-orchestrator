@@ -1,11 +1,12 @@
 import json
+import sys
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
 
 from qa_orchestrator.events import DISTRIBUTION_EVENT_TYPE, DISTRIBUTION_SCHEMA_VERSION
-from qa_orchestrator.report import TaskDistributionReport, summarize_events
+from qa_orchestrator.report import TaskDistributionReport, main, summarize_events
 
 
 def _distribution_event(task_type="ordinary_review", timestamp=None, **extra):
@@ -78,3 +79,20 @@ def test_report_schema_forbids_unrelated_data():
 
     with pytest.raises(ValidationError):
         TaskDistributionReport.model_validate({**report, "unrelated_metric": 1})
+
+
+def test_report_is_not_generated_when_existing_data_cannot_be_sanitized(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setattr(sys, "argv", ["qa-orchestrator-report"])
+    monkeypatch.setattr(
+        "qa_orchestrator.report.JsonEventSink.sanitize_existing_records",
+        lambda _self: False,
+    )
+
+    with pytest.raises(SystemExit) as error:
+        main()
+
+    assert error.value.code == 1
+    assert "report not generated" in capsys.readouterr().err

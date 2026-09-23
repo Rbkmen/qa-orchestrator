@@ -2,6 +2,7 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
+import qa_orchestrator.server as server_module
 from qa_orchestrator.contracts import ReviewBundle
 from qa_orchestrator.review_profiles import REVIEW_BUNDLES
 from qa_orchestrator.server import build_server
@@ -35,6 +36,19 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     advance_description = tools["advance_qa_orchestration"].description or ""
     assert "primary review" in advance_description.lower()
     assert "terra primary" not in advance_description.lower()
+    risk_signals_description = tools["advance_qa_orchestration"].inputSchema["properties"][
+        "risk_signals"
+    ]["description"]
+    assert "required with the final" in risk_signals_description.lower()
+    assert tools["advance_qa_orchestration"].inputSchema["properties"]["completed_step"][
+        "enum"
+    ] == [
+        "triage",
+        "primary_review",
+        "deep_review",
+        "synthesis",
+        "awaiting_host_outcome",
+    ]
 
     for name in (
         "prepare_review_route",
@@ -150,9 +164,25 @@ async def test_orchestration_tools_advance_and_get_structured_state(tmp_path):
         )
         current = await client.call_tool("get_qa_orchestration", {"run_id": run_id})
 
-    assert advanced.structured_content["current_step"] == "terra_primary_review"
-    assert current.structured_content["current_step"] == "terra_primary_review"
+    assert advanced.structured_content["current_step"] == "primary_review"
+    assert current.structured_content["current_step"] == "primary_review"
     assert current.structured_content["selected_profile"] == "code_reviewer"
+
+
+def test_server_refuses_to_start_when_existing_data_cannot_be_sanitized(monkeypatch):
+    monkeypatch.setattr(
+        server_module.JsonEventSink,
+        "sanitize_existing_records",
+        lambda _self: False,
+    )
+    monkeypatch.setattr(
+        server_module,
+        "build_server",
+        lambda _service: pytest.fail("server must not start with unsanitized data"),
+    )
+
+    with pytest.raises(SystemExit, match="could not be sanitized"):
+        server_module.main()
 
 
 @pytest.mark.asyncio
@@ -169,7 +199,7 @@ async def test_orchestration_tool_selects_sol_from_structured_risk_signals(tmp_p
             "advance_qa_orchestration",
             {
                 "run_id": run_id,
-                "completed_step": "luna_triage",
+                "completed_step": "triage",
                 "status": "completed",
                 "selected_profile": "code_reviewer",
             },
@@ -188,7 +218,7 @@ async def test_orchestration_tool_selects_sol_from_structured_risk_signals(tmp_p
             },
         )
 
-    assert deep.structured_content["current_step"] == "sol_deep_review"
+    assert deep.structured_content["current_step"] == "deep_review"
     assert deep.structured_content["deep_assessment"] == {
         "should_escalate": True,
         "triggered_rules": ["high_risk_with_uncertainty"],
@@ -210,7 +240,7 @@ async def test_orchestration_tools_advance_with_bundle_order(tmp_path):
             "advance_qa_orchestration",
             {
                 "run_id": started.structured_content["run_id"],
-                "completed_step": "luna_triage",
+                "completed_step": "triage",
                 "status": "completed",
                 "selected_bundle": "ordinary_mr",
             },
@@ -242,13 +272,14 @@ async def test_orchestration_tools_complete_each_bundle(tmp_path, bundle: Review
             "advance_qa_orchestration",
             {
                 "run_id": run_id,
-                "completed_step": "luna_triage",
+                "completed_step": "triage",
                 "status": "completed",
                 "selected_bundle": bundle.value,
             },
         )
 
-        for profile in REVIEW_BUNDLES[bundle]:
+        profiles = REVIEW_BUNDLES[bundle]
+        for index, profile in enumerate(profiles):
             current = await client.call_tool(
                 "advance_qa_orchestration",
                 {
@@ -256,6 +287,7 @@ async def test_orchestration_tools_complete_each_bundle(tmp_path, bundle: Review
                     "completed_step": current.structured_content["current_step"],
                     "status": "completed",
                     "completed_profile": profile.value,
+                    "risk_signals": {} if index == len(profiles) - 1 else None,
                 },
             )
 
@@ -298,7 +330,7 @@ async def test_orchestration_tool_rejects_incompatible_bundle_signals(tmp_path):
                 "advance_qa_orchestration",
                 {
                     "run_id": run_id,
-                    "completed_step": "luna_triage",
+                    "completed_step": "triage",
                     "status": "completed",
                     "selected_profile": "code_reviewer",
                     "selected_bundle": "ordinary_mr",
@@ -310,7 +342,7 @@ async def test_orchestration_tool_rejects_incompatible_bundle_signals(tmp_path):
                 "advance_qa_orchestration",
                 {
                     "run_id": run_id,
-                    "completed_step": "luna_triage",
+                    "completed_step": "triage",
                     "status": "completed",
                 },
             )
@@ -320,7 +352,7 @@ async def test_orchestration_tool_rejects_incompatible_bundle_signals(tmp_path):
                 "advance_qa_orchestration",
                 {
                     "run_id": run_id,
-                    "completed_step": "luna_triage",
+                    "completed_step": "triage",
                     "status": "completed",
                     "selected_bundle": "unknown_bundle",
                 },
@@ -341,7 +373,7 @@ async def test_orchestration_tool_rejects_selection_after_luna_and_custom_order(
             "advance_qa_orchestration",
             {
                 "run_id": run_id,
-                "completed_step": "luna_triage",
+                "completed_step": "triage",
                 "status": "completed",
                 "selected_bundle": "ordinary_mr",
             },
@@ -352,7 +384,7 @@ async def test_orchestration_tool_rejects_selection_after_luna_and_custom_order(
                 "advance_qa_orchestration",
                 {
                     "run_id": run_id,
-                    "completed_step": "terra_primary_review",
+                    "completed_step": "primary_review",
                     "status": "completed",
                     "selected_profile": "security_reviewer",
                 },
@@ -363,7 +395,7 @@ async def test_orchestration_tool_rejects_selection_after_luna_and_custom_order(
                 "advance_qa_orchestration",
                 {
                     "run_id": run_id,
-                    "completed_step": "terra_primary_review",
+                    "completed_step": "primary_review",
                     "status": "completed",
                     "review_profiles": ["code_reviewer", "code_explorer"],
                 },
@@ -384,7 +416,7 @@ async def test_server_records_orchestration_metrics(tmp_path):
             "advance_qa_orchestration",
             {
                 "run_id": run_id,
-                "completed_step": "luna_triage",
+                "completed_step": "triage",
                 "status": "completed",
                 "selected_profile": "code_reviewer",
             },
@@ -396,6 +428,7 @@ async def test_server_records_orchestration_metrics(tmp_path):
                 "completed_step": primary.structured_content["current_step"],
                 "status": "completed",
                 "completed_profile": "code_reviewer",
+                "risk_signals": {},
             },
         )
         await client.call_tool(

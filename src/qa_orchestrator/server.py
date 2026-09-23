@@ -1,4 +1,3 @@
-import sys
 from typing import Annotated
 
 from fastmcp import FastMCP
@@ -72,7 +71,15 @@ def build_server(service: OrchestratorService) -> FastMCP:
         selected_bundle: ReviewBundle | None = None,
         selected_profile: ReviewAgent | None = None,
         completed_profile: ReviewAgent | None = None,
-        risk_signals: DeepReviewSignals | None = None,
+        risk_signals: Annotated[
+            DeepReviewSignals | None,
+            Field(
+                description=(
+                    "Required with the final completed primary-review profile. "
+                    "Send an empty object when no signals apply."
+                )
+            ),
+        ] = None,
         needs_deep_analysis: Annotated[
             bool,
             Field(description="Legacy compatibility input; prefer risk_signals."),
@@ -82,10 +89,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
             Field(description="Legacy compatibility input; prefer risk_signals."),
         ] = None,
     ) -> QaOrchestrationSession:
-        """Advance one validated, content-free orchestration transition.
+        """Require risk_signals when completing the final primary review profile.
 
-        Send risk_signals together with the final completed_profile call of
-        primary review, before advancing to synthesis.
+        Send an empty object when no signals apply. The legacy manual
+        deep-review input remains accepted.
         """
         return service.advance_qa_orchestration(
             AdvanceQaOrchestrationRequest(
@@ -145,10 +152,10 @@ def main() -> None:
         settings.metrics_max_events,
     )
     if not events.sanitize_existing_records():
-        print(
-            "Existing task-distribution data could not be sanitized; "
-            "reporting remains aggregate-only.",
-            file=sys.stderr,
+        raise SystemExit(
+            "QA Orchestrator cannot start because existing task-distribution "
+            "data could not be sanitized. Run qa-orchestrator-doctor to check "
+            "local data-directory permissions."
         )
     service = OrchestratorService(
         settings,

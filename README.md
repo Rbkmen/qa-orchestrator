@@ -19,7 +19,7 @@ The orchestrator does not call models, choose severity or release readiness, or 
 
 ### Bundles and profile names
 
-The triage stage selects one fixed bundle or one compatibility profile. The primary-review stage executes bundle profiles sequentially. After every role, the host sends `completed_profile`, and the orchestrator returns `current_profile` and `completed_profiles`. Deep review or synthesis is available only after the final role. The transition identifiers `terra_primary_review` and `terra_synthesis` remain stable; choose the model from the returned `model_policy`, never from the step name.
+The triage stage selects one fixed bundle or one compatibility profile. The primary-review stage executes bundle profiles sequentially. After every role, the host sends `completed_profile`, and the orchestrator returns `current_profile` and `completed_profiles`. Deep review or synthesis is available only after the final role. Transition identifiers are model-neutral; choose the model from the returned `model_policy`, never from the step name.
 
 | Bundle | Profile order |
 |---|---|
@@ -53,7 +53,7 @@ Primary review → Faraday — Evidence Investigator → Code Reviewer → Test 
 Host → Final QA outcome
 ```
 
-With the final primary-review role, the host may send boolean `risk_signals` in the same `advance_qa_orchestration` call as the final `completed_profile`. When a fixed escalation rule matches, the orchestrator inserts a deep read-only review before final synthesis. Do not send `risk_signals` on the later synthesis transition. It returns the matched rules and fixed reason codes as `deep_assessment`; raw evidence never enters the orchestrator.
+With the final primary-review role, the host must send the structured boolean `risk_signals` object in the same `advance_qa_orchestration` call as the final `completed_profile` (send `{}` when no signals apply). When a fixed escalation rule matches, the orchestrator inserts a deep read-only review before final synthesis. Do not send `risk_signals` on the later synthesis transition. It returns the matched rules and fixed reason codes as `deep_assessment`; raw evidence never enters the orchestrator. The legacy explicit `needs_deep_analysis=true` plus `reason_code` path remains accepted for existing clients.
 
 Deep-review rules:
 
@@ -96,7 +96,7 @@ Triage → Primary review[1] → ... → Primary review[N]
 
 Sessions are kept in process memory only. The default TTL is 1,800 seconds and the maximum is 100 active sessions; the shared cache is also bounded, so older terminal sessions may be evicted when capacity is needed. Repeating the final call is idempotent while its session is retained. After a restart, the host starts a new session. `read_only=true` and `host_owns_decisions=true` are part of every state.
 
-After synthesis, the session waits for the final host outcome. Call `record_qa_task_outcome` with `task_type`, `outcome`, and the session `run_id`; the outcome finalizes the session but is not saved in task-distribution data. For a session stopped at an intermediate stage, first pass `partial` or `blocked` to `advance_qa_orchestration`. Repeating the exact same call for the same `run_id` is idempotent; a changed outcome is rejected as a conflict. For a regular task without orchestration, omit `run_id`.
+After synthesis, the session waits for the final host outcome. Call `record_qa_task_outcome` with `task_type`, `outcome`, and the session `run_id`; the outcome finalizes the session but is not saved in task-distribution data. For a session stopped at an intermediate stage, first pass `partial` or `blocked` to `advance_qa_orchestration`. Repeating the exact same call for the same `run_id` is idempotent; a changed outcome is rejected as a conflict. For a regular task without orchestration, omit `run_id`. Such records are not deduplicated: a retry after an uncertain response can inflate counts, which represent successful record calls rather than verified unique tasks.
 
 ### Review profiles
 
@@ -171,6 +171,10 @@ configure provider access. From a checkout, use `uv run qa-orch config show` and
 `uvx --from git+https://github.com/Rbkmen/qa-orchestrator.git`. Colors in the
 wizard distinguish providers, model IDs, and reasoning values; set `NO_COLOR=1`
 to disable them or `FORCE_COLOR=1` to force them.
+
+The wizard uses a local recommendation/capability catalog and does not contact
+provider APIs. For custom model IDs, verify that the host account can access
+the model and supports the selected reasoning/effort value.
 
 Example for Codex with a local checkout:
 

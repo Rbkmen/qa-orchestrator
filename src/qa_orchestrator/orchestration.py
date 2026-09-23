@@ -28,11 +28,21 @@ from qa_orchestrator.review_profiles import REVIEW_BUNDLES, bundle_profiles
 
 
 class OrchestrationStep(StrEnum):
-    LUNA_TRIAGE = "luna_triage"
-    TERRA_PRIMARY_REVIEW = "terra_primary_review"
-    SOL_DEEP_REVIEW = "sol_deep_review"
-    TERRA_SYNTHESIS = "terra_synthesis"
+    TRIAGE = "triage"
+    PRIMARY_REVIEW = "primary_review"
+    DEEP_REVIEW = "deep_review"
+    SYNTHESIS = "synthesis"
     AWAITING_HOST_OUTCOME = "awaiting_host_outcome"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "OrchestrationStep | None":
+        legacy_values = {
+            "luna_triage": cls.TRIAGE,
+            "terra_primary_review": cls.PRIMARY_REVIEW,
+            "sol_deep_review": cls.DEEP_REVIEW,
+            "terra_synthesis": cls.SYNTHESIS,
+        }
+        return legacy_values.get(value) if isinstance(value, str) else None
 
 
 class OrchestrationStatus(StrEnum):
@@ -166,22 +176,22 @@ def _model_value(model: str) -> OrchestrationModel | str:
 def build_model_policies(selection: ModelSelection) -> MappingProxyType:
     return MappingProxyType(
         {
-            OrchestrationStep.LUNA_TRIAGE: ModelPolicy(
+            OrchestrationStep.TRIAGE: ModelPolicy(
                 provider=selection.provider,
                 model=_model_value(selection.triage_model),
                 reasoning=selection.triage_reasoning,
             ),
-            OrchestrationStep.TERRA_PRIMARY_REVIEW: ModelPolicy(
+            OrchestrationStep.PRIMARY_REVIEW: ModelPolicy(
                 provider=selection.provider,
                 model=_model_value(selection.primary_model),
                 reasoning=selection.primary_reasoning,
             ),
-            OrchestrationStep.SOL_DEEP_REVIEW: ModelPolicy(
+            OrchestrationStep.DEEP_REVIEW: ModelPolicy(
                 provider=selection.provider,
                 model=_model_value(selection.deep_model),
                 reasoning=selection.deep_reasoning,
             ),
-            OrchestrationStep.TERRA_SYNTHESIS: ModelPolicy(
+            OrchestrationStep.SYNTHESIS: ModelPolicy(
                 provider=selection.provider,
                 model=_model_value(selection.synthesis_model),
                 reasoning=selection.synthesis_reasoning,
@@ -233,7 +243,7 @@ class AdvanceQaOrchestrationRequest(BaseModel):
     @model_validator(mode="after")
     def validate_transition_signal(self) -> "AdvanceQaOrchestrationRequest":
         if (
-            self.completed_step is OrchestrationStep.LUNA_TRIAGE
+            self.completed_step is OrchestrationStep.TRIAGE
             and self.status == "completed"
         ):
             if (self.selected_bundle is None) == (self.selected_profile is None):
@@ -241,7 +251,7 @@ class AdvanceQaOrchestrationRequest(BaseModel):
         elif self.selected_bundle is not None or self.selected_profile is not None:
             raise ValueError("selection may only be supplied after triage")
 
-        if self.completed_step is OrchestrationStep.TERRA_PRIMARY_REVIEW:
+        if self.completed_step is OrchestrationStep.PRIMARY_REVIEW:
             if self.status == "completed" and self.completed_profile is None:
                 raise ValueError("completed_profile is required after primary review")
             if self.status != "completed" and self.completed_profile is not None:
@@ -251,7 +261,7 @@ class AdvanceQaOrchestrationRequest(BaseModel):
 
         if self.risk_signals is not None:
             if (
-                self.completed_step is not OrchestrationStep.TERRA_PRIMARY_REVIEW
+                self.completed_step is not OrchestrationStep.PRIMARY_REVIEW
                 or self.status != "completed"
             ):
                 raise ValueError(
@@ -261,7 +271,7 @@ class AdvanceQaOrchestrationRequest(BaseModel):
                 raise ValueError("risk signals cannot be combined with a manual deep request")
 
         if self.needs_deep_analysis:
-            if self.completed_step is not OrchestrationStep.TERRA_PRIMARY_REVIEW:
+            if self.completed_step is not OrchestrationStep.PRIMARY_REVIEW:
                 raise ValueError("deep analysis can only follow primary review")
             if self.status != "completed":
                 raise ValueError("deep analysis requires a completed primary review")
@@ -279,10 +289,10 @@ class OrchestrationError(ValueError):
 
 _NEXT_ACTIONS = MappingProxyType(
     {
-        OrchestrationStep.LUNA_TRIAGE: "Host performs triage and submits the selected review bundle or profile.",
-        OrchestrationStep.TERRA_PRIMARY_REVIEW: "Host performs primary review with the selected ordered profiles.",
-        OrchestrationStep.SOL_DEEP_REVIEW: "Host performs optional read-only deep analysis for the fixed escalation reason.",
-        OrchestrationStep.TERRA_SYNTHESIS: "Host performs final synthesis and validates the QA result.",
+        OrchestrationStep.TRIAGE: "Host performs triage and submits the selected review bundle or profile.",
+        OrchestrationStep.PRIMARY_REVIEW: "Host performs primary review with the selected ordered profiles.",
+        OrchestrationStep.DEEP_REVIEW: "Host performs optional read-only deep analysis for the fixed escalation reason.",
+        OrchestrationStep.SYNTHESIS: "Host performs final synthesis and validates the QA result.",
         OrchestrationStep.AWAITING_HOST_OUTCOME: "Host records the final QA outcome.",
     }
 )
@@ -356,11 +366,11 @@ class QaOrchestrator:
                 run_id=f"qar-{uuid4().hex}",
                 task_type=validated_task_type,
                 status=OrchestrationStatus.ACTIVE,
-                current_step=OrchestrationStep.LUNA_TRIAGE,
+                current_step=OrchestrationStep.TRIAGE,
                 allowed_profiles=list(ReviewAgent),
                 allowed_bundles=list(REVIEW_BUNDLES),
-                model_policy=self._model_policies[OrchestrationStep.LUNA_TRIAGE],
-                next_action=_NEXT_ACTIONS[OrchestrationStep.LUNA_TRIAGE],
+                model_policy=self._model_policies[OrchestrationStep.TRIAGE],
+                next_action=_NEXT_ACTIONS[OrchestrationStep.TRIAGE],
                 expires_at=now + timedelta(seconds=self._ttl_seconds),
             )
             self._sessions[session.run_id] = session
@@ -507,7 +517,7 @@ class QaOrchestrator:
         session: QaOrchestrationSession,
         request: AdvanceQaOrchestrationRequest,
     ) -> QaOrchestrationSession:
-        if session.current_step is OrchestrationStep.LUNA_TRIAGE:
+        if session.current_step is OrchestrationStep.TRIAGE:
             if request.selected_bundle is not None:
                 selected_profiles = bundle_profiles(request.selected_bundle)
                 selected_profile = selected_profiles[0]
@@ -518,7 +528,7 @@ class QaOrchestrator:
                 raise OrchestrationError("missing profile or bundle after triage")
             return session.model_copy(
                 update={
-                    "current_step": OrchestrationStep.TERRA_PRIMARY_REVIEW,
+                    "current_step": OrchestrationStep.PRIMARY_REVIEW,
                     "selected_bundle": request.selected_bundle,
                     "selected_profile": selected_profile,
                     "review_profiles": list(selected_profiles),
@@ -526,12 +536,12 @@ class QaOrchestrator:
                     "completed_profiles": [],
                     "deep_assessment": None,
                     "deep_reason_code": None,
-                    "model_policy": self._model_policies[OrchestrationStep.TERRA_PRIMARY_REVIEW],
-                    "next_action": _NEXT_ACTIONS[OrchestrationStep.TERRA_PRIMARY_REVIEW],
+                    "model_policy": self._model_policies[OrchestrationStep.PRIMARY_REVIEW],
+                    "next_action": _NEXT_ACTIONS[OrchestrationStep.PRIMARY_REVIEW],
                 }
             )
 
-        if session.current_step is OrchestrationStep.TERRA_PRIMARY_REVIEW:
+        if session.current_step is OrchestrationStep.PRIMARY_REVIEW:
             if session.current_profile is None or not session.review_profiles:
                 raise OrchestrationError("missing current profile")
             next_profile_index = len(session.completed_profiles)
@@ -549,6 +559,14 @@ class QaOrchestrator:
                 raise OrchestrationError(
                     "risk signals must be sent with the final primary-review profile"
                 )
+            if (
+                is_last_profile
+                and request.risk_signals is None
+                and not request.needs_deep_analysis
+            ):
+                raise OrchestrationError(
+                    "risk_signals are required for the final primary-review profile"
+                )
 
             completed_profiles = [*session.completed_profiles, expected_profile]
             if not is_last_profile:
@@ -557,8 +575,8 @@ class QaOrchestrator:
                     update={
                         "current_profile": next_profile,
                         "completed_profiles": completed_profiles,
-                        "model_policy": self._model_policies[OrchestrationStep.TERRA_PRIMARY_REVIEW],
-                        "next_action": _NEXT_ACTIONS[OrchestrationStep.TERRA_PRIMARY_REVIEW],
+                        "model_policy": self._model_policies[OrchestrationStep.PRIMARY_REVIEW],
+                        "next_action": _NEXT_ACTIONS[OrchestrationStep.PRIMARY_REVIEW],
                     }
                 )
 
@@ -580,37 +598,37 @@ class QaOrchestrator:
                     raise OrchestrationError("deep analysis requires a reason code")
                 return session.model_copy(
                     update={
-                        "current_step": OrchestrationStep.SOL_DEEP_REVIEW,
+                        "current_step": OrchestrationStep.DEEP_REVIEW,
                         "current_profile": None,
                         "completed_profiles": completed_profiles,
                         "deep_assessment": assessment,
                         "deep_reason_code": reason_code,
-                        "model_policy": self._model_policies[OrchestrationStep.SOL_DEEP_REVIEW],
-                        "next_action": _NEXT_ACTIONS[OrchestrationStep.SOL_DEEP_REVIEW],
+                        "model_policy": self._model_policies[OrchestrationStep.DEEP_REVIEW],
+                        "next_action": _NEXT_ACTIONS[OrchestrationStep.DEEP_REVIEW],
                     }
                 )
             return session.model_copy(
                 update={
-                    "current_step": OrchestrationStep.TERRA_SYNTHESIS,
+                    "current_step": OrchestrationStep.SYNTHESIS,
                     "current_profile": None,
                     "completed_profiles": completed_profiles,
                     "deep_assessment": assessment,
                     "deep_reason_code": None,
-                    "model_policy": self._model_policies[OrchestrationStep.TERRA_SYNTHESIS],
-                    "next_action": _NEXT_ACTIONS[OrchestrationStep.TERRA_SYNTHESIS],
+                    "model_policy": self._model_policies[OrchestrationStep.SYNTHESIS],
+                    "next_action": _NEXT_ACTIONS[OrchestrationStep.SYNTHESIS],
                 }
             )
 
-        if session.current_step is OrchestrationStep.SOL_DEEP_REVIEW:
+        if session.current_step is OrchestrationStep.DEEP_REVIEW:
             return session.model_copy(
                 update={
-                    "current_step": OrchestrationStep.TERRA_SYNTHESIS,
-                    "model_policy": self._model_policies[OrchestrationStep.TERRA_SYNTHESIS],
-                    "next_action": _NEXT_ACTIONS[OrchestrationStep.TERRA_SYNTHESIS],
+                    "current_step": OrchestrationStep.SYNTHESIS,
+                    "model_policy": self._model_policies[OrchestrationStep.SYNTHESIS],
+                    "next_action": _NEXT_ACTIONS[OrchestrationStep.SYNTHESIS],
                 }
             )
 
-        if session.current_step is OrchestrationStep.TERRA_SYNTHESIS:
+        if session.current_step is OrchestrationStep.SYNTHESIS:
             return session.model_copy(
                 update={
                     "status": OrchestrationStatus.AWAITING_HOST_OUTCOME,
