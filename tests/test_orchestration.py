@@ -23,6 +23,7 @@ def test_normal_flow_skips_sol():
     assert session.current_step is OrchestrationStep.LUNA_TRIAGE
     assert session.model_policy.model.value == "gpt-6-luna"
     assert session.model_policy.reasoning == "max"
+    assert session.next_action == "Host performs triage and submits the selected review bundle or profile."
 
     session = orchestrator.advance(
         run_id=session.run_id,
@@ -32,6 +33,7 @@ def test_normal_flow_skips_sol():
     )
     assert session.current_step is OrchestrationStep.TERRA_PRIMARY_REVIEW
     assert session.model_policy.reasoning == "medium"
+    assert session.next_action == "Host performs primary review with the selected ordered profiles."
 
     session = orchestrator.advance(
         run_id=session.run_id,
@@ -41,6 +43,7 @@ def test_normal_flow_skips_sol():
         needs_deep_analysis=False,
     )
     assert session.current_step is OrchestrationStep.TERRA_SYNTHESIS
+    assert session.next_action == "Host performs final synthesis and validates the QA result."
 
     session = orchestrator.advance(
         run_id=session.run_id,
@@ -50,6 +53,7 @@ def test_normal_flow_skips_sol():
     assert session.status is OrchestrationStatus.AWAITING_HOST_OUTCOME
     assert session.current_step is OrchestrationStep.AWAITING_HOST_OUTCOME
     assert session.model_policy is None
+    assert session.next_action == "Host records the final QA outcome."
 
 
 def test_final_host_outcome_completes_session_and_is_idempotent():
@@ -163,6 +167,9 @@ def test_deep_flow_uses_sol_then_returns_to_sol_synthesis():
     assert session.current_step is OrchestrationStep.SOL_DEEP_REVIEW
     assert session.model_policy.model.value == "gpt-6-sol"
     assert session.model_policy.reasoning == "high"
+    assert session.next_action == (
+        "Host performs optional read-only deep analysis for the fixed escalation reason."
+    )
 
     session = orchestrator.advance(
         run_id=session.run_id,
@@ -170,6 +177,7 @@ def test_deep_flow_uses_sol_then_returns_to_sol_synthesis():
         status="completed",
     )
     assert session.current_step is OrchestrationStep.TERRA_SYNTHESIS
+    assert session.next_action == "Host performs final synthesis and validates the QA result."
 
 
 def test_structured_signals_select_sol_and_expose_the_reason():

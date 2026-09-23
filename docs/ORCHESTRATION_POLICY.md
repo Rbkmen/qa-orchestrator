@@ -29,8 +29,8 @@ provider-specific parameter is omitted. `high` remains the default
 recommendation for deep escalation when the selected model supports it. The
 selected values are returned in each active session's `model_policy`; the
 orchestrator never calls the models and never stores API keys. The default
-remains OpenAI/Codex with `gpt-6-luna` for triage and `gpt-6-sol` for primary
-review, deep review, and synthesis.
+remains OpenAI/Codex. Model IDs and reasoning are configured independently for
+each stage and returned in the session's `model_policy`.
 
 | Stage | Selected model | Reasoning / effort | Responsibility |
 |---|---|---|---|
@@ -53,9 +53,9 @@ The orchestrator returns only the next policy and transition constraints. Every 
 Allowed transitions:
 
 ```text
-Luna triage → Sol profile[1] → ... → Sol profile[N]
-                                      ↘ Sol deep review ↗
-                                         Sol synthesis → awaiting host outcome
+Triage → Primary review[1] → ... → Primary review[N]
+                                      ↘ Deep review ↗
+                                   Final synthesis → awaiting host outcome
 ```
 
 The `terra_primary_review` and `terra_synthesis` transition identifiers are retained for compatibility. They are not model selectors: use the returned `model_policy` for each stage.
@@ -65,19 +65,19 @@ Sessions are content-free and in memory, with a default TTL of `1800` seconds an
 Normal status flow for `ordinary_mr`:
 
 ```text
-Luna / Max → Ordinary MR Review
-Sol / Medium → Faraday — Evidence Investigator
-Sol / Medium → Code Reviewer
-Sol / Medium → Test Analyzer
-Sol / Medium → Synthesis
+Triage → Ordinary MR Review
+Primary review → Faraday — Evidence Investigator
+Primary review → Code Reviewer
+Primary review → Test Analyzer
+Final synthesis
 Host → Final QA outcome
 ```
 
-`Sol / High → Deep read-only review` appears only after the last Sol primary-review profile and only when the fixed signal rules match; the flow then returns to Sol synthesis.
+Deep read-only review appears only after the last primary-review profile and when the fixed signal rules match; the flow then continues to final synthesis.
 
 ### Adaptive profile selection
 
-The single-profile compatibility path is the low-token route. Luna should select one profile instead of a full bundle only when the review has one narrow concern, one repository, low risk, and a small changed surface:
+The single-profile compatibility path is the low-token route. The triage stage should select one profile instead of a full bundle only when the review has one narrow concern, one repository, low risk, and a small changed surface:
 
 | Scope | Selection |
 |---|---|
@@ -86,7 +86,7 @@ The single-profile compatibility path is the low-token route. Luna should select
 | TypeScript, async, or serialization-only change | `typescript_reviewer` |
 | React state, effects, or rendering-only change | `react_reviewer` |
 
-Use a fixed bundle when the scope is broad, crosses concerns, or needs evidence mapping plus implementation and test review. The orchestrator does not infer this from raw source; the host supplies the evidence to Luna and submits only the selected fixed profile or bundle.
+Use a fixed bundle when the scope is broad, crosses concerns, or needs evidence mapping plus implementation and test review. The orchestrator does not infer this from raw source; the host supplies evidence for triage and submits only the selected fixed profile or bundle.
 
 ### Compact review context
 
@@ -108,7 +108,7 @@ The host sends only boolean, content-free signals after the final primary-review
 }
 ```
 
-The orchestrator enters the single Sol/high branch when one of these rules matches:
+The orchestrator enters the optional deep-review branch when one of these rules matches:
 
 1. `high_risk_domain` and `evidence_uncertain` are both true;
 2. at least two complexity signals are true: `cross_system_scope`, `multiple_plausible_causes`, `non_reproducible`, or `high_blast_radius`;
@@ -120,11 +120,25 @@ The returned `deep_assessment` contains `should_escalate`, matched fixed rules, 
 
 ### Normal MR review
 
-![QA Orchestrator normal MR review](assets/qa-orchestrator-normal-review.png)
+```mermaid
+flowchart LR
+    Triage --> Evidence["Primary review: evidence investigation"]
+    Evidence --> Code["Primary review: code review"]
+    Code --> Tests["Primary review: test analysis"]
+    Tests --> Synthesis["Final synthesis"]
+    Synthesis --> Outcome["Host records QA outcome"]
+```
 
 ### Deep review escalation
 
-![QA Orchestrator deep review](assets/qa-orchestrator-deep-review.png)
+```mermaid
+flowchart LR
+    Primary["Final primary-review profile"] --> Signals{"Fixed escalation rule matches?"}
+    Signals -- No --> Synthesis["Final synthesis"]
+    Signals -- Yes --> Deep["Optional read-only deep review"]
+    Deep --> Synthesis
+    Synthesis --> Outcome["Host records QA outcome"]
+```
 
 ## Fixed bundles and profile names
 
@@ -175,7 +189,7 @@ New `record_qa_task_outcome` events use schema v2, assigned by the service. They
 - For a completed bundle with `N` primary-review profiles, the minimum counters are one triage call, `N` primary-review calls, one synthesis call, and `N+2` completed steps; when deep review ran, report its actual call count (at least one) and add one step.
 - `deep_escalation_recommended` and fixed `deep_escalation_reason_codes` for orchestrated tasks.
 - optional scope counters: `evidence_packet_tokens`, `merge_requests_count`, and `repositories_count`;
-- optional Sol-value counters: `deep_findings_identified`, `deep_findings_new_confirmed`, and `deep_findings_rejected`.
+- optional deep-review counters: `deep_findings_identified`, `deep_findings_new_confirmed`, and `deep_findings_rejected`.
 
 When `run_id` is present, the outcome is treated as orchestrated automatically; `orchestration_used=true` may also be sent explicitly, while an explicit false value is rejected. The opaque identifier is used only to associate the final outcome and aggregate counters with the in-memory session, is checked against the selected branch, and is not persisted in JSONL.
 

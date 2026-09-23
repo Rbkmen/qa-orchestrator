@@ -53,7 +53,7 @@ def test_orchestration_session_rejects_disabled_ownership_flags():
             task_type="ordinary_review",
             status=OrchestrationStatus.ACTIVE,
             current_step=OrchestrationStep.LUNA_TRIAGE,
-            next_action="Host runs Luna triage.",
+            next_action="Host performs triage.",
             read_only=False,
         )
 
@@ -63,7 +63,7 @@ def test_orchestration_session_rejects_disabled_ownership_flags():
             task_type="ordinary_review",
             status=OrchestrationStatus.ACTIVE,
             current_step=OrchestrationStep.LUNA_TRIAGE,
-            next_action="Host runs Luna triage.",
+            next_action="Host performs triage.",
             host_owns_decisions=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=5),
         )
@@ -104,7 +104,7 @@ def test_deep_reason_requires_fixed_reason_code():
 def test_risk_signals_are_final_terra_only_and_replace_manual_deep_request():
     signals = DeepReviewSignals(high_risk_domain=True, evidence_uncertain=True)
 
-    with pytest.raises(ValidationError, match="final Terra primary profile"):
+    with pytest.raises(ValidationError, match="final primary-review profile"):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
             completed_step=OrchestrationStep.LUNA_TRIAGE,
@@ -113,7 +113,7 @@ def test_risk_signals_are_final_terra_only_and_replace_manual_deep_request():
             risk_signals=signals,
         )
 
-    with pytest.raises(ValidationError, match="final Terra primary profile"):
+    with pytest.raises(ValidationError, match="final primary-review profile"):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
             completed_step=OrchestrationStep.TERRA_SYNTHESIS,
@@ -213,7 +213,7 @@ def test_completed_luna_accepts_one_fixed_bundle():
 
 
 def test_selection_is_rejected_after_luna():
-    with pytest.raises(ValidationError, match="only be supplied after Luna"):
+    with pytest.raises(ValidationError, match="only be supplied after triage"):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
             completed_step=OrchestrationStep.TERRA_PRIMARY_REVIEW,

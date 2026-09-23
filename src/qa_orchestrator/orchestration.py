@@ -237,17 +237,17 @@ class AdvanceQaOrchestrationRequest(BaseModel):
             and self.status == "completed"
         ):
             if (self.selected_bundle is None) == (self.selected_profile is None):
-                raise ValueError("exactly one selection is required after Luna triage")
+                raise ValueError("exactly one selection is required after triage")
         elif self.selected_bundle is not None or self.selected_profile is not None:
-            raise ValueError("selection may only be supplied after Luna")
+            raise ValueError("selection may only be supplied after triage")
 
         if self.completed_step is OrchestrationStep.TERRA_PRIMARY_REVIEW:
             if self.status == "completed" and self.completed_profile is None:
-                raise ValueError("completed_profile is required after Terra primary review")
+                raise ValueError("completed_profile is required after primary review")
             if self.status != "completed" and self.completed_profile is not None:
-                raise ValueError("completed_profile requires a completed Terra primary review")
+                raise ValueError("completed_profile requires a completed primary review")
         elif self.completed_profile is not None:
-            raise ValueError("completed_profile may only be supplied after Terra primary review")
+            raise ValueError("completed_profile may only be supplied after primary review")
 
         if self.risk_signals is not None:
             if (
@@ -255,16 +255,16 @@ class AdvanceQaOrchestrationRequest(BaseModel):
                 or self.status != "completed"
             ):
                 raise ValueError(
-                    "risk signals must be sent with the final Terra primary profile"
+                    "risk signals must be sent with the final primary-review profile"
                 )
             if self.needs_deep_analysis or self.reason_code is not None:
                 raise ValueError("risk signals cannot be combined with a manual deep request")
 
         if self.needs_deep_analysis:
             if self.completed_step is not OrchestrationStep.TERRA_PRIMARY_REVIEW:
-                raise ValueError("deep analysis can only follow Terra primary review")
+                raise ValueError("deep analysis can only follow primary review")
             if self.status != "completed":
-                raise ValueError("deep analysis requires a completed Terra primary review")
+                raise ValueError("deep analysis requires a completed primary review")
             if self.reason_code is None:
                 raise ValueError("reason_code is required for deep analysis")
         elif self.reason_code is not None:
@@ -279,10 +279,10 @@ class OrchestrationError(ValueError):
 
 _NEXT_ACTIONS = MappingProxyType(
     {
-        OrchestrationStep.LUNA_TRIAGE: "Host runs Luna triage and submits the selected review bundle or profile.",
-        OrchestrationStep.TERRA_PRIMARY_REVIEW: "Host runs Sol primary review with the selected ordered profiles.",
-        OrchestrationStep.SOL_DEEP_REVIEW: "Host runs Sol deep read-only analysis for the fixed escalation reason.",
-        OrchestrationStep.TERRA_SYNTHESIS: "Host runs Sol synthesis and validates the final QA result.",
+        OrchestrationStep.LUNA_TRIAGE: "Host performs triage and submits the selected review bundle or profile.",
+        OrchestrationStep.TERRA_PRIMARY_REVIEW: "Host performs primary review with the selected ordered profiles.",
+        OrchestrationStep.SOL_DEEP_REVIEW: "Host performs optional read-only deep analysis for the fixed escalation reason.",
+        OrchestrationStep.TERRA_SYNTHESIS: "Host performs final synthesis and validates the QA result.",
         OrchestrationStep.AWAITING_HOST_OUTCOME: "Host records the final QA outcome.",
     }
 )
@@ -515,7 +515,7 @@ class QaOrchestrator:
                 selected_profiles = (request.selected_profile,)
                 selected_profile = request.selected_profile
             else:
-                raise OrchestrationError("missing profile or bundle after Luna triage")
+                raise OrchestrationError("missing profile or bundle after triage")
             return session.model_copy(
                 update={
                     "current_step": OrchestrationStep.TERRA_PRIMARY_REVIEW,
@@ -547,7 +547,7 @@ class QaOrchestrator:
                 raise OrchestrationError("deep analysis requires the final review profile")
             if request.risk_signals is not None and not is_last_profile:
                 raise OrchestrationError(
-                    "risk signals must be sent with the final Terra primary profile"
+                    "risk signals must be sent with the final primary-review profile"
                 )
 
             completed_profiles = [*session.completed_profiles, expected_profile]

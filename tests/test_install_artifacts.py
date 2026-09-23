@@ -23,11 +23,7 @@ CLIENT_RULE_CONTRACT = {
     "state read": (r"\bget_qa_orchestration\b",),
     "content-free metrics": (r"\brecord_qa_task_outcome\b",),
     "single route selection": (r"exactly one.*(?:bundle|profile)",),
-    "Luna model": (r"gpt-6-luna",),
-    "Luna reasoning": (r"luna/max",),
-    "Sol model": (r"gpt-6-sol",),
-    "Sol primary reasoning": (r"sol/medium",),
-    "Sol deep reasoning": (r"sol/high",),
+    "model-neutral stage labels": (r"stage labels and status text model-neutral",),
     "fixed speed": (r"speed=1\.0",),
     "risk signals": (r"\brisk_signals\b",),
     "completed profile": (r"\bcompleted_profile\b",),
@@ -159,11 +155,7 @@ def test_operational_artifacts_describe_host_orchestration():
         ROOT / "docs/clients/codex.md",
         ROOT / "docs/clients/claude-code.md",
     ]
-    required_policy = (
-        "gpt-6-luna",
-        "gpt-6-sol",
-        "speed=1.0",
-    )
+    required_policy = ("model_policy", "speed=1.0")
     host_contract_artifacts = {
         ROOT / "README.md",
         ROOT / "docs/ORCHESTRATION_POLICY.md",
@@ -205,16 +197,20 @@ def test_operational_artifacts_describe_review_bundles_and_statuses():
         "autotest",
         "requirements",
         "faraday — evidence investigator",
-        "luna / max",
-        "sol / medium",
-        "sol / high",
-        "host → final qa outcome",
+        "triage",
+        "primary review",
+        "deep review",
+        "final synthesis",
+        "final qa outcome",
     )
     forbidden = (
         "faraday service",
         "faraday provider",
         "qa orchestrator calls models",
         "submit evidence to qa orchestrator",
+        "luna / max",
+        "sol / medium",
+        "sol / high",
     )
 
     for artifact in artifacts:

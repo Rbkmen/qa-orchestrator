@@ -5,12 +5,13 @@ QA Orchestrator is a small deterministic FastMCP service for host-owned QA revie
 ## How it works
 
 1. The primary host obtains authoritative evidence from the required systems and classifies the QA task.
-2. The host calls `start_qa_orchestration`. The orchestrator creates a content-free session and returns the first step from the locally selected model policy. The default is OpenAI GPT-6 Luna (`gpt-6-luna`) with `max` reasoning and GPT-6 Sol (`gpt-6-sol`) for review; run `qa-orch setup` to choose OpenAI or Anthropic and the model IDs.
+2. The host calls `start_qa_orchestration`. The orchestrator creates a content-free session and returns the first step and its configured policy. Run `qa-orch setup` to choose OpenAI or Anthropic and configure models and reasoning for each stage.
 3. The host runs each stage in its configured model environment and sends the orchestrator only a structured signal after each stage:
-   - selected triage model + configured reasoning (default `max`) — selection of one fixed review bundle or one compatibility profile;
-   - selected primary model + configured reasoning (default `medium`) — primary review of every profile in the fixed order;
-   - optional selected deep model + configured reasoning (default `high`) — one read-only deep analysis selected by fixed risk signals;
-   - selected synthesis model + configured reasoning (default `medium`) — synthesis.
+   - triage — select one fixed review bundle or one compatibility profile;
+   - primary review — review every selected profile in the fixed order;
+   - optional deep review — perform one read-only analysis when fixed risk signals match;
+   - final synthesis — consolidate the results.
+   Each stage uses the model and reasoning configured for it in the returned `model_policy`.
    Every returned model policy includes `speed=1.0`; the host must keep this value for the selected stage.
 4. The host validates findings, runtime evidence, and limitations, then calls `record_qa_task_outcome` once. For an orchestrated task it passes the same `run_id` so the orchestrator can close the session.
 
@@ -18,7 +19,7 @@ The orchestrator does not call models, choose severity or release readiness, or 
 
 ### Bundles and profile names
 
-Luna selects one fixed bundle or one compatibility profile. Sol executes bundle profiles sequentially. After every role, the host sends `completed_profile`, and the orchestrator returns `current_profile` and `completed_profiles`. Deep review or synthesis is available only after the final role. The transition identifiers `terra_primary_review` and `terra_synthesis` remain stable; choose the model from the returned `model_policy`, never from the step name.
+The triage stage selects one fixed bundle or one compatibility profile. The primary-review stage executes bundle profiles sequentially. After every role, the host sends `completed_profile`, and the orchestrator returns `current_profile` and `completed_profiles`. Deep review or synthesis is available only after the final role. The transition identifiers `terra_primary_review` and `terra_synthesis` remain stable; choose the model from the returned `model_policy`, never from the step name.
 
 | Bundle | Profile order |
 |---|---|
@@ -45,14 +46,14 @@ Faraday is only the internal display name of the `code_explorer` profile. No ext
 Ordinary MR flow with optional escalation:
 
 ```text
-Luna / Max → Ordinary MR Review
-Sol / Medium → Faraday — Evidence Investigator → Code Reviewer → Test Analyzer
-  ├─ no escalation ───────────────────────────────→ Sol / Medium Synthesis
-  └─ fixed risk signals match → Sol / High Deep Review → Sol / Medium Synthesis
+Triage → Ordinary MR Review
+Primary review → Faraday — Evidence Investigator → Code Reviewer → Test Analyzer
+  ├─ no escalation ───────────────────────────────→ Final synthesis
+  └─ fixed risk signals match → Deep review → Final synthesis
 Host → Final QA outcome
 ```
 
-With the final primary-review role, the host may send boolean `risk_signals` in the same `advance_qa_orchestration` call as the final `completed_profile`. The orchestrator inserts `Sol / High → Deep read-only review` before synthesis when one of the fixed escalation rules matches, then returns to Sol / Medium synthesis. Do not send `risk_signals` on the later synthesis transition. It returns the matched rules and fixed reason codes as `deep_assessment`; raw evidence never enters the orchestrator.
+With the final primary-review role, the host may send boolean `risk_signals` in the same `advance_qa_orchestration` call as the final `completed_profile`. When a fixed escalation rule matches, the orchestrator inserts a deep read-only review before final synthesis. Do not send `risk_signals` on the later synthesis transition. It returns the matched rules and fixed reason codes as `deep_assessment`; raw evidence never enters the orchestrator.
 
 Deep-review rules:
 
@@ -62,7 +63,7 @@ Deep-review rules:
 
 The legacy `needs_deep_analysis` + `reason_code` transition remains supported for compatibility.
 
-For low-risk, narrow reviews, Luna may select one compatibility profile instead of a bundle: `code_reviewer` for a small behavior change, `pr_test_analyzer` for a test-only change, `typescript_reviewer` for a TypeScript-only change, or `react_reviewer` for a React-only change. Broad or cross-concern reviews continue to use a fixed bundle.
+For low-risk, narrow reviews, the triage stage may select one compatibility profile instead of a bundle: `code_reviewer` for a small behavior change, `pr_test_analyzer` for a test-only change, `typescript_reviewer` for a TypeScript-only change, or `react_reviewer` for a React-only change. Broad or cross-concern reviews continue to use a fixed bundle.
 
 Keep one compact per-task Evidence Packet with stable evidence references (`E1`, `E2`, ...) and bounded finding candidates (`F-01`, `F-02`, ...). Do not repeat the full diff or raw logs in every model stage.
 
@@ -70,7 +71,7 @@ Keep one compact per-task Evidence Packet with stable evidence references (`E1`,
 
 ### Workflow and content-free stage metrics
 
-![Futuristic cyber-console diagram showing the GPT-6 Luna and Sol workflow, optional read-only deep review, and content-free v1 and v2 metrics](docs/assets/qa-orchestrator-stage-metrics-v9.png)
+![Provider-neutral workflow stages and content-free v1 and v2 metrics](docs/assets/qa-orchestrator-stage-metrics-v10.png)
 
 ## MCP interface
 
@@ -88,9 +89,9 @@ The service publishes exactly six tools:
 Bundle orchestration flow:
 
 ```text
-Luna/max → Sol/profile[1] → ... → Sol/profile[N]
-                                      ↘ optional Sol/high ↗
-                                           Sol synthesis → host outcome
+Triage → Primary review[1] → ... → Primary review[N]
+                                      ↘ optional Deep review ↗
+                                           Final synthesis → Host outcome
 ```
 
 Sessions are kept in process memory only. The default TTL is 1,800 seconds and the maximum is 100 active sessions; the shared cache is also bounded, so older terminal sessions may be evicted when capacity is needed. Repeating the final call is idempotent while its session is retained. After a restart, the host starts a new session. `read_only=true` and `host_owns_decisions=true` are part of every state.
