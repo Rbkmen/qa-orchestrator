@@ -42,12 +42,14 @@ uv run qa-orch setup
 installed dependencies, metrics-directory permissions, and the source launcher.
 It does not contact external services or create files. Use `--json` in scripts.
 
-`qa-orch setup` opens the local console wizard. It asks for the AI environment
-(`OpenAI / Codex` or `Anthropic / Claude`), then walks through
-`provider → model → reasoning/effort` for triage, primary review, deep review,
-and synthesis. The menu contains a short list of recommended model IDs and an
-option to enter another exact ID. Enter an ID supported by that user's
-account; the MCP cannot reliably expose every provider's live model catalog.
+`qa-orch setup` opens the local console wizard. First choose Russian or English
+for this setup run; the language is not saved in `model-policy.json`. Then
+choose the AI environment (`OpenAI / Codex` or `Anthropic / Claude`) and models
+for triage, primary review, deep review, and synthesis. Each stage includes a
+short explanation of its role. Choose the provider-specific reasoning/effort
+for each model; the menu contains recommended model IDs and an option to enter
+another exact ID. Enter an ID supported by that user's account; the MCP cannot
+reliably expose every provider's live model catalog.
 The wizard saves the model policy; it does not configure provider access in
 Codex or Claude Code. Make sure the selected host can use the chosen provider
 and model. It stores only these non-secret values in

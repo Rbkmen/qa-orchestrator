@@ -212,7 +212,7 @@ def test_setup_command_writes_openai_reasoning(tmp_path, monkeypatch):
 
 def test_setup_menu_can_keep_defaults_and_override_one_model(tmp_path, monkeypatch):
     monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
-    answers = iter(("1", "", "", "0", "custom-primary", "", "", "", "", ""))
+    answers = iter(("1", "1", "", "", "0", "custom-primary", "", "", "", "", ""))
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
     assert main(["setup"]) == 0
@@ -225,7 +225,7 @@ def test_setup_menu_can_keep_defaults_and_override_one_model(tmp_path, monkeypat
 
 def test_setup_menu_orders_each_model_before_its_reasoning(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
-    answers = iter(("1", "", "", "", "", "", "", "", ""))
+    answers = iter(("", "1", "", "", "", "", "", "", "", ""))
     prompts: list[str] = []
 
     def answer(prompt: str) -> str:
@@ -236,6 +236,7 @@ def test_setup_menu_orders_each_model_before_its_reasoning(tmp_path, monkeypatch
 
     assert main(["setup"]) == 0
     assert prompts == [
+        "Выбор [1]: ",
         "Номер [1]: ",
         "Выбор [3]: ",
         "Выбор [6]: ",
@@ -247,13 +248,38 @@ def test_setup_menu_orders_each_model_before_its_reasoning(tmp_path, monkeypatch
         "Выбор [3]: ",
     ]
     output = capsys.readouterr().out
+    assert "1. Русский (RU)" in output
+    assert "2. English (EN)" in output
     assert "Reasoning для глубокой проверки" in output
+    assert "Первично оценивает задачу и выбирает набор или профиль ревью." in output
+    assert "Объединяет результаты ревью в итоговый QA-вывод." in output
     assert "high" in output
+
+
+def test_setup_menu_supports_english_and_explains_workflow_stages(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+    answers = iter(("2", "1", "", "", "", "", "", "", "", ""))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert main(["setup"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Step 1/3. Choose a provider" in output
+    assert "Triage model" in output
+    assert "Initially assesses the task and selects a review bundle or profile." in output
+    assert "Primary review model" in output
+    assert "Reviews the changes using the selected review profiles." in output
+    assert "Deep review model" in output
+    assert "Provides deeper analysis for complex or escalated cases." in output
+    assert "Synthesis model" in output
+    assert "Combines review results into the final QA outcome." in output
+    policy = json.loads((tmp_path / "model-policy.json").read_text(encoding="utf-8"))
+    assert "language" not in policy
 
 
 def test_setup_menu_can_go_back_to_provider(tmp_path, monkeypatch):
     monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
-    answers = iter(("1", "b", "2", "1", "1", "1", "1", "1", "1", "1", "1"))
+    answers = iter(("1", "1", "b", "2", "1", "1", "1", "1", "1", "1", "1", "1"))
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
     assert main(["setup"]) == 0
@@ -265,7 +291,7 @@ def test_setup_menu_can_go_back_to_provider(tmp_path, monkeypatch):
 def test_setup_uses_colors_when_forced(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("FORCE_COLOR", "1")
-    answers = iter(("1", "", "", "", "", "", "", "", ""))
+    answers = iter(("1", "1", "", "", "", "", "", "", "", ""))
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
     assert main(["setup"]) == 0
@@ -297,7 +323,7 @@ def test_reload_command_reads_current_policy(tmp_path, monkeypatch, capsys):
 
 def test_setup_menu_offers_anthropic_model_ids(tmp_path, monkeypatch):
     monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
-    answers = iter(("2", "4", "3", "3", "2", "5", "1", "2", "2"))
+    answers = iter(("1", "2", "4", "3", "3", "2", "5", "1", "2", "2"))
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
     assert main(["setup"]) == 0

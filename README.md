@@ -160,11 +160,12 @@ codex mcp add qa-orchestrator -- uvx \
 Pin a release tag or commit instead of the default branch for reproducible
 team configuration.
 
-The setup wizard stores only the provider label, model IDs, and the selected
-provider-specific reasoning/effort values in the local `model-policy.json`; it
-never asks for or stores API keys. Choose a provider and model that your host
-client can use; the wizard records the policy but does not configure provider
-access. From a checkout, use `uv run qa-orch config show` and
+The setup wizard first lets you choose Russian or English for that run, then
+stores only the provider label, model IDs, and the selected provider-specific
+reasoning/effort values in the local `model-policy.json`; the language is not
+saved, and the wizard never asks for or stores API keys. Choose a provider and
+model that your host client can use; the wizard records the policy but does not
+configure provider access. From a checkout, use `uv run qa-orch config show` and
 `uv run qa-orch reload`. Without a checkout, prefix those commands with
 `uvx --from git+https://github.com/Rbkmen/qa-orchestrator.git`. Colors in the
 wizard distinguish providers, model IDs, and reasoning values; set `NO_COLOR=1`
