@@ -5,15 +5,9 @@ from pathlib import Path
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    metrics_retention_days: int = 30
-    metrics_max_events: int = 10_000
     orchestration_session_ttl_seconds: int = 1_800
     orchestration_max_sessions: int = 100
     data_dir: Path = Path.home() / ".qa-orchestrator"
-
-    @property
-    def metrics_path(self) -> Path:
-        return self.data_dir / "metrics.jsonl"
 
     @property
     def model_policy_path(self) -> Path:
@@ -25,8 +19,6 @@ class Settings:
         )
 
     def __post_init__(self) -> None:
-        if self.metrics_retention_days < 1 or self.metrics_max_events < 1:
-            raise ValueError("metrics retention must be positive")
         if self.orchestration_session_ttl_seconds < 1 or self.orchestration_max_sessions < 1:
             raise ValueError("orchestration limits must be positive")
 
@@ -35,12 +27,6 @@ class Settings:
         defaults = cls()
         data_dir = Path(environ.get("QA_ORCHESTRATOR_DATA_DIR", str(defaults.data_dir)))
         return cls(
-            metrics_retention_days=int(
-                environ.get("QA_ORCHESTRATOR_METRICS_RETENTION_DAYS", str(defaults.metrics_retention_days))
-            ),
-            metrics_max_events=int(
-                environ.get("QA_ORCHESTRATOR_METRICS_MAX_EVENTS", str(defaults.metrics_max_events))
-            ),
             orchestration_session_ttl_seconds=int(
                 environ.get(
                     "QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS",

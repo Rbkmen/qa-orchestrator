@@ -1,7 +1,7 @@
 [project]
 name = "qa-orchestrator"
 version = "0.1.0"
-description = "Deterministic QA review routing and content-free metrics for MCP host agents"
+description = "Deterministic QA review routing and orchestration for MCP host agents"
 readme = "README.md"
 requires-python = ">=3.12"
 classifiers = [
@@ -19,7 +19,6 @@ dependencies = [
 [project.scripts]
 qa-orchestrator = "qa_orchestrator.cli:main"
 qa-orch = "qa_orchestrator.cli:main"
-qa-orchestrator-report = "qa_orchestrator.report:main"
 qa-orchestrator-doctor = "qa_orchestrator.doctor:main"
 
 [project.urls]

@@ -1,6 +1,6 @@
 # Install and configure QA Orchestrator
 
-QA Orchestrator is a local MCP server that provides fixed QA routing, bounded orchestration state, and aggregate task distribution. It runs over MCP STDIO when the host client starts it; no separate background service, database, or API key is required by the server.
+QA Orchestrator is a local MCP server that provides fixed QA routing and bounded orchestration state. It runs over MCP STDIO when the host client starts it; no separate background service, database, or API key is required by the server.
 
 The host client—not the orchestrator—runs the model stages, gathers evidence, and makes the final QA decision. Model access follows the host user's account and permissions.
 
@@ -13,8 +13,8 @@ The host client—not the orchestrator—runs the model stages, gathers evidence
 - Codex CLI/Desktop or Claude Code.
 
 The current release supports native macOS and Linux. Native Windows is not
-supported because the source launcher and metrics locking use POSIX facilities;
-Windows users can run the server inside WSL2.
+supported because the source launcher uses POSIX facilities; Windows users can
+run the server inside WSL2.
 
 Before continuing, verify the local prerequisites:
 
@@ -39,7 +39,7 @@ uv run qa-orch setup
 `uv sync` creates the project environment, installs the server and its dependencies, and provides the `qa-orchestrator` command in `.venv`. The repository launcher uses that environment automatically.
 
 `qa-orchestrator-doctor` performs read-only local checks for the Python version,
-installed dependencies, metrics-directory permissions, and the source launcher.
+installed dependencies, model policy, and the source launcher.
 It does not contact external services or create files. Use `--json` in scripts.
 
 `qa-orch setup` opens the local console wizard. First choose Russian or English
@@ -163,11 +163,12 @@ shared automatically between machines.
 Registering the MCP server makes its tools available; persistent instructions tell the host when and how to use them. Add this rule to the applicable Codex `AGENTS.md` or persistent instructions, replacing the placeholder with the path to that user's checkout:
 
 ```text
-For implementation-aware QA reviews, read and follow the canonical QA Orchestrator instructions at:
+For implementation-aware QA reviews, read and follow the canonical QA
+Orchestrator instructions at:
 <path-to-qa-orchestrator>/client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md
 ```
 
-If the target `AGENTS.md` already exists, merge the rule instead of replacing the file. The linked file is the canonical source for orchestration stages, risk escalation, and task-distribution recording; keep workspace-specific routing and output requirements in the workspace rules.
+If the target `AGENTS.md` already exists, merge the rule instead of replacing the file. The linked file is the canonical source for orchestration mechanics; keep workspace-specific routing and output requirements in the workspace rules.
 
 If you installed with `uvx` and do not have a checkout, use the canonical
 [Codex host instructions on GitHub](https://github.com/Rbkmen/qa-orchestrator/blob/main/client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md)
@@ -180,14 +181,14 @@ For Anthropic/Claude Code, use the [Claude Code setup guide](clients/claude-code
 ## 4. Verify the connection
 
 1. In Codex CLI, run `codex mcp list`; in Claude Code, run `claude mcp get qa-orchestrator` or `/mcp`. In the ChatGPT desktop app, check **Settings → MCP servers** or use `/mcp`.
-2. Restart the client if needed, then confirm that all six tools are available: `prepare_review_route`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `record_qa_task_outcome`, and `get_metrics_report`.
+2. Restart the client if needed, then confirm that all five tools are available: `prepare_review_route`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, and `finish_qa_orchestration`.
 3. For a read-only smoke check, call `prepare_review_route` with `agent_profile="code_explorer"`. It should return the Faraday evidence-investigator route with `read_only=true` and `host_owns_decisions=true`.
 
 The server is started on demand by the MCP client. Do not start a second background server manually.
 
 ## Data and privacy
 
-Evidence, source code, logs, prompts, model responses, and final QA decisions stay with the host agent. Active orchestration state is bounded and held in process memory. Distribution records retain only task type and timestamp as task data and are written locally to `$HOME/.qa-orchestrator/metrics.jsonl` by default; set `QA_ORCHESTRATOR_DATA_DIR` to use another directory. On startup of the MCP server or report command, existing supported outcome records are reduced to those two data fields; unrelated fields and malformed or unsupported records are discarded. If sanitization fails, the MCP server will not start and the report command will not produce a report; run `qa-orchestrator-doctor` to check local data-directory permissions. Local non-orchestrated records are not deduplicated; counts represent successful record calls, not verified unique tasks.
+Evidence, source code, logs, prompts, model responses, and final QA decisions stay with the host agent. Active orchestration state is bounded and held in process memory. The orchestrator does not persist QA task history, outcomes, or statistics. The only local file it uses is the model policy at `$HOME/.qa-orchestrator/model-policy.json` by default; set `QA_ORCHESTRATOR_DATA_DIR` or `QA_ORCHESTRATOR_MODEL_POLICY_PATH` to change that location. The model policy contains provider, model IDs, and reasoning/effort settings, not credentials or task data.
 
 ## Updating
 

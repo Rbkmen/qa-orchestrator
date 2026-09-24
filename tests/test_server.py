@@ -2,7 +2,6 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
-import qa_orchestrator.server as server_module
 from qa_orchestrator.contracts import ReviewBundle
 from qa_orchestrator.review_profiles import REVIEW_BUNDLES
 from qa_orchestrator.server import build_server
@@ -10,7 +9,7 @@ from qa_orchestrator.service import OrchestratorService
 
 
 @pytest.mark.asyncio
-async def test_server_exposes_six_tools(tmp_path):
+async def test_server_exposes_five_tools(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
@@ -18,8 +17,7 @@ async def test_server_exposes_six_tools(tmp_path):
 
     assert set(tools) == {
         "prepare_review_route",
-        "record_qa_task_outcome",
-        "get_metrics_report",
+        "finish_qa_orchestration",
         "start_qa_orchestration",
         "advance_qa_orchestration",
         "get_qa_orchestration",
@@ -53,7 +51,6 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     for name in (
         "prepare_review_route",
         "get_qa_orchestration",
-        "get_metrics_report",
     ):
         annotations = tools[name].annotations
         assert annotations is not None
@@ -64,7 +61,7 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     for name in (
         "start_qa_orchestration",
         "advance_qa_orchestration",
-        "record_qa_task_outcome",
+        "finish_qa_orchestration",
     ):
         annotations = tools[name].annotations
         assert annotations is not None
@@ -73,22 +70,10 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
 
     run_id_schema = tools["get_qa_orchestration"].inputSchema["properties"]["run_id"]
     assert run_id_schema["pattern"] == r"^qar-[0-9a-f]{32}$"
-    assert (
-        tools["get_metrics_report"].inputSchema["properties"]["days"]["minimum"] == 1
-    )
-    assert set(tools["record_qa_task_outcome"].inputSchema["properties"]) == {
-        "task_type",
+    assert set(tools["finish_qa_orchestration"].inputSchema["properties"]) == {
         "outcome",
         "run_id",
     }
-
-    report_schema = tools["get_metrics_report"].outputSchema
-    assert set(report_schema["properties"]) == {
-        "period_days",
-        "total_tasks",
-        "by_task_type",
-    }
-    assert report_schema["additionalProperties"] is False
 
 
 @pytest.mark.asyncio
@@ -166,22 +151,6 @@ async def test_orchestration_tools_advance_and_get_structured_state(tmp_path):
     assert advanced.structured_content["current_step"] == "primary_review"
     assert current.structured_content["current_step"] == "primary_review"
     assert current.structured_content["selected_profile"] == "code_reviewer"
-
-
-def test_server_refuses_to_start_when_existing_data_cannot_be_sanitized(monkeypatch):
-    monkeypatch.setattr(
-        server_module.JsonEventSink,
-        "sanitize_existing_records",
-        lambda _self: False,
-    )
-    monkeypatch.setattr(
-        server_module,
-        "build_server",
-        lambda _service: pytest.fail("server must not start with unsanitized data"),
-    )
-
-    with pytest.raises(SystemExit, match="could not be sanitized"):
-        server_module.main()
 
 
 @pytest.mark.asyncio
@@ -299,9 +268,8 @@ async def test_orchestration_tools_complete_each_bundle(tmp_path, bundle: Review
             },
         )
         outcome = await client.call_tool(
-            "record_qa_task_outcome",
+            "finish_qa_orchestration",
             {
-                "task_type": "ordinary_review",
                 "outcome": "completed",
                 "run_id": run_id,
             },
@@ -309,7 +277,8 @@ async def test_orchestration_tools_complete_each_bundle(tmp_path, bundle: Review
         final = await client.call_tool("get_qa_orchestration", {"run_id": run_id})
 
     assert synthesis.structured_content["status"] == "awaiting_host_outcome"
-    assert outcome.structured_content == {"status": "recorded"}
+    assert outcome.structured_content["status"] == "completed"
+    assert "outcome_recorded" not in outcome.structured_content
     assert final.structured_content["status"] == "completed"
 
 
@@ -402,7 +371,7 @@ async def test_orchestration_tool_rejects_selection_after_luna_and_custom_order(
 
 
 @pytest.mark.asyncio
-async def test_server_records_orchestration_metrics(tmp_path):
+async def test_server_finishes_orchestration_without_persisting_task_data(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
@@ -439,53 +408,16 @@ async def test_server_records_orchestration_metrics(tmp_path):
             },
         )
         await client.call_tool(
-            "record_qa_task_outcome",
+            "finish_qa_orchestration",
             {
-                "task_type": "ordinary_review",
                 "outcome": "completed",
                 "run_id": run_id,
             },
         )
-        report = await client.call_tool("get_metrics_report", {"days": 7})
         current = await client.call_tool("get_qa_orchestration", {"run_id": run_id})
 
-    assert report.structured_content == {
-        "period_days": 7,
-        "total_tasks": 1,
-        "by_task_type": {"ordinary_review": 1},
-    }
     assert current.structured_content["status"] == "completed"
-
-
-@pytest.mark.asyncio
-async def test_task_outcome_and_report_only_expose_task_distribution(tmp_path):
-    service = OrchestratorService.from_settings(data_dir=tmp_path)
-
-    async with Client(build_server(service)) as client:
-        outcome = await client.call_tool(
-            "record_qa_task_outcome",
-            {
-                "task_type": "ordinary_review",
-                "outcome": "completed",
-            },
-        )
-        report = await client.call_tool("get_metrics_report", {"days": 7})
-
-    assert outcome.structured_content == {"status": "recorded"}
-    assert report.structured_content == {
-        "period_days": 7,
-        "total_tasks": 1,
-        "by_task_type": {"ordinary_review": 1},
-    }
-
-
-@pytest.mark.asyncio
-async def test_metrics_report_rejects_non_positive_days(tmp_path):
-    service = OrchestratorService.from_settings(data_dir=tmp_path)
-
-    async with Client(build_server(service)) as client:
-        with pytest.raises(ToolError, match="days must be positive"):
-            await client.call_tool("get_metrics_report", {"days": 0})
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.asyncio

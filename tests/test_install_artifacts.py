@@ -21,8 +21,7 @@ CLIENT_RULE_CONTRACT = {
     "orchestration entry": (r"\bstart_qa_orchestration\b",),
     "route preparation": (r"\bprepare_review_route\b",),
     "state read": (r"\bget_qa_orchestration\b",),
-    "task distribution recording": (r"\brecord_qa_task_outcome\b",),
-    "task distribution report": (r"\bget_metrics_report\b",),
+    "orchestration finalization": (r"\bfinish_qa_orchestration\b",),
     "single route selection": (r"exactly one.*(?:bundle|profile)",),
     "model-neutral stage labels": (r"stage labels and status text model-neutral",),
     "user-controlled execution speed": (
@@ -43,8 +42,7 @@ CLIENT_RULE_CONTRACT = {
         r"does not accept evidence, prompts, or model outputs",
     ),
     "MCP failure fallback": (r"MCP is unavailable",),
-    "terminal task status": (r"final (?:reported )?status",),
-    "no intermediate metrics": (r"intermediate continuations",),
+    "terminal task outcome": (r"final (?:reported )?(?:status|outcome)",),
     "run-id consistency": (r"run_id",),
 }
 
@@ -61,11 +59,9 @@ def test_launcher_is_executable_valid_shell():
     assert os.access(LAUNCHER, os.X_OK)
 
 
-def test_launcher_forwards_metrics_overrides():
+def test_launcher_forwards_supported_overrides():
     content = LAUNCHER.read_text(encoding="utf-8")
 
-    assert 'QA_ORCHESTRATOR_METRICS_RETENTION_DAYS="${QA_ORCHESTRATOR_METRICS_RETENTION_DAYS:-30}"' in content
-    assert 'QA_ORCHESTRATOR_METRICS_MAX_EVENTS="${QA_ORCHESTRATOR_METRICS_MAX_EVENTS:-10000}"' in content
     assert 'QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS="${QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS:-1800}"' in content
     assert 'QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS="${QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS:-100}"' in content
     assert 'QA_ORCHESTRATOR_MODEL_POLICY_PATH="$orchestrator_model_policy_path"' in content
@@ -85,7 +81,7 @@ def test_client_rule_templates_preserve_orchestration_contract():
         ]
 
         assert not missing, f"{artifact.relative_to(ROOT)} is missing: {', '.join(missing)}"
-        assert "task_type" in text, artifact.relative_to(ROOT)
+        assert "finish_qa_orchestration" in text, artifact.relative_to(ROOT)
 
 
 def test_ci_uses_immutable_action_refs_and_builds_wheel():
@@ -233,8 +229,7 @@ async def test_launcher_exposes_six_tools(monkeypatch, tmp_path):
 
     assert names == {
         "prepare_review_route",
-        "record_qa_task_outcome",
-        "get_metrics_report",
+        "finish_qa_orchestration",
         "start_qa_orchestration",
         "advance_qa_orchestration",
         "get_qa_orchestration",

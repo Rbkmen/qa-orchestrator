@@ -1,6 +1,6 @@
 # QA Orchestrator
 
-QA Orchestrator is a small deterministic FastMCP service for host-owned QA reviews and aggregate task distribution. It keeps orchestration state bounded; evidence, source code, logs, prompts, model responses, and final decisions remain with the primary host agent.
+QA Orchestrator is a small deterministic FastMCP service for host-owned QA reviews. It keeps orchestration state bounded; evidence, source code, logs, prompts, model responses, and final decisions remain with the primary host agent.
 
 ## How it works
 
@@ -13,9 +13,13 @@ QA Orchestrator is a small deterministic FastMCP service for host-owned QA revie
    - final synthesis — consolidate the results.
    Each stage uses the model and reasoning configured for it in the returned `model_policy`.
    The returned policy selects the provider, model, and reasoning for each stage. Execution speed and latency preferences remain controlled by the user's host/provider settings; the orchestrator does not set or override them.
-4. The host validates findings, runtime evidence, and limitations, then calls `record_qa_task_outcome` once. For an orchestrated task it passes the same `run_id` so the orchestrator can close the session.
+4. The host validates findings, runtime evidence, and limitations. For an orchestrated task, it calls `finish_qa_orchestration` with the same `run_id` and its final outcome.
 
 The orchestrator does not call models, choose severity or release readiness, or perform external writes.
+
+## QA Orchestrator at a glance
+
+![Detailed host-led QA Orchestrator workflow, including review stages, optional escalation, and ownership boundaries.](docs/assets/qa-orchestrator-workflow.png)
 
 ### Bundles and profile names
 
@@ -67,15 +71,9 @@ For low-risk, narrow reviews, the triage stage may select one compatibility prof
 
 Keep one compact per-task Evidence Packet with stable evidence references (`E1`, `E2`, ...) and bounded finding candidates (`F-01`, `F-02`, ...). Do not repeat the full diff or raw logs in every model stage.
 
-## QA Orchestrator at a glance
-
-### Workflow and task distribution
-
-![Current QA Orchestrator workflow and task-distribution report, showing task type and timestamp as the only retained task data.](docs/assets/qa-orchestrator-workflow-and-distribution.png)
-
 ## MCP interface
 
-The service publishes exactly six tools:
+The service publishes exactly five tools:
 
 | Tool | Purpose |
 |---|---|
@@ -83,8 +81,7 @@ The service publishes exactly six tools:
 | `start_qa_orchestration(task_type)` | Create a host-owned orchestration session |
 | `advance_qa_orchestration(...)` | Make one structured transition between stages |
 | `get_qa_orchestration(run_id)` | Read the current content-free state |
-| `record_qa_task_outcome(...)` | Record a task category and finalize an optional orchestration session |
-| `get_metrics_report(days)` | Return task counts by category for a positive time range |
+| `finish_qa_orchestration(run_id, outcome)` | Finalize a host-owned orchestration session |
 
 Bundle orchestration flow:
 
@@ -96,7 +93,7 @@ Triage → Primary review[1] → ... → Primary review[N]
 
 Sessions are kept in process memory only. The default TTL is 1,800 seconds and the maximum is 100 active sessions; the shared cache is also bounded, so older terminal sessions may be evicted when capacity is needed. Repeating the final call is idempotent while its session is retained. After a restart, the host starts a new session. `read_only=true` and `host_owns_decisions=true` are part of every state.
 
-After synthesis, the session waits for the final host outcome. Call `record_qa_task_outcome` with `task_type`, `outcome`, and the session `run_id`; the outcome finalizes the session but is not saved in task-distribution data. For a session stopped at an intermediate stage, first pass `partial` or `blocked` to `advance_qa_orchestration`. Repeating the exact same call for the same `run_id` is idempotent; a changed outcome is rejected as a conflict. For a regular task without orchestration, omit `run_id`. Such records are not deduplicated: a retry after an uncertain response can inflate counts, which represent successful record calls rather than verified unique tasks.
+After synthesis, the session waits for the host's final outcome. Call `finish_qa_orchestration` with the session `run_id` and `completed`, `partial`, or `blocked`. For an early stop, first pass `partial` or `blocked` to `advance_qa_orchestration`, then finish the session with the same outcome. Repeating the same finalization is idempotent; a conflicting outcome is rejected. Tasks that do not use orchestration need no finalization call. The service does not store or report task statistics.
 
 ### Review profiles
 
@@ -114,7 +111,7 @@ The primary host is responsible for:
 - confirmed findings, severity, release/readiness judgment, and the final QA response;
 - file changes and all external writes.
 
-QA Orchestrator is responsible only for fixed routing, state transitions, read-only constraints, and aggregate task distribution. `advance_qa_orchestration` must not receive an Evidence Packet, prompt, model output, source text, logs, paths, or an arbitrary reason.
+QA Orchestrator is responsible only for fixed routing, state transitions, read-only constraints, and bounded session finalization. `advance_qa_orchestration` must not receive an Evidence Packet, prompt, model output, source text, logs, paths, or an arbitrary reason.
 
 ## Requirements
 
@@ -124,9 +121,8 @@ QA Orchestrator is responsible only for fixed routing, state transitions, read-o
 - a POSIX system: macOS or Linux.
 
 Native Windows is not supported by the current release because the source
-launcher and metrics locking use POSIX facilities. Windows users can run the
-server inside WSL2; native Windows support requires a separate compatibility
-change.
+launcher uses POSIX facilities. Windows users can run the server inside WSL2;
+native Windows support requires a separate compatibility change.
 
 ## Installation
 
@@ -186,29 +182,20 @@ The two supported host integrations are described in the [client guides](docs/cl
 
 ## Configuration
 
-By default, task-distribution records are written to `$HOME/.qa-orchestrator/metrics.jsonl`.
-
 | Variable | Default |
 |---|---:|
 | `QA_ORCHESTRATOR_DATA_DIR` | `$HOME/.qa-orchestrator` |
-| `QA_ORCHESTRATOR_METRICS_RETENTION_DAYS` | `30` |
-| `QA_ORCHESTRATOR_METRICS_MAX_EVENTS` | `10000` |
 | `QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS` | `1800` |
 | `QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS` | `100` |
 | `QA_ORCHESTRATOR_MODEL_POLICY_PATH` | `$HOME/.qa-orchestrator/model-policy.json` |
 
-## Task distribution
+## Finalize an orchestration
 
-Call `record_qa_task_outcome` once when the final QA status is known, with `task_type` and `outcome`. For orchestrated work, also pass the original `run_id`; for regular work, omit it. Only task type and timestamp are saved. The outcome finalizes an orchestration session but is not retained in the distribution data.
-
-The report contains only `period_days`, `total_tasks`, and `by_task_type`. It is available through MCP or locally:
-
-On startup, existing supported outcome events are reduced to their timestamp and task type; other fields are discarded. New JSONL entries contain no issue keys, paths, source text, code, logs, prompts, or model responses.
-
-```bash
-uv run qa-orchestrator-report
-uv run qa-orchestrator-report --days 30
-```
+After synthesis, pass the host-owned final outcome and the original `run_id` to
+`finish_qa_orchestration`. For an early stop, pass the same `partial` or
+`blocked` outcome that ended the `advance_qa_orchestration` transition. The
+session remains in process memory only and expires according to the configured
+TTL; no task history or statistics are written to disk.
 
 ## Clients and rules
 

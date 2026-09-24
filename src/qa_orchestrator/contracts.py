@@ -42,7 +42,3 @@ class ReviewRoute(BaseModel):
     escalation_signals: list[str] = Field(default_factory=list)
     read_only: Literal[True] = True
     host_owns_decisions: Literal[True] = True
-
-
-class QaTaskOutcomeReceipt(BaseModel):
-    status: Literal["recorded", "unavailable"]

@@ -14,6 +14,6 @@ strictly necessary to reproduce the issue.
 ## Data handling
 
 QA Orchestrator is designed to keep evidence, prompts, model responses, and
-final QA decisions in the host agent. Its local metrics file contains only
-content-free aggregate fields. Review the [installation guide](docs/INSTALLATION.md)
-before changing the metrics directory or sharing diagnostic output.
+final QA decisions in the host agent. It does not persist task history,
+outcomes, or statistics. Review the [installation guide](docs/INSTALLATION.md)
+before sharing diagnostic output.

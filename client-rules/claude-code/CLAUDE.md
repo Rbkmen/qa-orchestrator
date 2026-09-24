@@ -4,9 +4,9 @@ The generic QA Orchestrator instructions are canonical for orchestration mechani
 
 When the `qa-orchestrator` MCP server is available, use it as a deterministic QA-orchestration helper.
 
-- If the MCP is unavailable, a required call fails, or the session expires,
+  - If the MCP is unavailable, a required call fails, or the session expires,
   continue with the selected workspace and repository rules, mark orchestration
-  and task-distribution recording as unavailable, and never emulate or claim an orchestration call.
+  as unavailable, and never emulate or claim an orchestration call.
 - A partial result caused by missing orchestration input remains a valid
   host-owned QA result; report the missing boundary.
 - Obtain evidence, run model stages, analyze the task, produce findings, make the final QA decision, and perform any changes or external writes in Claude Code.
@@ -17,15 +17,12 @@ When the `qa-orchestrator` MCP server is available, use it as a deterministic QA
 - For low-risk, narrow one-repository work, select one compatibility profile instead of a bundle; keep a compact Evidence Packet with stable `E1` references and bounded `F-01` candidates so roles do not repeat the full diff or logs.
 - Use `get_qa_orchestration` to read state and the next action. Do not pass evidence, prompts, or model outputs to the orchestrator.
 - Use the route only as a focus/checklist. Independently verify the diff, callers, contracts, runtime evidence, and unverified gaps.
-- When the current QA task reaches its final reported status (`completed`,
-  `partial`, or `blocked`), call `record_qa_task_outcome` exactly once with
-  only `task_type`, `outcome`, and the opaque `run_id` when orchestration was
-  used. Do not record intermediate continuations; if the task resumes after a
-  partial result, record only the final status. The outcome finalizes an
-  orchestrated session but is not saved in distribution data. Only task type
-  and timestamp are stored; findings, model settings, stage calls, and source
-  calls are not collected.
-- Use `get_metrics_report` only for the aggregate task distribution: total
-  tasks and counts by task type.
+- After synthesis, call `finish_qa_orchestration` once with the session
+  `run_id` and the host-owned final outcome (`completed`, `partial`, or
+  `blocked`). For an early stop, pass the same `partial` or `blocked` outcome
+  already sent to `advance_qa_orchestration`.
+- The call finalizes only the in-memory session. Do not call it for a task that
+  was not orchestrated. Repeating the same outcome is idempotent; a conflicting
+  final outcome is rejected.
 - For implementation-aware reviews, use Findings, Changes, Manual Test Plan, and Open Questions / Could Not Verify; follow the workspace flow when it defines another output shape for requirements or planning.
 - Do not add persistent QA memory, a source cache, or hidden tool calls.

@@ -1,6 +1,6 @@
 # Contributing to QA Orchestrator
 
-QA Orchestrator must remain a small deterministic service: fixed routing, host-owned orchestration, and aggregate task distribution.
+QA Orchestrator must remain a small deterministic service: fixed routing and host-owned orchestration.
 
 ## Development
 
@@ -30,19 +30,17 @@ The full test suite must not require network access, credentials, or a separate 
 - `start_qa_orchestration`, `advance_qa_orchestration`, and `get_qa_orchestration` manage content-free state only.
 - The orchestrator does not call models, create threads or agents, write user-requested files, or perform writes to external systems.
 - The model policy is configured locally with `qa-orch setup`; the default provider is OpenAI/Codex. Configure model IDs and provider-specific reasoning/effort independently of the model-neutral stage names. Deep review defaults to `high` when the selected model supports it. Execution speed and latency preferences remain controlled by the user's host/provider settings.
-- Task-distribution records contain only the task category and timestamp; never store task content such as issue keys, paths, source, logs, prompts, or model responses.
 - Do not add persistent QA memory, a source cache, a learning layer, or hidden external calls.
 
 ## Changing the MCP contract
 
-The public surface must remain limited to six tools:
+The public surface must remain limited to five tools:
 
 1. `prepare_review_route` — profile metadata;
 2. `start_qa_orchestration` — create a session;
 3. `advance_qa_orchestration` — validated transition;
 4. `get_qa_orchestration` — state and next action;
-5. `record_qa_task_outcome` — record task category and finalize an optional session;
-6. `get_metrics_report` — aggregate task distribution by category.
+5. `finish_qa_orchestration` — finalize the host-owned outcome for a session.
 
 When changing the contract, update `contracts.py`, `orchestration.py`, `service.py`, `server.py`, tests, the README, the routing policy, and client rules. For every new branch, add checks for input validation, illegal transitions, expiry/limits, and the absence of task content.
 
@@ -54,7 +52,7 @@ uv run ruff check .
 git diff --check
 ```
 
-Tests must cover observable behavior: the exact MCP tool set, every profile, the model policy, state transitions, read-only flags, task-category validation, retention and migration, and the absence of extra fields in distribution JSONL.
+Tests must cover observable behavior: the exact MCP tool set, every profile, the model policy, state transitions, read-only flags, session finalization, and the absence of task-data persistence.
 
 ## Documentation and client rules
 

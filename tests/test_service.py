@@ -1,9 +1,6 @@
-import json
-
 import pytest
 
 from qa_orchestrator.contracts import ReviewAgent, ReviewBundle
-from qa_orchestrator.events import DISTRIBUTION_EVENT_TYPE, DISTRIBUTION_SCHEMA_VERSION
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
     DeepReviewSignals,
@@ -93,72 +90,19 @@ def test_service_rejects_unknown_review_profile(tmp_path):
         service.prepare_review_route("not_a_profile")
 
 
-def test_service_records_only_task_type_for_distribution(tmp_path):
-    service = OrchestratorService.from_settings(data_dir=tmp_path)
-
-    receipt = service.record_qa_task_outcome(
-        task_type="ordinary_review",
-        outcome="completed",
-    )
-
-    assert receipt.status == "recorded"
-    event = json.loads((tmp_path / "metrics.jsonl").read_text(encoding="utf-8"))
-    assert set(event) == {"schema_version", "event_type", "timestamp", "task_type"}
-    assert event["schema_version"] == DISTRIBUTION_SCHEMA_VERSION
-    assert event["event_type"] == DISTRIBUTION_EVENT_TYPE
-    assert event["task_type"] == "ordinary_review"
-
-
-@pytest.mark.parametrize("outcome", ["completed", "partial", "blocked"])
-def test_service_records_unorchestrated_task_categories_for_any_final_status(tmp_path, outcome):
-    service = OrchestratorService.from_settings(data_dir=tmp_path)
-
-    receipt = service.record_qa_task_outcome(
-        task_type="qa_planning",
-        outcome=outcome,
-    )
-
-    assert receipt.status == "recorded"
-    event = json.loads((tmp_path / "metrics.jsonl").read_text(encoding="utf-8"))
-    assert event["task_type"] == "qa_planning"
-    assert "outcome" not in event
-
-
-@pytest.mark.parametrize("task_type", ["unknown", [], {}])
-def test_service_rejects_unknown_task_types(tmp_path, task_type):
-    service = OrchestratorService.from_settings(data_dir=tmp_path)
-
-    with pytest.raises(ValueError, match="unknown QA task type"):
-        service.record_qa_task_outcome(task_type=task_type, outcome="completed")
-
-
-def test_service_rejects_unknown_final_outcomes(tmp_path):
-    service = OrchestratorService.from_settings(data_dir=tmp_path)
-
-    with pytest.raises(ValueError, match="invalid QA task outcome"):
-        service.record_qa_task_outcome(task_type="ordinary_review", outcome="unknown")
-
-
-def test_service_records_orchestrated_task_and_finalizes_session(tmp_path):
+def test_service_finishes_orchestrated_session_without_persisting_task_data(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
     started = _ready_for_host_outcome(service)
 
-    receipt = service.record_qa_task_outcome(
-        task_type="ordinary_review",
-        outcome="completed",
-        run_id=started.run_id,
-    )
+    final = service.finish_qa_orchestration(run_id=started.run_id, outcome="completed")
 
-    assert receipt.status == "recorded"
-    session = service.get_qa_orchestration(started.run_id)
-    assert session.status is OrchestrationStatus.COMPLETED
-    assert session.outcome_recorded is True
-    event = json.loads((tmp_path / "metrics.jsonl").read_text(encoding="utf-8"))
-    assert set(event) == {"schema_version", "event_type", "timestamp", "task_type"}
+    assert final.status is OrchestrationStatus.COMPLETED
+    assert final.next_action == "Host recorded the final QA outcome."
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize("outcome", ["partial", "blocked"])
-def test_service_records_a_stopped_orchestration(tmp_path, outcome):
+def test_service_finishes_a_stopped_orchestration(tmp_path, outcome):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
     started = service.start_qa_orchestration("ordinary_review")
     stopped = service.advance_qa_orchestration(
@@ -169,65 +113,27 @@ def test_service_records_a_stopped_orchestration(tmp_path, outcome):
         )
     )
 
-    receipt = service.record_qa_task_outcome(
-        task_type="ordinary_review",
-        outcome=outcome,
-        run_id=started.run_id,
-    )
+    final = service.finish_qa_orchestration(run_id=started.run_id, outcome=outcome)
 
-    assert receipt.status == "recorded"
-    final = service.get_qa_orchestration(started.run_id)
-    assert final.outcome_recorded is True
     assert final.status.value == outcome
     assert "recorded" in final.next_action
     assert final.next_action != stopped.next_action
 
 
-def test_service_rejects_outcome_with_mismatched_task_type(tmp_path):
+def test_service_finishing_same_outcome_is_idempotent(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
     started = _ready_for_host_outcome(service)
 
-    with pytest.raises(ValueError, match="task_type"):
-        service.record_qa_task_outcome(
-            task_type="widget_review",
-            outcome="completed",
-            run_id=started.run_id,
-        )
+    first = service.finish_qa_orchestration(run_id=started.run_id, outcome="completed")
+    repeated = service.finish_qa_orchestration(run_id=started.run_id, outcome="completed")
 
-    assert service.get_qa_orchestration(started.run_id).status is (
-        OrchestrationStatus.AWAITING_HOST_OUTCOME
-    )
-    assert not (tmp_path / "metrics.jsonl").exists()
-
-
-def test_service_does_not_duplicate_finalized_task_distribution(tmp_path):
-    service = OrchestratorService.from_settings(data_dir=tmp_path)
-    started = _ready_for_host_outcome(service)
-    call = {
-        "task_type": "ordinary_review",
-        "outcome": "completed",
-        "run_id": started.run_id,
-    }
-
-    assert service.record_qa_task_outcome(**call).status == "recorded"
-    assert service.record_qa_task_outcome(**call).status == "recorded"
-
-    lines = (tmp_path / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1
+    assert repeated.model_dump() == first.model_dump()
 
 
 def test_service_rejects_a_conflicting_finalized_outcome(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
     started = _ready_for_host_outcome(service)
-    service.record_qa_task_outcome(
-        task_type="ordinary_review",
-        outcome="completed",
-        run_id=started.run_id,
-    )
+    service.finish_qa_orchestration(run_id=started.run_id, outcome="completed")
 
     with pytest.raises(ValueError, match="conflicting final outcome"):
-        service.record_qa_task_outcome(
-            task_type="ordinary_review",
-            outcome="partial",
-            run_id=started.run_id,
-        )
+        service.finish_qa_orchestration(run_id=started.run_id, outcome="partial")

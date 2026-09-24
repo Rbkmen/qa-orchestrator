@@ -1,18 +1,16 @@
 from typing import Annotated
 
 from fastmcp import FastMCP
-from pydantic import AfterValidator, Field
+from pydantic import Field
 
 from qa_orchestrator.config import Settings
 from qa_orchestrator.contracts import (
     QaTaskOutcome,
-    QaTaskOutcomeReceipt,
     QaTaskType,
     ReviewAgent,
     ReviewBundle,
     ReviewRoute,
 )
-from qa_orchestrator.events import JsonEventSink, read_metrics_lines
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
     DeepReviewSignals,
@@ -20,7 +18,6 @@ from qa_orchestrator.orchestration import (
     OrchestrationStep,
     QaOrchestrationSession,
 )
-from qa_orchestrator.report import TaskDistributionReport, summarize_events
 from qa_orchestrator.service import OrchestratorService
 
 READ_ONLY_TOOL_ANNOTATIONS = {
@@ -35,19 +32,6 @@ STATE_TOOL_ANNOTATIONS = {
     "openWorldHint": False,
 }
 RunId = Annotated[str, Field(pattern=r"^qar-[0-9a-f]{32}$")]
-
-
-def _validate_positive_days(value: int) -> int:
-    if value < 1:
-        raise ValueError("days must be positive")
-    return value
-
-
-PositiveDays = Annotated[
-    int,
-    AfterValidator(_validate_positive_days),
-    Field(json_schema_extra={"minimum": 1}),
-]
 
 
 def build_server(service: OrchestratorService) -> FastMCP:
@@ -114,51 +98,20 @@ def build_server(service: OrchestratorService) -> FastMCP:
         return service.get_qa_orchestration(run_id)
 
     @mcp.tool(annotations=STATE_TOOL_ANNOTATIONS)
-    def record_qa_task_outcome(
-        task_type: QaTaskType,
+    def finish_qa_orchestration(
+        run_id: RunId,
         outcome: QaTaskOutcome,
-        run_id: RunId | None = None,
-    ) -> QaTaskOutcomeReceipt:
-        """Record only the task category for aggregate distribution.
-
-        `outcome` finalizes orchestration when `run_id` is supplied. The outcome
-        and run identifier are not written to the distribution record.
-        """
-        return service.record_qa_task_outcome(
-            task_type=task_type,
+    ) -> QaOrchestrationSession:
+        """Finalize a host-owned QA outcome in the orchestration session."""
+        return service.finish_qa_orchestration(
             outcome=outcome,
             run_id=run_id,
         )
-
-    @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
-    def get_metrics_report(days: PositiveDays = 7) -> TaskDistributionReport:
-        """Read aggregate QA task distribution for a positive time window."""
-        if days < 1:
-            raise ValueError("days must be positive")
-        try:
-            lines = read_metrics_lines(service.settings.metrics_path)
-        except OSError as exc:
-            raise RuntimeError("metrics_unavailable") from exc
-        return TaskDistributionReport.model_validate(summarize_events(lines, days=days))
 
     return mcp
 
 
 def main() -> None:
     settings = Settings.from_env()
-    events = JsonEventSink(
-        settings.metrics_path,
-        settings.metrics_retention_days,
-        settings.metrics_max_events,
-    )
-    if not events.sanitize_existing_records():
-        raise SystemExit(
-            "QA Orchestrator cannot start because existing task-distribution "
-            "data could not be sanitized. Run qa-orchestrator-doctor to check "
-            "local data-directory permissions."
-        )
-    service = OrchestratorService(
-        settings,
-        events,
-    )
+    service = OrchestratorService(settings)
     build_server(service).run()

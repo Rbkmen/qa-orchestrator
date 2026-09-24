@@ -17,7 +17,7 @@ The primary host owns:
 - CodeGraph and source-MCP calls;
 - code/file changes and all writes to external systems.
 
-QA Orchestrator owns only deterministic profile routing, content-free orchestration state, deep-review signal evaluation, and aggregate task distribution. The orchestrator does not accept evidence, prompts, or model outputs and does not perform autonomous writes.
+QA Orchestrator owns only deterministic profile routing, bounded orchestration state, and deep-review signal evaluation. The orchestrator does not accept evidence, prompts, or model outputs and does not perform autonomous writes.
 
 ## Model policy
 
@@ -48,7 +48,7 @@ The orchestrator returns only the next provider, model, reasoning policy, and tr
 3. For a bundle, the host runs the configured primary model once per profile in the returned order and passes the role identifier as `completed_profile` after each stage; the orchestrator does not skip roles or accept an arbitrary order.
 4. In the same transition that completes the last primary-review profile, the host must supply structured `risk_signals` (use an empty object when no signals apply); the orchestrator applies the fixed deep-review rules and either goes directly to configured synthesis or returns the configured deep model with its configured reasoning (default `high`). Do not send `risk_signals` on the later synthesis transition. The legacy explicit manual-escalation input remains accepted for older clients.
 5. After deep review, the host returns to the configured synthesis model.
-6. After synthesis, the state becomes `awaiting_host_outcome`; the host calls `record_qa_task_outcome` once with the same `run_id` and a status of `completed`, `partial`, or `blocked`. The orchestrator moves the session to its final status. For non-orchestrated tasks, records have no deduplication key: do not retry after an uncertain response, and interpret counts as successful record calls rather than verified unique tasks.
+6. After synthesis, the state becomes `awaiting_host_outcome`; the host calls `finish_qa_orchestration` with the same `run_id` and a status of `completed`, `partial`, or `blocked`. The orchestrator moves the session to its final status. For an early stop, first pass `partial` or `blocked` to `advance_qa_orchestration`, then finish the session with that same status.
 
 Allowed transitions:
 
@@ -176,17 +176,9 @@ Use the narrowest profile that matches the task:
 
 Every review must separate confirmed findings from hypotheses and unverified runtime or release facts. An empty or unknown profile is rejected before a route is built.
 
-## Task distribution
+## Final outcome
 
-`record_qa_task_outcome` accepts only `task_type`, `outcome`, and an optional `run_id`:
-
-- `task_type` identifies one supported QA task category.
-- `outcome` finalizes an orchestrated session; it is not saved in distribution data.
-- `run_id` associates the final call with its in-memory session; it is not persisted.
-
-The distribution record stores only the task type and timestamp. The report returns `period_days`, `total_tasks`, and `by_task_type`.
-
-On MCP-server or report-command startup, existing outcome events are migrated to the distribution format, retaining only their timestamp and task type; unrelated fields and malformed records are discarded. Do not send issue keys, titles, paths, source text, code, logs, screenshots, or generated content.
+`finish_qa_orchestration` accepts only `run_id` and the host-owned final outcome. It updates the bounded in-memory session and does not write task history or statistics to disk. Repeating the same outcome is idempotent; a conflicting outcome is rejected.
 
 ## MCP tools
 
@@ -196,8 +188,7 @@ The orchestrator must publish exactly:
 - `start_qa_orchestration`;
 - `advance_qa_orchestration`;
 - `get_qa_orchestration`;
-- `record_qa_task_outcome`;
-- `get_metrics_report`.
+- `finish_qa_orchestration`.
 
 `read_only=true` and `host_owns_decisions=true` must be preserved in every orchestration state. Do not add a tool that generates text, accepts evidence, changes external state, selects a model for the host, or silently calls another agent.
 

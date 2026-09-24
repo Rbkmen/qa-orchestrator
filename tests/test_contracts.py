@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from qa_orchestrator.contracts import QaTaskOutcomeReceipt, ReviewAgent, ReviewRoute
+from qa_orchestrator.contracts import ReviewAgent, ReviewRoute
 
 
 def test_review_route_requires_focus_and_sections():
@@ -50,9 +50,3 @@ def test_review_route_rejects_disabled_ownership_flags():
             constraints=["read only"],
             host_owns_decisions=False,
         )
-
-
-def test_task_outcome_receipt_has_only_recording_status():
-    receipt = QaTaskOutcomeReceipt(status="recorded")
-
-    assert receipt.model_dump() == {"status": "recorded"}

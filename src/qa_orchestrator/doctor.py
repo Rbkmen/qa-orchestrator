@@ -11,7 +11,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .config import Settings
-from .events import validate_metrics_storage
 from .model_policy import load_model_selection
 
 MINIMUM_PYTHON = (3, 12)
@@ -64,25 +63,6 @@ def collect_checks() -> list[CheckResult]:
     except (TypeError, ValueError) as exc:
         checks.append(CheckResult("configuration", "fail", f"invalid environment value: {exc}"))
     else:
-        data_dir = settings.data_dir
-        if data_dir.exists():
-            detail = f"{data_dir} exists"
-        else:
-            detail = f"{data_dir} will be created on first metrics write"
-        try:
-            validate_metrics_storage(settings.metrics_path)
-        except OSError as exc:
-            metrics_status = "fail"
-            detail = str(exc)
-        else:
-            metrics_status = "pass"
-        checks.append(
-            CheckResult(
-                name="metrics directory",
-                status=metrics_status,
-                detail=detail,
-            )
-        )
         try:
             selection = load_model_selection(settings.model_policy_path)
         except ValueError as exc:
