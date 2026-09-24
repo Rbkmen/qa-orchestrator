@@ -156,7 +156,6 @@ class ModelPolicy(BaseModel):
     provider: ModelProvider = ModelProvider.OPENAI
     model: OrchestrationModel | str
     reasoning: ReasoningEffort
-    speed: Literal[1.0] = 1.0
 
     @field_validator("model")
     @classmethod

@@ -30,7 +30,7 @@ def test_model_policy_assigns_requested_models_and_reasoning(step, model, reason
     policy = MODEL_POLICIES[step]
     assert policy.model.value == model
     assert policy.reasoning == reasoning
-    assert policy.speed == 1.0
+    assert set(policy.model_dump(mode="json")) == {"provider", "model", "reasoning"}
     assert set(MODEL_POLICIES) == {
         OrchestrationStep.TRIAGE,
         OrchestrationStep.PRIMARY_REVIEW,
@@ -39,8 +39,8 @@ def test_model_policy_assigns_requested_models_and_reasoning(step, model, reason
     }
 
 
-def test_model_policy_pins_unit_speed():
-    assert {policy.speed for policy in MODEL_POLICIES.values()} == {1.0}
+def test_model_policy_rejects_orchestrator_speed_override():
+    assert all("speed" not in policy.model_dump() for policy in MODEL_POLICIES.values())
 
     with pytest.raises(ValidationError):
         ModelPolicy(model=OrchestrationModel.SOL, reasoning="medium", speed=1.5)

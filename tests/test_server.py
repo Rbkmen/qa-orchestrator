@@ -122,7 +122,6 @@ async def test_orchestration_tools_return_no_evidence_fields(tmp_path):
         "provider": "openai",
         "model": "gpt-6-luna",
         "reasoning": "max",
-        "speed": 1.0,
     }
     assert payload["read_only"] is True
     assert payload["host_owns_decisions"] is True

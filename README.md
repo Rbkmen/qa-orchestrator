@@ -12,7 +12,7 @@ QA Orchestrator is a small deterministic FastMCP service for host-owned QA revie
    - optional deep review — perform one read-only analysis when fixed risk signals match;
    - final synthesis — consolidate the results.
    Each stage uses the model and reasoning configured for it in the returned `model_policy`.
-   Every returned model policy includes `speed=1.0`; the host must keep this value for the selected stage.
+   The returned policy selects the provider, model, and reasoning for each stage. Execution speed and latency preferences remain controlled by the user's host/provider settings; the orchestrator does not set or override them.
 4. The host validates findings, runtime evidence, and limitations, then calls `record_qa_task_outcome` once. For an orchestrated task it passes the same `run_id` so the orchestrator can close the session.
 
 The orchestrator does not call models, choose severity or release readiness, or perform external writes.

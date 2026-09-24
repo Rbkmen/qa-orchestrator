@@ -29,7 +29,7 @@ The full test suite must not require network access, credentials, or a separate 
 - `prepare_review_route` returns only static metadata for the selected profile.
 - `start_qa_orchestration`, `advance_qa_orchestration`, and `get_qa_orchestration` manage content-free state only.
 - The orchestrator does not call models, create threads or agents, write user-requested files, or perform writes to external systems.
-- The model policy is configured locally with `qa-orch setup`; the default provider is OpenAI/Codex. Configure model IDs and provider-specific reasoning/effort independently of the model-neutral stage names. Deep review defaults to `high` when the selected model supports it. Every stage uses `speed=1.0`.
+- The model policy is configured locally with `qa-orch setup`; the default provider is OpenAI/Codex. Configure model IDs and provider-specific reasoning/effort independently of the model-neutral stage names. Deep review defaults to `high` when the selected model supports it. Execution speed and latency preferences remain controlled by the user's host/provider settings.
 - Task-distribution records contain only the task category and timestamp; never store task content such as issue keys, paths, source, logs, prompts, or model responses.
 - Do not add persistent QA memory, a source cache, a learning layer, or hidden external calls.
 

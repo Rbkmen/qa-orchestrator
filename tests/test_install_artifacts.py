@@ -25,7 +25,9 @@ CLIENT_RULE_CONTRACT = {
     "task distribution report": (r"\bget_metrics_report\b",),
     "single route selection": (r"exactly one.*(?:bundle|profile)",),
     "model-neutral stage labels": (r"stage labels and status text model-neutral",),
-    "fixed speed": (r"speed=1\.0",),
+    "user-controlled execution speed": (
+        r"execution speed and latency preferences are controlled by the user's host/provider settings",
+    ),
     "risk signals": (r"\brisk_signals\b",),
     "completed profile": (r"\bcompleted_profile\b",),
     "read-only boundary": (r"read_only=true",),
@@ -126,7 +128,7 @@ def test_operational_artifacts_describe_host_orchestration():
         ROOT / "docs/clients/codex.md",
         ROOT / "docs/clients/claude-code.md",
     ]
-    required_policy = ("model_policy", "speed=1.0")
+    required_policy = ("model_policy", "execution speed and latency preferences")
     host_contract_artifacts = {
         ROOT / "README.md",
         ROOT / "docs/ORCHESTRATION_POLICY.md",

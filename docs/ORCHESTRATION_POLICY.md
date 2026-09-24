@@ -39,7 +39,7 @@ each stage and returned in the session's `model_policy`.
 | Deep escalation | configured `deep_model` | configured `deep_reasoning` (default `high`) | Optional read-only check for a complex or high-risk case |
 | Synthesis | configured `synthesis_model` | configured `synthesis_reasoning` (default `medium`) | Consolidate the result after host validation |
 
-The orchestrator returns only the next policy and transition constraints. Every policy includes the fixed `speed=1.0`; the primary host must preserve it when running the selected model. The primary host runs the models in its own environment, validates findings, and makes the final decision. The orchestrator does not invoke or throttle a provider itself.
+The orchestrator returns only the next provider, model, reasoning policy, and transition constraints. Execution speed and latency preferences are controlled by the host user's settings; the orchestrator does not set or override them. The primary host runs the models in its own environment, validates findings, and makes the final decision. The orchestrator does not invoke or throttle a provider itself.
 
 ## Orchestration flow
 
