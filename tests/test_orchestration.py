@@ -53,7 +53,9 @@ def test_normal_flow_skips_sol():
     assert session.status is OrchestrationStatus.AWAITING_HOST_OUTCOME
     assert session.current_step is OrchestrationStep.AWAITING_HOST_OUTCOME
     assert session.model_policy is None
-    assert session.next_action == "Host records the final QA outcome."
+    assert session.next_action == (
+        "Host submits the final QA outcome with finish_qa_orchestration."
+    )
 
 
 def test_final_host_outcome_completes_session_and_is_idempotent():

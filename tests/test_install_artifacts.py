@@ -17,6 +17,11 @@ CLIENT_RULE_FILES = tuple(
         for path in (ROOT / "client-rules").rglob(pattern)
     )
 )
+USER_CONTROLLED_SPEED_PATTERNS = (
+    r"execution speed and latency preferences (?:are|remain) controlled by the user's host/provider settings",
+    r"execution speed and latency follow the user's host/provider settings",
+    r"execution speed and latency preferences are controlled by the host user's settings",
+)
 CLIENT_RULE_CONTRACT = {
     "orchestration entry": (r"\bstart_qa_orchestration\b",),
     "route preparation": (r"\bprepare_review_route\b",),
@@ -24,9 +29,7 @@ CLIENT_RULE_CONTRACT = {
     "orchestration finalization": (r"\bfinish_qa_orchestration\b",),
     "single route selection": (r"exactly one.*(?:bundle|profile)",),
     "model-neutral stage labels": (r"stage labels and status text model-neutral",),
-    "user-controlled execution speed": (
-        r"execution speed and latency preferences are controlled by the user's host/provider settings",
-    ),
+    "user-controlled execution speed": USER_CONTROLLED_SPEED_PATTERNS,
     "risk signals": (r"\brisk_signals\b",),
     "completed profile": (r"\bcompleted_profile\b",),
     "read-only boundary": (r"read_only=true",),
@@ -124,7 +127,7 @@ def test_operational_artifacts_describe_host_orchestration():
         ROOT / "docs/clients/codex.md",
         ROOT / "docs/clients/claude-code.md",
     ]
-    required_policy = ("model_policy", "execution speed and latency preferences")
+    required_policy = ("model_policy",)
     host_contract_artifacts = {
         ROOT / "README.md",
         ROOT / "docs/ORCHESTRATION_POLICY.md",
@@ -141,6 +144,7 @@ def test_operational_artifacts_describe_host_orchestration():
         text = artifact.read_text(encoding="utf-8").lower()
         for phrase in required_policy:
             assert phrase in text
+        assert any(re.search(pattern, text) for pattern in USER_CONTROLLED_SPEED_PATTERNS), artifact
         if artifact in host_contract_artifacts:
             for tool in (
                 "start_qa_orchestration",
