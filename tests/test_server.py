@@ -2,7 +2,7 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
-from qa_orchestrator.contracts import ReviewBundle
+from qa_orchestrator.contracts import ReviewAgent, ReviewBundle
 from qa_orchestrator.review_profiles import REVIEW_BUNDLES
 from qa_orchestrator.server import build_server
 from qa_orchestrator.service import OrchestratorService
@@ -110,15 +110,7 @@ async def test_orchestration_tools_return_no_evidence_fields(tmp_path):
     }
     assert payload["read_only"] is True
     assert payload["host_owns_decisions"] is True
-    assert payload["allowed_profiles"] == [
-        "pr_test_analyzer",
-        "code_reviewer",
-        "security_reviewer",
-        "silent_failure_hunter",
-        "code_explorer",
-        "typescript_reviewer",
-        "react_reviewer",
-    ]
+    assert payload["allowed_profiles"] == [profile.value for profile in ReviewAgent]
     assert payload["allowed_bundles"] == [bundle.value for bundle in ReviewBundle]
     assert payload["selected_bundle"] is None
     assert payload["review_profiles"] == []
