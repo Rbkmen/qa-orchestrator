@@ -7,6 +7,58 @@ from qa_orchestrator.service import OrchestratorService
 
 def test_every_review_profile_returns_read_only_route(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
+    expected_sections = {
+        ReviewAgent.CODE_EXPLORER: ["Scope", "Evidence Map", "Unverified"],
+        ReviewAgent.PR_TEST_ANALYZER: ["Scope", "Coverage Gaps", "Unverified"],
+        ReviewAgent.CODE_REVIEWER: [
+            "Scope",
+            "Finding Candidates",
+            "Coverage Gaps",
+            "Unverified",
+        ],
+        ReviewAgent.SECURITY_REVIEWER: [
+            "Scope",
+            "Finding Candidates",
+            "Coverage Gaps",
+            "Unverified",
+        ],
+        ReviewAgent.SILENT_FAILURE_HUNTER: [
+            "Scope",
+            "Finding Candidates",
+            "Coverage Gaps",
+            "Unverified",
+        ],
+        ReviewAgent.TYPESCRIPT_REVIEWER: [
+            "Scope",
+            "Finding Candidates",
+            "Coverage Gaps",
+            "Unverified",
+        ],
+        ReviewAgent.REACT_REVIEWER: [
+            "Scope",
+            "Finding Candidates",
+            "Coverage Gaps",
+            "Unverified",
+        ],
+        ReviewAgent.RUBY_REVIEWER: [
+            "Scope",
+            "Finding Candidates",
+            "Coverage Gaps",
+            "Unverified",
+        ],
+        ReviewAgent.PYTHON_REVIEWER: [
+            "Scope",
+            "Finding Candidates",
+            "Coverage Gaps",
+            "Unverified",
+        ],
+        ReviewAgent.MOBILE_REVIEWER: [
+            "Scope",
+            "Finding Candidates",
+            "Coverage Gaps",
+            "Unverified",
+        ],
+    }
 
     for profile in ReviewAgent:
         route = service.prepare_review_route(profile)
@@ -15,14 +67,21 @@ def test_every_review_profile_returns_read_only_route(tmp_path):
         assert route.profile == profile
         assert route.read_only is True
         assert route.host_owns_decisions is True
-        assert route.required_sections == [
-            "Scope",
-            "Checklist",
-            "Candidate Coverage Gaps",
-            "Positive Observations",
-            "Unverified",
-        ]
+        assert route.required_sections == expected_sections[profile]
         assert route.focus
+
+
+def test_evidence_investigator_and_code_reviewer_have_distinct_outputs(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    evidence_route = service.prepare_review_route(ReviewAgent.CODE_EXPLORER)
+    review_route = service.prepare_review_route(ReviewAgent.CODE_REVIEWER)
+
+    assert "Evidence Map" in evidence_route.required_sections
+    assert "Finding Candidates" not in evidence_route.required_sections
+    assert "Finding Candidates" in review_route.required_sections
+    assert "Evidence Map" not in review_route.required_sections
+    assert "do not diagnose defects" in evidence_route.focus
+    assert "do not repeat the map" in review_route.focus
 
 
 def test_unknown_review_profile_is_rejected(tmp_path):
@@ -42,6 +101,9 @@ def test_review_profiles_expose_the_approved_display_names(tmp_path):
         ReviewAgent.SILENT_FAILURE_HUNTER: "Silent Failure Hunter",
         ReviewAgent.TYPESCRIPT_REVIEWER: "TypeScript Reviewer",
         ReviewAgent.REACT_REVIEWER: "React Reviewer",
+        ReviewAgent.RUBY_REVIEWER: "Ruby Reviewer",
+        ReviewAgent.PYTHON_REVIEWER: "Python Reviewer",
+        ReviewAgent.MOBILE_REVIEWER: "Mobile Reviewer",
     }
 
     for profile, expected_name in expected_names.items():
@@ -63,6 +125,27 @@ def test_review_bundle_catalog_has_the_approved_immutable_order():
             ReviewAgent.CODE_EXPLORER,
             ReviewAgent.REACT_REVIEWER,
             ReviewAgent.TYPESCRIPT_REVIEWER,
+            ReviewAgent.PR_TEST_ANALYZER,
+        ),
+        bundle_type.WIDGET_JS: (
+            ReviewAgent.CODE_EXPLORER,
+            ReviewAgent.CODE_REVIEWER,
+            ReviewAgent.REACT_REVIEWER,
+            ReviewAgent.PR_TEST_ANALYZER,
+        ),
+        bundle_type.RUBY_BACKEND: (
+            ReviewAgent.CODE_EXPLORER,
+            ReviewAgent.RUBY_REVIEWER,
+            ReviewAgent.PR_TEST_ANALYZER,
+        ),
+        bundle_type.PYTHON_BACKEND: (
+            ReviewAgent.CODE_EXPLORER,
+            ReviewAgent.PYTHON_REVIEWER,
+            ReviewAgent.PR_TEST_ANALYZER,
+        ),
+        bundle_type.MOBILE: (
+            ReviewAgent.CODE_EXPLORER,
+            ReviewAgent.MOBILE_REVIEWER,
             ReviewAgent.PR_TEST_ANALYZER,
         ),
         bundle_type.SECURITY: (

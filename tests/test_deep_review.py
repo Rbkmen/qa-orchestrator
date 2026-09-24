@@ -6,6 +6,14 @@ from qa_orchestrator.orchestration import (
 )
 
 
+def test_deep_review_signal_schema_explains_each_boolean():
+    properties = DeepReviewSignals.model_json_schema()["properties"]
+
+    assert all(properties[name]["description"] for name in DeepReviewSignals.model_fields)
+    assert "authoritative" in properties["evidence_conflict"]["description"]
+    assert "many consumers" in properties["high_blast_radius"]["description"]
+
+
 def test_high_risk_with_uncertain_evidence_requires_deep_review():
     decision = assess_deep_review(
         DeepReviewSignals(high_risk_domain=True, evidence_uncertain=True)

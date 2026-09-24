@@ -125,6 +125,22 @@ def test_model_catalog_contains_current_recommended_models():
         "xhigh",
         "max",
     )
+    assert reasoning_options_for(ModelProvider.OPENAI, "gpt-6-sol") == (
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    )
+    assert reasoning_options_for(ModelProvider.OPENAI, "gpt-6-luna") == (
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    )
     assert reasoning_options_for(ModelProvider.ANTHROPIC, "claude-haiku-4-5-20251001") == (
         "none",
     )

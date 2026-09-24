@@ -166,6 +166,8 @@ def test_operational_artifacts_describe_review_bundles_and_statuses():
     required = (
         "ordinary_mr",
         "widget",
+        "widget_js",
+        "ruby_backend",
         "security",
         "autotest",
         "requirements",

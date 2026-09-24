@@ -41,10 +41,14 @@ each stage and returned in the session's `model_policy`.
 
 The orchestrator returns only the next provider, model, reasoning policy, and transition constraints. Execution speed and latency preferences are controlled by the host user's settings; the orchestrator does not set or override them. The primary host runs the models in its own environment, validates findings, and makes the final decision. The orchestrator does not invoke or throttle a provider itself.
 
+### Keeping the recommended model catalog current
+
+Before changing the recommended model list, verify model IDs and reasoning support against the [official GPT-6 model guidance](https://developers.openai.com/api/docs/guides/latest-model). Update `MODEL_CATALOGS` and the exact reasoning-option assertions in `tests/test_model_policy.py` together. Keep custom model IDs available and do not add provider calls to setup; the host remains responsible for verifying its own model access.
+
 ## Orchestration flow
 
 1. The host calls `start_qa_orchestration(task_type)` and receives a `run_id`, the configured triage model and reasoning effort (default `max`), and the next action.
-2. After triage, the host calls `advance_qa_orchestration` with one fixed bundle or one of the seven `ReviewAgent` profiles.
+2. After triage, the host calls `advance_qa_orchestration` with one fixed bundle or one of the ten `ReviewAgent` profiles.
 3. For a bundle, the host runs the configured primary model once per profile in the returned order and passes the role identifier as `completed_profile` after each stage; the orchestrator does not skip roles or accept an arbitrary order.
 4. In the same transition that completes the last primary-review profile, the host must supply structured `risk_signals` (use an empty object when no signals apply); the orchestrator applies the fixed deep-review rules and either goes directly to configured synthesis or returns the configured deep model with its configured reasoning (default `high`). Do not send `risk_signals` on the later synthesis transition. The legacy explicit manual-escalation input remains accepted for older clients.
 5. After deep review, the host returns to the configured synthesis model.
@@ -85,12 +89,19 @@ The single-profile compatibility path is for narrow reviews. The triage stage sh
 | Test-only or assertion-only change | `pr_test_analyzer` |
 | TypeScript, async, or serialization-only change | `typescript_reviewer` |
 | React state, effects, or rendering-only change | `react_reviewer` |
+| Ruby behavior or Ruby-specific runtime contract | `ruby_reviewer` |
+| Python async, serialization, or MCP tool contract | `python_reviewer` |
+| React Native or native iOS/Android behavior | `mobile_reviewer` |
 
 Use a fixed bundle when the scope is broad, crosses concerns, or needs evidence mapping plus implementation and test review. The orchestrator does not infer this from raw source; the host supplies evidence for triage and submits only the selected fixed profile or bundle.
 
+Select profiles from the changed paths and confirmed manifests, not the repository name alone: monorepos can mix Ruby, legacy JavaScript, TypeScript, React Native, native mobile, and infrastructure files. When one diff spans multiple stacks, choose the fixed bundle matching its broadest or highest-risk changed surface; keep uncovered stack-specific checks in the host's verification plan. Do not submit a custom profile list.
+
+The `autotest` bundle includes `typescript_reviewer`; use it for broad TypeScript automation changes. For broad non-TypeScript automation, use `ordinary_mr`; for a narrow test-only change, use `pr_test_analyzer`. The `widget` bundle is for TypeScript React changes; use `widget_js` for broad JavaScript React changes, and `react_reviewer` for a narrow React-only change. Use `ruby_backend` for broad Ruby backend changes and `ruby_reviewer` for a narrow Ruby-specific review. Use `python_backend` for broad Python/MCP changes and `python_reviewer` for a narrow Python/MCP review. Use `mobile` for broad React Native/native mobile changes and `mobile_reviewer` for a narrow platform-specific change. Apply Rails checks only when Rails is confirmed, and job checks only when the repository uses a background-job library. See the [offline evaluation cases](PROFILE_EVALUATION.md) for the selection checks.
+
 ### Compact review context
 
-The host keeps one per-task Evidence Packet and gives each profile only the relevant sections. Evidence items use stable local references such as `E1`, `E2`, and findings use stable candidate identifiers such as `F-01`. A profile should return only bounded candidates with an evidence reference, confidence, and verification gap; it should not repeat the complete diff or raw logs. Synthesis receives the deduplicated candidates and references, not the full transcript of every profile.
+The host keeps one per-task Evidence Packet and gives each profile only the relevant sections. Evidence items use stable local references such as `E1`, and finding candidates use stable identifiers such as `F-01`. `code_explorer` returns an evidence map and unresolved links, not defect candidates. `code_reviewer` uses that map and reports only concrete candidates supported by the changed code and evidence. Test analysis reports coverage gaps; specialist profiles stay within their returned focus. A finding candidate includes evidence references, confidence, and a verification gap. Profiles do not repeat the full diff or raw logs, and synthesis receives deduplicated candidates and references rather than full transcripts. Routes return only the sections relevant to their profile: evidence map, finding candidates, coverage gaps, and unverified items are separate outputs.
 
 ### Deterministic deep-review decision
 
@@ -113,6 +124,8 @@ The orchestrator enters the optional deep-review branch when one of these rules 
 1. `high_risk_domain` and `evidence_uncertain` are both true;
 2. at least two complexity signals are true: `cross_system_scope`, `multiple_plausible_causes`, `non_reproducible`, or `high_blast_radius`;
 3. `evidence_conflict` is true and the conflict is high-impact because `high_risk_domain`, `cross_system_scope`, or `high_blast_radius` is also true.
+
+Map observed conditions to signals only when evidence supports them. Sensitive identity, security, payment, fraud, privacy, or access-control impact maps to `high_risk_domain`; a material missing verification source maps to `evidence_uncertain`; a relevant boundary crossing repositories, services, or systems maps to `cross_system_scope`; multiple plausible causes remaining after investigation map to `multiple_plausible_causes`; disagreement between relevant authoritative sources maps to `evidence_conflict`; an expected behavior that cannot be reproduced maps to `non_reproducible`; and broad impact across consumers or data maps to `high_blast_radius`. A profile's escalation text or an ordinary coverage gap alone does not set a signal. The host supplies the booleans and the fixed rules above determine whether deep review runs.
 
 The returned `deep_assessment` contains `should_escalate`, matched fixed rules, fixed reason codes, and the complexity-signal count. No raw evidence is stored or sent to the orchestrator. Existing `needs_deep_analysis` plus one fixed `reason_code` remains accepted for client compatibility, but new clients should use `risk_signals`.
 
@@ -146,6 +159,10 @@ flowchart LR
 |---|---|
 | `ordinary_mr` | `code_explorer` → `code_reviewer` → `pr_test_analyzer` |
 | `widget` | `code_explorer` → `react_reviewer` → `typescript_reviewer` → `pr_test_analyzer` |
+| `widget_js` | `code_explorer` → `code_reviewer` → `react_reviewer` → `pr_test_analyzer` |
+| `ruby_backend` | `code_explorer` → `ruby_reviewer` → `pr_test_analyzer` |
+| `python_backend` | `code_explorer` → `python_reviewer` → `pr_test_analyzer` |
+| `mobile` | `code_explorer` → `mobile_reviewer` → `pr_test_analyzer` |
 | `security` | `code_explorer` → `security_reviewer` → `silent_failure_hunter` |
 | `autotest` | `code_reviewer` → `pr_test_analyzer` → `typescript_reviewer` |
 | `requirements` | `code_explorer` → `code_reviewer` |
@@ -159,6 +176,9 @@ flowchart LR
 | `silent_failure_hunter` | `Silent Failure Hunter` |
 | `typescript_reviewer` | `TypeScript Reviewer` |
 | `react_reviewer` | `React Reviewer` |
+| `ruby_reviewer` | `Ruby Reviewer` |
+| `python_reviewer` | `Python Reviewer` |
+| `mobile_reviewer` | `Mobile Reviewer` |
 
 Faraday is the internal display name for `code_explorer`. It is not a separate external agent, service, package, or model. The orchestrator returns only the fixed identifier and order; the host runs the configured primary model for each role.
 
@@ -173,6 +193,11 @@ Use the narrowest profile that matches the task:
 - `code_explorer` — dependency map, callers, data flow, and affected surface;
 - `typescript_reviewer` — TypeScript types, async boundaries, serialization, and build safety;
 - `react_reviewer` — React state, effects, rendering, props, and user-visible behavior.
+- `ruby_reviewer` — Ruby semantics, ActiveRecord or Sequel behavior, and relevant Sidekiq retry/concurrency contracts when repository evidence confirms those libraries;
+- `python_reviewer` — Python async/error behavior, data validation, serialization, and relevant FastMCP tool contracts when present;
+- `mobile_reviewer` — React Native/native lifecycle, permissions, navigation, bridge, and platform-specific behavior on changed paths.
+
+`code_explorer` owns evidence mapping; `code_reviewer` owns concrete review candidates. The latter may expand the map only when more context is needed to support a candidate.
 
 Every review must separate confirmed findings from hypotheses and unverified runtime or release facts. An empty or unknown profile is rejected before a route is built.
 

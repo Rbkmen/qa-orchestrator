@@ -29,9 +29,15 @@ The triage stage selects one fixed bundle or one compatibility profile. The prim
 |---|---|
 | `ordinary_mr` | `code_explorer` → `code_reviewer` → `pr_test_analyzer` |
 | `widget` | `code_explorer` → `react_reviewer` → `typescript_reviewer` → `pr_test_analyzer` |
+| `widget_js` | `code_explorer` → `code_reviewer` → `react_reviewer` → `pr_test_analyzer` |
+| `ruby_backend` | `code_explorer` → `ruby_reviewer` → `pr_test_analyzer` |
+| `python_backend` | `code_explorer` → `python_reviewer` → `pr_test_analyzer` |
+| `mobile` | `code_explorer` → `mobile_reviewer` → `pr_test_analyzer` |
 | `security` | `code_explorer` → `security_reviewer` → `silent_failure_hunter` |
 | `autotest` | `code_reviewer` → `pr_test_analyzer` → `typescript_reviewer` |
 | `requirements` | `code_explorer` → `code_reviewer` |
+
+`autotest` and `widget` include a TypeScript review role; select them when TypeScript review is relevant. Use `ordinary_mr` for broad non-TypeScript automation, `widget_js` for broad JavaScript React changes, `ruby_backend` for broad Ruby backend changes, `python_backend` for broad Python/MCP changes, and `mobile` for broad React Native or native iOS/Android changes. Choose from the changed files and confirmed project manifests, not the repository name alone; monorepos can contain several stacks.
 
 Technical profiles and display names:
 
@@ -44,6 +50,9 @@ Technical profiles and display names:
 | `silent_failure_hunter` | `Silent Failure Hunter` |
 | `typescript_reviewer` | `TypeScript Reviewer` |
 | `react_reviewer` | `React Reviewer` |
+| `ruby_reviewer` | `Ruby Reviewer` |
+| `python_reviewer` | `Python Reviewer` |
+| `mobile_reviewer` | `Mobile Reviewer` |
 
 Faraday is only the internal display name of the `code_explorer` profile. No external agent, service, package, or model is connected under that name.
 
@@ -67,7 +76,7 @@ Deep-review rules:
 
 The legacy `needs_deep_analysis` + `reason_code` transition remains supported for compatibility.
 
-For low-risk, narrow reviews, the triage stage may select one compatibility profile instead of a bundle: `code_reviewer` for a small behavior change, `pr_test_analyzer` for a test-only change, `typescript_reviewer` for a TypeScript-only change, or `react_reviewer` for a React-only change. Broad or cross-concern reviews continue to use a fixed bundle.
+For low-risk, narrow reviews, the triage stage may select one compatibility profile instead of a bundle: `code_reviewer` for a small behavior change, `pr_test_analyzer` for a test-only change, `typescript_reviewer` for a TypeScript-only change, `react_reviewer` for a React-only change, `ruby_reviewer` for a Ruby-only change, `python_reviewer` for a Python/MCP-only change, or `mobile_reviewer` for a React Native/native-platform-only change. Broad or cross-concern reviews continue to use a fixed bundle.
 
 Keep one compact per-task Evidence Packet with stable evidence references (`E1`, `E2`, ...) and bounded finding candidates (`F-01`, `F-02`, ...). Do not repeat the full diff or raw logs in every model stage.
 
@@ -77,7 +86,7 @@ The service publishes exactly five tools:
 
 | Tool | Purpose |
 |---|---|
-| `prepare_review_route(agent_profile)` | Deterministic checklist for one of the seven profiles |
+| `prepare_review_route(agent_profile)` | Deterministic checklist for one of the ten profiles |
 | `start_qa_orchestration(task_type)` | Create a host-owned orchestration session |
 | `advance_qa_orchestration(...)` | Make one structured transition between stages |
 | `get_qa_orchestration(run_id)` | Read the current content-free state |
@@ -99,7 +108,9 @@ After synthesis, the session waits for the host's final outcome. Call `finish_qa
 
 `prepare_review_route` returns the focus, required sections, constraints, escalation signals, and display name for one profile. For a bundle, the host calls the route for every profile in the returned fixed order and passes its technical identifier in `completed_profile` after each call.
 
-Common route sections are `Scope`, `Checklist`, `Candidate Coverage Gaps`, `Positive Observations`, and `Unverified`.
+`required_sections` is profile-specific: the evidence investigator returns `Scope`, `Evidence Map`, and `Unverified`; test analysis returns `Scope`, `Coverage Gaps`, and `Unverified`; implementation and specialist reviews return `Scope`, `Finding Candidates`, `Coverage Gaps`, and `Unverified`.
+
+Use the [local profile evaluation pack](docs/PROFILE_EVALUATION.md) to smoke-check role boundaries and bundle selection without collecting task statistics.
 
 ## Responsibility boundary
 

@@ -83,13 +83,34 @@ class DeepReviewSignals(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    high_risk_domain: bool = False
-    evidence_uncertain: bool = False
-    cross_system_scope: bool = False
-    multiple_plausible_causes: bool = False
-    evidence_conflict: bool = False
-    non_reproducible: bool = False
-    high_blast_radius: bool = False
+    high_risk_domain: bool = Field(
+        default=False,
+        description="The change affects a sensitive security, identity, payment, fraud, privacy, or access-control area.",
+    )
+    evidence_uncertain: bool = Field(
+        default=False,
+        description="A material conclusion depends on evidence that is missing or cannot be verified.",
+    )
+    cross_system_scope: bool = Field(
+        default=False,
+        description="The relevant behavior crosses repository, service, or system boundaries.",
+    )
+    multiple_plausible_causes: bool = Field(
+        default=False,
+        description="More than one plausible cause remains after investigation.",
+    )
+    evidence_conflict: bool = Field(
+        default=False,
+        description="Relevant authoritative evidence sources disagree.",
+    )
+    non_reproducible: bool = Field(
+        default=False,
+        description="The reported behavior cannot be reproduced under expected conditions.",
+    )
+    high_blast_radius: bool = Field(
+        default=False,
+        description="The change could affect many consumers, services, or data records.",
+    )
 
 
 class DeepReviewAssessment(BaseModel):
