@@ -87,12 +87,16 @@ def test_client_rule_templates_preserve_orchestration_contract():
         assert "finish_qa_orchestration" in text, artifact.relative_to(ROOT)
 
 
-def test_ci_uses_immutable_action_refs_and_builds_wheel():
+def test_ci_uses_immutable_actions_audits_dependencies_and_builds_wheel():
     content = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     refs = re.findall(r"uses:\s+\S+@([^\s#]+)", content)
 
     assert refs
     assert all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in refs)
+    assert 'version: "0.11.30"' in content
+    assert "UV_PREVIEW_FEATURES: audit-command" in content
+    assert "run: uv audit --locked" in content
+    assert content.index("uv lock --check") < content.index("uv audit --locked")
     assert "uv build --wheel --out-dir dist" in content
 
 
@@ -157,6 +161,16 @@ def test_operational_artifacts_describe_host_orchestration():
             assert phrase not in text
 
 
+def test_canonical_client_rules_use_transition_state_and_recovery_read():
+    rules = (ROOT / "client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "updated session returned by `advance_qa_orchestration`" in rules
+    assert "only to resume or recover" in rules
+    assert "use `get_qa_orchestration` to determine the next action" not in rules
+
+
 def test_operational_artifacts_describe_review_bundles_and_statuses():
     artifacts = [
         ROOT / "README.md",
@@ -213,7 +227,7 @@ def test_documentation_contains_no_retired_runtime_terms():
 
 
 @pytest.mark.asyncio
-async def test_launcher_exposes_six_tools(monkeypatch, tmp_path):
+async def test_launcher_exposes_five_tools(monkeypatch, tmp_path):
     virtual_env = str(Path(sys.executable).parent.parent)
     monkeypatch.setenv("VIRTUAL_ENV", virtual_env)
     monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))

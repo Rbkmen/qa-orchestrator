@@ -28,6 +28,8 @@ Issues = "https://github.com/Rbkmen/qa-orchestrator/issues"
 
 [dependency-groups]
 dev = [
+  # Mirror build-system.requires so the lockfile audit covers the build backend too.
+  "hatchling==1.32.4",
   "pytest>=9.0.3,<10.0",
   "pytest-asyncio>=1.0,<2.0",
   "ruff>=0.11,<1.0",

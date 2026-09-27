@@ -150,7 +150,7 @@ def test_concurrent_starts_respect_active_session_limit():
     assert sum(results) == 1
 
 
-def test_deep_flow_uses_sol_then_returns_to_sol_synthesis():
+def test_deep_flow_returns_to_configured_synthesis():
     orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
     session = orchestrator.start("ordinary_review")
     session = orchestrator.advance(
@@ -164,8 +164,10 @@ def test_deep_flow_uses_sol_then_returns_to_sol_synthesis():
         completed_step=OrchestrationStep.PRIMARY_REVIEW,
         status="completed",
         completed_profile=ReviewAgent.SECURITY_REVIEWER,
-        needs_deep_analysis=True,
-        reason_code="security_sensitive",
+        risk_signals=DeepReviewSignals(
+            high_risk_domain=True,
+            evidence_uncertain=True,
+        ),
     )
 
     assert session.current_step is OrchestrationStep.DEEP_REVIEW
@@ -341,14 +343,16 @@ def test_bundle_requires_each_profile_in_fixed_order_before_synthesis():
 
     assert session.current_profile is ReviewAgent.CODE_EXPLORER
 
-    with pytest.raises(OrchestrationError, match="final review profile"):
+    with pytest.raises(OrchestrationError, match="final primary-review profile"):
         orchestrator.advance(
             run_id=session.run_id,
             completed_step=OrchestrationStep.PRIMARY_REVIEW,
             status="completed",
             completed_profile=ReviewAgent.CODE_EXPLORER,
-            needs_deep_analysis=True,
-            reason_code="security_sensitive",
+            risk_signals=DeepReviewSignals(
+                high_risk_domain=True,
+                evidence_uncertain=True,
+            ),
         )
 
     session = orchestrator.advance(
@@ -451,8 +455,10 @@ def test_every_fixed_bundle_can_escalate_after_final_profile(bundle: ReviewBundl
         completed_step=OrchestrationStep.PRIMARY_REVIEW,
         status="completed",
         completed_profile=profiles[-1],
-        needs_deep_analysis=True,
-        reason_code="high_blast_radius",
+        risk_signals=DeepReviewSignals(
+            high_risk_domain=True,
+            evidence_uncertain=True,
+        ),
     )
 
     assert session.current_step is OrchestrationStep.DEEP_REVIEW
@@ -487,18 +493,20 @@ def test_deep_reason_is_retained_in_content_free_session():
         completed_step=OrchestrationStep.PRIMARY_REVIEW,
         status="completed",
         completed_profile=ReviewAgent.SECURITY_REVIEWER,
-        needs_deep_analysis=True,
-        reason_code="security_sensitive",
+        risk_signals=DeepReviewSignals(
+            high_risk_domain=True,
+            evidence_uncertain=True,
+        ),
     )
 
-    assert session.deep_reason_code.value == "security_sensitive"
+    assert session.deep_reason_code is OrchestrationReason.HIGH_RISK_DOMAIN
 
     session = orchestrator.advance(
         run_id=session.run_id,
         completed_step=OrchestrationStep.DEEP_REVIEW,
         status="completed",
     )
-    assert session.deep_reason_code.value == "security_sensitive"
+    assert session.deep_reason_code is OrchestrationReason.HIGH_RISK_DOMAIN
 
 
 def test_returned_bundle_profile_list_cannot_mutate_store():

@@ -34,16 +34,6 @@ class OrchestrationStep(StrEnum):
     SYNTHESIS = "synthesis"
     AWAITING_HOST_OUTCOME = "awaiting_host_outcome"
 
-    @classmethod
-    def _missing_(cls, value: object) -> "OrchestrationStep | None":
-        legacy_values = {
-            "luna_triage": cls.TRIAGE,
-            "terra_primary_review": cls.PRIMARY_REVIEW,
-            "sol_deep_review": cls.DEEP_REVIEW,
-            "terra_synthesis": cls.SYNTHESIS,
-        }
-        return legacy_values.get(value) if isinstance(value, str) else None
-
 
 class OrchestrationStatus(StrEnum):
     ACTIVE = "active"
@@ -62,9 +52,6 @@ class OrchestrationModel(StrEnum):
 class OrchestrationReason(StrEnum):
     EVIDENCE_GAP = "evidence_gap"
     CROSS_REPOSITORY = "cross_repository"
-    SECURITY_SENSITIVE = "security_sensitive"
-    PAYMENT_SENSITIVE = "payment_sensitive"
-    FRAUD_SENSITIVE = "fraud_sensitive"
     ROOT_CAUSE = "root_cause"
     HIGH_BLAST_RADIUS = "high_blast_radius"
     HIGH_RISK_DOMAIN = "high_risk_domain"
@@ -256,8 +243,6 @@ class AdvanceQaOrchestrationRequest(BaseModel):
     selected_profile: ReviewAgent | None = None
     completed_profile: ReviewAgent | None = None
     risk_signals: DeepReviewSignals | None = None
-    needs_deep_analysis: bool = False
-    reason_code: OrchestrationReason | None = None
 
     @model_validator(mode="after")
     def validate_transition_signal(self) -> "AdvanceQaOrchestrationRequest":
@@ -278,27 +263,13 @@ class AdvanceQaOrchestrationRequest(BaseModel):
         elif self.completed_profile is not None:
             raise ValueError("completed_profile may only be supplied after primary review")
 
-        if self.risk_signals is not None:
-            if (
-                self.completed_step is not OrchestrationStep.PRIMARY_REVIEW
-                or self.status != "completed"
-            ):
-                raise ValueError(
-                    "risk signals must be sent with the final primary-review profile"
-                )
-            if self.needs_deep_analysis or self.reason_code is not None:
-                raise ValueError("risk signals cannot be combined with a manual deep request")
-
-        if self.needs_deep_analysis:
-            if self.completed_step is not OrchestrationStep.PRIMARY_REVIEW:
-                raise ValueError("deep analysis can only follow primary review")
-            if self.status != "completed":
-                raise ValueError("deep analysis requires a completed primary review")
-            if self.reason_code is None:
-                raise ValueError("reason_code is required for deep analysis")
-        elif self.reason_code is not None:
-            raise ValueError("reason_code requires deep analysis")
-
+        if self.risk_signals is not None and (
+            self.completed_step is not OrchestrationStep.PRIMARY_REVIEW
+            or self.status != "completed"
+        ):
+            raise ValueError(
+                "risk signals must be sent with the final primary-review profile"
+            )
         return self
 
 
@@ -403,8 +374,6 @@ class QaOrchestrator:
         selected_profile: ReviewAgent | None = None,
         completed_profile: ReviewAgent | None = None,
         risk_signals: DeepReviewSignals | None = None,
-        needs_deep_analysis: bool = False,
-        reason_code: OrchestrationReason | None = None,
     ) -> QaOrchestrationSession:
         try:
             request = AdvanceQaOrchestrationRequest(
@@ -415,8 +384,6 @@ class QaOrchestrator:
                 selected_profile=selected_profile,
                 completed_profile=completed_profile,
                 risk_signals=risk_signals,
-                needs_deep_analysis=needs_deep_analysis,
-                reason_code=reason_code,
             )
         except ValidationError as exc:
             raise OrchestrationError("invalid transition signal") from exc
@@ -540,23 +507,12 @@ class QaOrchestrator:
             if request.completed_profile is not expected_profile:
                 raise OrchestrationError("completed profile does not match current profile")
             is_last_profile = next_profile_index == len(session.review_profiles) - 1
-            if request.needs_deep_analysis and not is_last_profile:
-                raise OrchestrationError("deep analysis requires the final review profile")
-            if request.risk_signals is not None and not is_last_profile:
-                raise OrchestrationError(
-                    "risk signals must be sent with the final primary-review profile"
-                )
-            if (
-                is_last_profile
-                and request.risk_signals is None
-                and not request.needs_deep_analysis
-            ):
-                raise OrchestrationError(
-                    "risk_signals are required for the final primary-review profile"
-                )
-
             completed_profiles = [*session.completed_profiles, expected_profile]
             if not is_last_profile:
+                if request.risk_signals is not None:
+                    raise OrchestrationError(
+                        "risk signals must be sent with the final primary-review profile"
+                    )
                 next_profile = session.review_profiles[next_profile_index + 1]
                 return session.model_copy(
                     update={
@@ -567,29 +523,19 @@ class QaOrchestrator:
                     }
                 )
 
-            assessment = (
-                assess_deep_review(request.risk_signals)
-                if request.risk_signals is not None
-                else None
-            )
-            should_escalate = request.needs_deep_analysis or (
-                assessment is not None and assessment.should_escalate
-            )
-            if should_escalate:
-                reason_code = (
-                    assessment.reason_codes[0]
-                    if assessment is not None and assessment.reason_codes
-                    else request.reason_code
+            if request.risk_signals is None:
+                raise OrchestrationError(
+                    "risk_signals are required for the final primary-review profile"
                 )
-                if reason_code is None:
-                    raise OrchestrationError("deep analysis requires a reason code")
+            assessment = assess_deep_review(request.risk_signals)
+            if assessment.should_escalate:
                 return session.model_copy(
                     update={
                         "current_step": OrchestrationStep.DEEP_REVIEW,
                         "current_profile": None,
                         "completed_profiles": completed_profiles,
                         "deep_assessment": assessment,
-                        "deep_reason_code": reason_code,
+                        "deep_reason_code": assessment.reason_codes[0],
                         "model_policy": self._model_policies[OrchestrationStep.DEEP_REVIEW],
                         "next_action": _NEXT_ACTIONS[OrchestrationStep.DEEP_REVIEW],
                     }

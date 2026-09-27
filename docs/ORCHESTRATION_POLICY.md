@@ -50,7 +50,7 @@ Before changing the recommended model list, verify model IDs and reasoning suppo
 1. The host calls `start_qa_orchestration(task_type)` and receives a `run_id`, the configured triage model and reasoning effort (default `max`), and the next action.
 2. After triage, the host calls `advance_qa_orchestration` with one fixed bundle or one of the ten `ReviewAgent` profiles.
 3. For a bundle, the host runs the configured primary model once per profile in the returned order and passes the role identifier as `completed_profile` after each stage; the orchestrator does not skip roles or accept an arbitrary order.
-4. In the same transition that completes the last primary-review profile, the host must supply structured `risk_signals` (use an empty object when no signals apply); the orchestrator applies the fixed deep-review rules and either goes directly to configured synthesis or returns the configured deep model with its configured reasoning (default `high`). Do not send `risk_signals` on the later synthesis transition. The legacy explicit manual-escalation input remains accepted for older clients.
+4. In the same transition that completes the last primary-review profile, the host must supply structured `risk_signals` (use an empty object when no signals apply); the orchestrator applies the fixed deep-review rules and either goes directly to configured synthesis or returns the configured deep model with its configured reasoning (default `high`). Do not send `risk_signals` on the later synthesis transition.
 5. After deep review, the host returns to the configured synthesis model.
 6. After synthesis, the state becomes `awaiting_host_outcome`; the host calls `finish_qa_orchestration` with the same `run_id` and a status of `completed`, `partial`, or `blocked`. The orchestrator moves the session to its final status. For an early stop, first pass `partial` or `blocked` to `advance_qa_orchestration`, then finish the session with that same status.
 
@@ -127,7 +127,7 @@ The orchestrator enters the optional deep-review branch when one of these rules 
 
 Map observed conditions to signals only when evidence supports them. Sensitive identity, security, payment, fraud, privacy, or access-control impact maps to `high_risk_domain`; a material missing verification source maps to `evidence_uncertain`; a relevant boundary crossing repositories, services, or systems maps to `cross_system_scope`; multiple plausible causes remaining after investigation map to `multiple_plausible_causes`; disagreement between relevant authoritative sources maps to `evidence_conflict`; an expected behavior that cannot be reproduced maps to `non_reproducible`; and broad impact across consumers or data maps to `high_blast_radius`. A profile's escalation text or an ordinary coverage gap alone does not set a signal. The host supplies the booleans and the fixed rules above determine whether deep review runs.
 
-The returned `deep_assessment` contains `should_escalate`, matched fixed rules, fixed reason codes, and the complexity-signal count. No raw evidence is stored or sent to the orchestrator. Existing `needs_deep_analysis` plus one fixed `reason_code` remains accepted for client compatibility, but new clients should use `risk_signals`.
+The returned `deep_assessment` contains `should_escalate`, matched fixed rules, fixed reason codes, and the complexity-signal count. No raw evidence is stored or sent to the orchestrator. `risk_signals` is the only input for deep-review assessment.
 
 ## Visual workflow
 

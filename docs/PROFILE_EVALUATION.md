@@ -135,6 +135,18 @@ OpenAI recommends evaluating prompting guidance with the selected model and work
 
 **Expected:** Return no finding candidate. Mention a gap only if a specific required behavior is actually unverified; do not invent a risk to fill the section.
 
+## Deep-review routing checks
+
+These synthetic cases check the host's signal mapping and the orchestrator's fixed rules; they do not call a model or collect run data.
+
+| Evidence state | Signals | Expected route |
+|---|---|---|
+| Sensitive authorization change with a material permission contract unavailable | `high_risk_domain`, `evidence_uncertain` | Deep review: `high_risk_with_uncertainty`. |
+| One relevant cross-service boundary, with no other unresolved complexity | `cross_system_scope` | No deep review; one complexity signal is insufficient. |
+| Authoritative sources conflict about access control | `evidence_conflict`, `high_risk_domain` | Deep review: `critical_evidence_conflict`. |
+| Multiple systems are involved and the reported behavior cannot be reproduced | `cross_system_scope`, `non_reproducible` | Deep review: `multiple_complexity_signals`. |
+| A routine test case is missing, but there is no material source gap or other risk | `{}` | No deep review; an ordinary coverage gap is not an escalation signal by itself. |
+
 ## Pass conditions
 
 - Each profile uses only its returned sections and stays within its focus.

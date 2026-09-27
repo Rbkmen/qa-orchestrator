@@ -14,7 +14,6 @@ from qa_orchestrator.contracts import (
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
     DeepReviewSignals,
-    OrchestrationReason,
     OrchestrationStep,
     QaOrchestrationSession,
 )
@@ -64,19 +63,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
                 )
             ),
         ] = None,
-        needs_deep_analysis: Annotated[
-            bool,
-            Field(description="Legacy compatibility input; prefer risk_signals."),
-        ] = False,
-        reason_code: Annotated[
-            OrchestrationReason | None,
-            Field(description="Legacy compatibility input; prefer risk_signals."),
-        ] = None,
     ) -> QaOrchestrationSession:
         """Require risk_signals when completing the final primary review profile.
 
-        Send an empty object when no signals apply. The legacy manual
-        deep-review input remains accepted.
+        Send an empty object when no signals apply.
         """
         return service.advance_qa_orchestration(
             AdvanceQaOrchestrationRequest(
@@ -87,8 +77,6 @@ def build_server(service: OrchestratorService) -> FastMCP:
                 selected_profile=selected_profile,
                 completed_profile=completed_profile,
                 risk_signals=risk_signals,
-                needs_deep_analysis=needs_deep_analysis,
-                reason_code=reason_code,
             )
         )
 

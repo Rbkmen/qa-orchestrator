@@ -23,7 +23,7 @@ The orchestrator does not call models, choose severity or release readiness, or 
 
 ### Bundles and profile names
 
-The triage stage selects one fixed bundle or one compatibility profile. The primary-review stage executes bundle profiles sequentially. After every role, the host sends `completed_profile`, and the orchestrator returns `current_profile` and `completed_profiles`. Deep review or synthesis is available only after the final role. Transition identifiers are model-neutral; choose the model from the returned `model_policy`, never from the step name.
+The triage stage selects one fixed bundle or one compatibility profile. The primary-review stage executes bundle profiles sequentially. After every role, the host sends `completed_profile`, and the orchestrator returns `current_profile` and `completed_profiles`. Use the updated session returned by `advance_qa_orchestration` for the next action and model policy; call `get_qa_orchestration` only when resuming or recovering a session. Deep review or synthesis is available only after the final role. Transition identifiers are model-neutral; choose the model from the returned `model_policy`, never from the step name.
 
 | Bundle | Profile order |
 |---|---|
@@ -66,15 +66,13 @@ Primary review → Faraday — Evidence Investigator → Code Reviewer → Test 
 Host → Final QA outcome
 ```
 
-With the final primary-review role, the host must send the structured boolean `risk_signals` object in the same `advance_qa_orchestration` call as the final `completed_profile` (send `{}` when no signals apply). When a fixed escalation rule matches, the orchestrator inserts a deep read-only review before final synthesis. Do not send `risk_signals` on the later synthesis transition. It returns the matched rules and fixed reason codes as `deep_assessment`; raw evidence never enters the orchestrator. The legacy explicit `needs_deep_analysis=true` plus `reason_code` path remains accepted for existing clients.
+With the final primary-review role, the host must send the structured boolean `risk_signals` object in the same `advance_qa_orchestration` call as the final `completed_profile` (send `{}` when no signals apply). Deep review is derived only from the fixed signal rules. Do not send `risk_signals` on the later synthesis transition. The returned session includes matched rules and fixed reason codes as `deep_assessment`; raw evidence never enters the orchestrator.
 
 Deep-review rules:
 
 1. `high_risk_domain` + `evidence_uncertain`;
 2. any two of `cross_system_scope`, `multiple_plausible_causes`, `non_reproducible`, and `high_blast_radius`;
 3. `evidence_conflict` together with `high_risk_domain`, `cross_system_scope`, or `high_blast_radius`.
-
-The legacy `needs_deep_analysis` + `reason_code` transition remains supported for compatibility.
 
 For low-risk, narrow reviews, the triage stage may select one compatibility profile instead of a bundle: `code_reviewer` for a small behavior change, `pr_test_analyzer` for a test-only change, `typescript_reviewer` for a TypeScript-only change, `react_reviewer` for a React-only change, `ruby_reviewer` for a Ruby-only change, `python_reviewer` for a Python/MCP-only change, or `mobile_reviewer` for a React Native/native-platform-only change. Broad or cross-concern reviews continue to use a fixed bundle.
 
@@ -89,7 +87,7 @@ The service publishes exactly five tools:
 | `prepare_review_route(agent_profile)` | Deterministic checklist for one of the ten profiles |
 | `start_qa_orchestration(task_type)` | Create a host-owned orchestration session |
 | `advance_qa_orchestration(...)` | Make one structured transition between stages |
-| `get_qa_orchestration(run_id)` | Read the current content-free state |
+| `get_qa_orchestration(run_id)` | Resume or recover the current content-free state |
 | `finish_qa_orchestration(run_id, outcome)` | Finalize a host-owned orchestration session |
 
 Bundle orchestration flow:

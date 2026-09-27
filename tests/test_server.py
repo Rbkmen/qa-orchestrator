@@ -33,7 +33,8 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
 
     advance_description = tools["advance_qa_orchestration"].description or ""
     assert "primary review" in advance_description.lower()
-    assert "terra primary" not in advance_description.lower()
+    advance_properties = tools["advance_qa_orchestration"].inputSchema["properties"]
+    assert {"needs_deep_analysis", "reason_code"}.isdisjoint(advance_properties)
     risk_signals_description = tools["advance_qa_orchestration"].inputSchema["properties"][
         "risk_signals"
     ]["description"]
@@ -133,7 +134,7 @@ async def test_orchestration_tools_advance_and_get_structured_state(tmp_path):
             "advance_qa_orchestration",
             {
                 "run_id": run_id,
-                "completed_step": "luna_triage",
+                "completed_step": "triage",
                 "status": "completed",
                 "selected_profile": "code_reviewer",
             },
@@ -320,7 +321,7 @@ async def test_orchestration_tool_rejects_incompatible_bundle_signals(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_orchestration_tool_rejects_selection_after_luna_and_custom_order(tmp_path):
+async def test_orchestration_tool_rejects_selection_after_triage_and_custom_order(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
@@ -363,7 +364,7 @@ async def test_orchestration_tool_rejects_selection_after_luna_and_custom_order(
 
 
 @pytest.mark.asyncio
-async def test_server_finishes_orchestration_without_persisting_task_data(tmp_path):
+async def test_server_completes_full_flow_without_state_reads_or_task_persistence(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
@@ -381,7 +382,7 @@ async def test_server_finishes_orchestration_without_persisting_task_data(tmp_pa
                 "selected_profile": "code_reviewer",
             },
         )
-        synthesis = await client.call_tool(
+        after_primary = await client.call_tool(
             "advance_qa_orchestration",
             {
                 "run_id": run_id,
@@ -391,24 +392,24 @@ async def test_server_finishes_orchestration_without_persisting_task_data(tmp_pa
                 "risk_signals": {},
             },
         )
-        await client.call_tool(
+        awaiting_host = await client.call_tool(
             "advance_qa_orchestration",
             {
                 "run_id": run_id,
-                "completed_step": synthesis.structured_content["current_step"],
+                "completed_step": after_primary.structured_content["current_step"],
                 "status": "completed",
             },
         )
-        await client.call_tool(
+        final = await client.call_tool(
             "finish_qa_orchestration",
             {
                 "outcome": "completed",
                 "run_id": run_id,
             },
         )
-        current = await client.call_tool("get_qa_orchestration", {"run_id": run_id})
-
-    assert current.structured_content["status"] == "completed"
+    assert primary.structured_content["current_step"] == "primary_review"
+    assert awaiting_host.structured_content["status"] == "awaiting_host_outcome"
+    assert final.structured_content["status"] == "completed"
     assert list(tmp_path.iterdir()) == []
 
 

@@ -10,7 +10,6 @@ from qa_orchestrator.orchestration import (
     DeepReviewSignals,
     ModelPolicy,
     OrchestrationModel,
-    OrchestrationReason,
     OrchestrationStatus,
     OrchestrationStep,
     QaOrchestrationSession,
@@ -80,14 +79,16 @@ def test_advance_request_rejects_free_form_fields():
         )
 
 
-def test_legacy_step_values_are_accepted_as_model_neutral_steps():
-    assert OrchestrationStep("luna_triage") is OrchestrationStep.TRIAGE
-    assert OrchestrationStep("terra_primary_review") is OrchestrationStep.PRIMARY_REVIEW
-    assert OrchestrationStep("sol_deep_review") is OrchestrationStep.DEEP_REVIEW
-    assert OrchestrationStep("terra_synthesis") is OrchestrationStep.SYNTHESIS
+@pytest.mark.parametrize(
+    "step",
+    ("luna_triage", "terra_primary_review", "sol_deep_review", "terra_synthesis"),
+)
+def test_transition_identifiers_are_model_neutral(step):
+    with pytest.raises(ValueError):
+        OrchestrationStep(step)
 
 
-def test_deep_reason_requires_fixed_reason_code():
+def test_legacy_manual_escalation_fields_are_rejected():
     with pytest.raises(ValidationError):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
@@ -95,20 +96,11 @@ def test_deep_reason_requires_fixed_reason_code():
             status="completed",
             completed_profile=ReviewAgent.CODE_REVIEWER,
             needs_deep_analysis=True,
+            reason_code="high_risk_domain",
         )
 
-    request = AdvanceQaOrchestrationRequest(
-        run_id="qar-0123456789abcdef0123456789abcdef",
-        completed_step=OrchestrationStep.PRIMARY_REVIEW,
-        status="completed",
-        completed_profile=ReviewAgent.CODE_REVIEWER,
-        needs_deep_analysis=True,
-        reason_code=OrchestrationReason.SECURITY_SENSITIVE,
-    )
-    assert request.reason_code is OrchestrationReason.SECURITY_SENSITIVE
 
-
-def test_risk_signals_are_final_terra_only_and_replace_manual_deep_request():
+def test_risk_signals_are_final_primary_review_only():
     signals = DeepReviewSignals(high_risk_domain=True, evidence_uncertain=True)
 
     with pytest.raises(ValidationError, match="final primary-review profile"):
@@ -128,17 +120,6 @@ def test_risk_signals_are_final_terra_only_and_replace_manual_deep_request():
             risk_signals=signals,
         )
 
-    with pytest.raises(ValidationError, match="cannot be combined"):
-        AdvanceQaOrchestrationRequest(
-            run_id="qar-0123456789abcdef0123456789abcdef",
-            completed_step=OrchestrationStep.PRIMARY_REVIEW,
-            status="completed",
-            completed_profile=ReviewAgent.CODE_REVIEWER,
-            risk_signals=signals,
-            needs_deep_analysis=True,
-        )
-
-
 def test_risk_signals_require_a_completed_profile():
     with pytest.raises(ValidationError, match="completed_profile"):
         AdvanceQaOrchestrationRequest(
@@ -149,7 +130,7 @@ def test_risk_signals_require_a_completed_profile():
         )
 
 
-def test_completed_terra_requires_completed_profile():
+def test_completed_primary_review_requires_completed_profile():
     with pytest.raises(ValidationError, match="completed_profile"):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
@@ -158,7 +139,7 @@ def test_completed_terra_requires_completed_profile():
         )
 
 
-def test_completed_profile_is_rejected_outside_terra():
+def test_completed_profile_is_rejected_outside_primary_review():
     with pytest.raises(ValidationError, match="only be supplied"):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
@@ -169,7 +150,7 @@ def test_completed_profile_is_rejected_outside_terra():
         )
 
 
-def test_partial_terra_rejects_ignored_completed_profile():
+def test_partial_primary_review_rejects_ignored_completed_profile():
     with pytest.raises(ValidationError, match="completed_profile"):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
@@ -179,18 +160,7 @@ def test_partial_terra_rejects_ignored_completed_profile():
         )
 
 
-def test_non_deep_request_rejects_reason_code():
-    with pytest.raises(ValidationError):
-        AdvanceQaOrchestrationRequest(
-            run_id="qar-0123456789abcdef0123456789abcdef",
-            completed_step=OrchestrationStep.PRIMARY_REVIEW,
-            status="completed",
-            completed_profile=ReviewAgent.CODE_REVIEWER,
-            reason_code=OrchestrationReason.ROOT_CAUSE,
-        )
-
-
-def test_completed_luna_requires_exactly_one_selection():
+def test_completed_triage_requires_exactly_one_selection():
     with pytest.raises(ValidationError, match="exactly one"):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",
@@ -208,7 +178,7 @@ def test_completed_luna_requires_exactly_one_selection():
         )
 
 
-def test_completed_luna_accepts_one_fixed_bundle():
+def test_completed_triage_accepts_one_fixed_bundle():
     request = AdvanceQaOrchestrationRequest(
         run_id="qar-0123456789abcdef0123456789abcdef",
         completed_step=OrchestrationStep.TRIAGE,
@@ -219,7 +189,7 @@ def test_completed_luna_accepts_one_fixed_bundle():
     assert request.selected_bundle is ReviewBundle.ORDINARY_MR
 
 
-def test_selection_is_rejected_after_luna():
+def test_selection_is_rejected_after_triage():
     with pytest.raises(ValidationError, match="only be supplied after triage"):
         AdvanceQaOrchestrationRequest(
             run_id="qar-0123456789abcdef0123456789abcdef",

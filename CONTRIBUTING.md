@@ -39,7 +39,7 @@ The public surface must remain limited to five tools:
 1. `prepare_review_route` — profile metadata;
 2. `start_qa_orchestration` — create a session;
 3. `advance_qa_orchestration` — validated transition;
-4. `get_qa_orchestration` — state and next action;
+4. `get_qa_orchestration` — resume or recover the current content-free state;
 5. `finish_qa_orchestration` — finalize the host-owned outcome for a session.
 
 When changing the contract, update `contracts.py`, `orchestration.py`, `service.py`, `server.py`, tests, the README, the routing policy, and client rules. For every new branch, add checks for input validation, illegal transitions, expiry/limits, and the absence of task content.
