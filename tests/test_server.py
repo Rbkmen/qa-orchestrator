@@ -33,8 +33,15 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
 
     advance_description = tools["advance_qa_orchestration"].description or ""
     assert "primary review" in advance_description.lower()
+    assert "out-of-order" in advance_description.lower()
     advance_properties = tools["advance_qa_orchestration"].inputSchema["properties"]
     assert {"needs_deep_analysis", "reason_code"}.isdisjoint(advance_properties)
+    for name, tool in tools.items():
+        assert all(
+            property_schema.get("description", "").strip()
+            for property_schema in tool.inputSchema["properties"].values()
+        ), name
+
     risk_signals_description = tools["advance_qa_orchestration"].inputSchema["properties"][
         "risk_signals"
     ]["description"]
@@ -46,8 +53,19 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
         "primary_review",
         "deep_review",
         "synthesis",
-        "awaiting_host_outcome",
     ]
+    assert "finish_qa_orchestration" in tools["advance_qa_orchestration"].inputSchema[
+        "properties"
+    ]["completed_step"]["description"]
+
+    task_type_description = tools["start_qa_orchestration"].inputSchema["properties"][
+        "task_type"
+    ]["description"]
+    assert "recommended_bundles only" in task_type_description
+    assert "risk level" in task_type_description
+
+    assert "single-profile" in tools["prepare_review_route"].description
+    assert "do not extend" in tools["get_qa_orchestration"].description
 
     for name in (
         "prepare_review_route",
@@ -69,8 +87,13 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
         assert annotations.readOnlyHint is False
         assert annotations.openWorldHint is False
 
+    assert tools["start_qa_orchestration"].annotations.idempotentHint is False
+    assert tools["advance_qa_orchestration"].annotations.idempotentHint is False
+    assert tools["finish_qa_orchestration"].annotations.idempotentHint is True
+
     run_id_schema = tools["get_qa_orchestration"].inputSchema["properties"]["run_id"]
     assert run_id_schema["pattern"] == r"^qar-[0-9a-f]{32}$"
+    assert "returned by start_qa_orchestration" in run_id_schema["description"]
     assert set(tools["finish_qa_orchestration"].inputSchema["properties"]) == {
         "outcome",
         "run_id",

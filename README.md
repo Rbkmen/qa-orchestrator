@@ -110,11 +110,11 @@ The service publishes exactly five tools:
 
 | Tool | Purpose |
 |---|---|
-| `prepare_review_route(agent_profile)` | Deterministic checklist for one of the ten profiles |
-| `start_qa_orchestration(task_type)` | Create a host-owned orchestration session |
-| `advance_qa_orchestration(...)` | Make one structured transition between stages |
-| `get_qa_orchestration(run_id)` | Resume or recover the current content-free state |
-| `finish_qa_orchestration(run_id, outcome)` | Finalize a host-owned orchestration session |
+| `prepare_review_route(agent_profile)` | Return the fixed checklist for one profile without creating a session |
+| `start_qa_orchestration(task_type)` | Create a session and return the task-based bundle shortlist |
+| `advance_qa_orchestration(...)` | Complete triage, primary review, deep review, or synthesis and return the next action |
+| `get_qa_orchestration(run_id)` | Read the current content-free state when resuming or recovering a session |
+| `finish_qa_orchestration(run_id, outcome)` | Record the host-owned outcome after synthesis or an early stop |
 
 Bundle orchestration flow:
 
