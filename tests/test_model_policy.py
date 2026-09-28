@@ -92,6 +92,16 @@ def test_service_uses_selected_models(tmp_path):
 
     assert session.model_policy.model == "claude-triage"
     assert session.model_policy.provider is ModelProvider.ANTHROPIC
+    assert session.model_policy.reasoning_capabilities_verified is False
+
+
+def test_gpt6_policies_mark_curated_capabilities_as_verified(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+
+    session = service.start_qa_orchestration("ordinary_review")
+
+    assert session.model_policy.model == "gpt-6-luna"
+    assert session.model_policy.reasoning_capabilities_verified is True
 
 
 def test_setup_offers_only_openai_and_anthropic():

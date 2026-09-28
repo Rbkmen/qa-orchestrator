@@ -14,6 +14,7 @@ from qa_orchestrator.orchestration import (
     QaOrchestrator,
 )
 from qa_orchestrator.review_profiles import build_review_route
+from qa_orchestrator.session_store import SqliteSessionStore
 
 
 class OrchestratorService:
@@ -24,10 +25,16 @@ class OrchestratorService:
 
     def __init__(self, settings: Settings) -> None:
         model_selection = load_model_selection(settings.model_policy_path)
+        session_store = (
+            SqliteSessionStore(settings.orchestration_session_store_path)
+            if settings.orchestration_session_store_path is not None
+            else None
+        )
         self.orchestrator = QaOrchestrator(
             ttl_seconds=settings.orchestration_session_ttl_seconds,
             max_sessions=settings.orchestration_max_sessions,
             model_selection=model_selection,
+            session_store=session_store,
         )
 
     def prepare_review_route(self, agent_profile: ReviewAgent | str) -> ReviewRoute:

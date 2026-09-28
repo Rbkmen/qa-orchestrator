@@ -1,5 +1,6 @@
 import pytest
 
+from qa_orchestrator.config import Settings
 from qa_orchestrator.contracts import ReviewAgent, ReviewBundle
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
@@ -57,6 +58,7 @@ def test_service_exposes_fixed_profiles_and_bundles(tmp_path):
 
     assert session.allowed_profiles == list(ReviewAgent)
     assert session.allowed_bundles == list(ReviewBundle)
+    assert session.recommended_bundles == [ReviewBundle.ORDINARY_MR]
     assert session.selected_bundle is None
     assert session.review_profiles == []
     assert session.model_policy.model.value == "gpt-6-luna"
@@ -90,6 +92,24 @@ def test_service_rejects_unknown_review_profile(tmp_path):
         service.prepare_review_route("not_a_profile")
 
 
+@pytest.mark.parametrize(
+    ("task_type", "recommended"),
+    [
+        ("widget_review", [ReviewBundle.WIDGET, ReviewBundle.WIDGET_JS]),
+        ("epic_analysis", [ReviewBundle.REQUIREMENTS]),
+        ("requirements_analysis", [ReviewBundle.REQUIREMENTS]),
+        ("qa_planning", [ReviewBundle.REQUIREMENTS]),
+        ("autotest_implementation", [ReviewBundle.AUTOTEST, ReviewBundle.ORDINARY_MR]),
+        ("other", []),
+    ],
+)
+def test_service_recommends_bundles_without_restricting_choices(tmp_path, task_type, recommended):
+    session = OrchestratorService.from_settings(data_dir=tmp_path).start_qa_orchestration(task_type)
+
+    assert session.recommended_bundles == recommended
+    assert session.allowed_bundles == list(ReviewBundle)
+
+
 def test_service_finishes_orchestrated_session_without_persisting_task_data(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
     started = _ready_for_host_outcome(service)
@@ -99,6 +119,18 @@ def test_service_finishes_orchestrated_session_without_persisting_task_data(tmp_
     assert final.status is OrchestrationStatus.COMPLETED
     assert final.next_action == "Host recorded the final QA outcome."
     assert list(tmp_path.iterdir()) == []
+
+
+def test_service_restores_unfinished_session_when_store_is_configured(tmp_path):
+    settings = Settings(
+        data_dir=tmp_path,
+        orchestration_session_store_path=tmp_path / "sessions.sqlite3",
+    )
+    started = OrchestratorService(settings).start_qa_orchestration("ordinary_review")
+
+    restored = OrchestratorService(settings).get_qa_orchestration(started.run_id)
+
+    assert restored.model_dump() == started.model_dump()
 
 
 @pytest.mark.parametrize("outcome", ["partial", "blocked"])

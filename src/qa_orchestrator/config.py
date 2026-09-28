@@ -8,6 +8,7 @@ class Settings:
     orchestration_session_ttl_seconds: int = 1_800
     orchestration_max_sessions: int = 100
     data_dir: Path = Path.home() / ".qa-orchestrator"
+    orchestration_session_store_path: Path | None = None
 
     @property
     def model_policy_path(self) -> Path:
@@ -26,6 +27,7 @@ class Settings:
     def from_env(cls) -> "Settings":
         defaults = cls()
         data_dir = Path(environ.get("QA_ORCHESTRATOR_DATA_DIR", str(defaults.data_dir)))
+        session_store_path = environ.get("QA_ORCHESTRATOR_SESSION_STORE_PATH")
         return cls(
             orchestration_session_ttl_seconds=int(
                 environ.get(
@@ -40,4 +42,7 @@ class Settings:
                 )
             ),
             data_dir=data_dir,
+            orchestration_session_store_path=(
+                Path(session_store_path) if session_store_path else None
+            ),
         )

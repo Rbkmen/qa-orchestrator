@@ -68,6 +68,7 @@ def test_launcher_forwards_supported_overrides():
     assert 'QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS="${QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS:-1800}"' in content
     assert 'QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS="${QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS:-100}"' in content
     assert 'QA_ORCHESTRATOR_MODEL_POLICY_PATH="$orchestrator_model_policy_path"' in content
+    assert 'QA_ORCHESTRATOR_SESSION_STORE_PATH="$orchestrator_session_store_path"' in content
 
 
 def test_client_rule_templates_preserve_orchestration_contract():
@@ -96,6 +97,8 @@ def test_ci_uses_immutable_actions_audits_dependencies_and_builds_wheel():
     assert 'version: "0.11.30"' in content
     assert "UV_PREVIEW_FEATURES: audit-command" in content
     assert "run: uv audit --locked" in content
+    assert 'cron: "17 8 * * 1"' in content
+    assert "workflow_dispatch:" in content
     assert content.index("uv lock --check") < content.index("uv audit --locked")
     assert "uv build --wheel --out-dir dist" in content
 
@@ -238,6 +241,7 @@ async def test_launcher_exposes_five_tools(monkeypatch, tmp_path):
             **os.environ,
             "VIRTUAL_ENV": virtual_env,
             "QA_ORCHESTRATOR_DATA_DIR": str(tmp_path),
+            "QA_ORCHESTRATOR_SESSION_STORE_PATH": "",
         },
     )
 

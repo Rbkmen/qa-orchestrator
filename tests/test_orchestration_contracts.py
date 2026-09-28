@@ -29,7 +29,12 @@ def test_model_policy_assigns_requested_models_and_reasoning(step, model, reason
     policy = MODEL_POLICIES[step]
     assert policy.model.value == model
     assert policy.reasoning == reasoning
-    assert set(policy.model_dump(mode="json")) == {"provider", "model", "reasoning"}
+    assert set(policy.model_dump(mode="json")) == {
+        "provider",
+        "model",
+        "reasoning",
+        "reasoning_capabilities_verified",
+    }
     assert set(MODEL_POLICIES) == {
         OrchestrationStep.TRIAGE,
         OrchestrationStep.PRIMARY_REVIEW,
@@ -119,6 +124,7 @@ def test_risk_signals_are_final_primary_review_only():
             status="completed",
             risk_signals=signals,
         )
+
 
 def test_risk_signals_require_a_completed_profile():
     with pytest.raises(ValidationError, match="completed_profile"):

@@ -108,11 +108,13 @@ async def test_orchestration_tools_return_no_evidence_fields(tmp_path):
         "provider": "openai",
         "model": "gpt-6-luna",
         "reasoning": "max",
+        "reasoning_capabilities_verified": True,
     }
     assert payload["read_only"] is True
     assert payload["host_owns_decisions"] is True
     assert payload["allowed_profiles"] == [profile.value for profile in ReviewAgent]
     assert payload["allowed_bundles"] == [bundle.value for bundle in ReviewBundle]
+    assert payload["recommended_bundles"] == ["ordinary_mr"]
     assert payload["selected_bundle"] is None
     assert payload["review_profiles"] == []
     assert "evidence" not in payload

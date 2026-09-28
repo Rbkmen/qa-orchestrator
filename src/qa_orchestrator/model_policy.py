@@ -139,6 +139,12 @@ def reasoning_options_for(provider: ModelProvider, model_id: str) -> tuple[Reaso
     return REASONING_EFFORTS
 
 
+def reasoning_capabilities_verified(provider: ModelProvider, model_id: str) -> bool:
+    """Whether this exact model ID has an explicit, locally curated capability entry."""
+
+    return model_id in _MODEL_REASONING_OPTIONS and _MODEL_PROVIDER_BY_ID.get(model_id) is provider
+
+
 class ModelSelection(BaseModel):
     """The model IDs the host agent should use for each orchestration role."""
 

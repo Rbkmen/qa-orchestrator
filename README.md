@@ -23,7 +23,7 @@ The orchestrator does not call models, choose severity or release readiness, or 
 
 ### Bundles and profile names
 
-The triage stage selects one fixed bundle or one compatibility profile. The primary-review stage executes bundle profiles sequentially. After every role, the host sends `completed_profile`, and the orchestrator returns `current_profile` and `completed_profiles`. Use the updated session returned by `advance_qa_orchestration` for the next action and model policy; call `get_qa_orchestration` only when resuming or recovering a session. Deep review or synthesis is available only after the final role. Transition identifiers are model-neutral; choose the model from the returned `model_policy`, never from the step name.
+The triage stage selects one fixed bundle or one compatibility profile. `start_qa_orchestration` returns `recommended_bundles` as a task-type-based shortlist; it does not restrict `allowed_bundles`. Choose the route from the changed files and confirmed project stack. The primary-review stage executes bundle profiles sequentially. After every role, the host sends `completed_profile`, and the orchestrator returns `current_profile` and `completed_profiles`. Use the updated session returned by `advance_qa_orchestration` for the next action and model policy; call `get_qa_orchestration` only when resuming or recovering a session. Deep review or synthesis is available only after the final role. Transition identifiers are model-neutral; choose the model from the returned `model_policy`, never from the step name.
 
 | Bundle | Profile order |
 |---|---|
@@ -98,7 +98,9 @@ Triage → Primary review[1] → ... → Primary review[N]
                                            Final synthesis → Host outcome
 ```
 
-Sessions are kept in process memory only. The default TTL is 1,800 seconds and the maximum is 100 active sessions; the shared cache is also bounded, so older terminal sessions may be evicted when capacity is needed. Repeating the final call is idempotent while its session is retained. After a restart, the host starts a new session. `read_only=true` and `host_owns_decisions=true` are part of every state.
+Sessions are kept in process memory by default. Successful state changes refresh the 1,800-second default TTL; reads do not. The maximum is 100 active sessions, and the shared cache is bounded, so older terminal sessions may be evicted when capacity is needed. Repeating the final call is idempotent while its session is retained. After a restart, the host starts a new session unless optional recovery storage is enabled. `read_only=true` and `host_owns_decisions=true` are part of every state.
+
+Set `QA_ORCHESTRATOR_SESSION_STORE_PATH` to opt into a local SQLite file that restores unfinished orchestration state after a restart. It stores only the current structured session needed for recovery; finalization removes that row. It never stores evidence, prompts, source, logs, model responses, finalized outcomes, history, or statistics. Use one server process per store file. The default remains memory-only.
 
 After synthesis, the session waits for the host's final outcome. Call `finish_qa_orchestration` with the session `run_id` and `completed`, `partial`, or `blocked`. For an early stop, first pass `partial` or `blocked` to `advance_qa_orchestration`, then finish the session with the same outcome. Repeating the same finalization is idempotent; a conflicting outcome is rejected. Tasks that do not use orchestration need no finalization call. The service does not store or report task statistics.
 
@@ -197,14 +199,17 @@ The two supported host integrations are described in the [client guides](docs/cl
 | `QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS` | `1800` |
 | `QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS` | `100` |
 | `QA_ORCHESTRATOR_MODEL_POLICY_PATH` | `$HOME/.qa-orchestrator/model-policy.json` |
+| `QA_ORCHESTRATOR_SESSION_STORE_PATH` | unset (disabled) |
 
 ## Finalize an orchestration
 
 After synthesis, pass the host-owned final outcome and the original `run_id` to
 `finish_qa_orchestration`. For an early stop, pass the same `partial` or
 `blocked` outcome that ended the `advance_qa_orchestration` transition. The
-session remains in process memory only and expires according to the configured
-TTL; no task history or statistics are written to disk.
+session expires according to the configured TTL. By default its state stays in
+process memory; optional `QA_ORCHESTRATOR_SESSION_STORE_PATH` storage is removed
+when the host finalizes the session. No task history, final outcomes, or
+statistics are written to disk.
 
 ## Clients and rules
 

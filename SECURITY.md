@@ -13,7 +13,10 @@ strictly necessary to reproduce the issue.
 
 ## Data handling
 
-QA Orchestrator is designed to keep evidence, prompts, model responses, and
-final QA decisions in the host agent. It does not persist task history,
-outcomes, or statistics. Review the [installation guide](docs/INSTALLATION.md)
-before sharing diagnostic output.
+QA Orchestrator keeps evidence, prompts, model responses, and final QA decisions
+in the host agent. By default, session state stays in process memory. If
+`QA_ORCHESTRATOR_SESSION_STORE_PATH` is explicitly set, a local SQLite file
+stores only unfinished structured session state for restart recovery; the row
+is deleted at finalization. Final outcomes, task history, and statistics are not
+persisted. Review the [installation guide](docs/INSTALLATION.md) before sharing
+diagnostic output.

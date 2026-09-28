@@ -23,8 +23,14 @@ from qa_orchestrator.model_policy import (
     ModelSelection,
     ReasoningEffort,
     is_valid_model_id,
+    reasoning_capabilities_verified,
 )
-from qa_orchestrator.review_profiles import REVIEW_BUNDLES, bundle_profiles
+from qa_orchestrator.review_profiles import (
+    REVIEW_BUNDLES,
+    bundle_profiles,
+    recommended_bundles_for,
+)
+from qa_orchestrator.session_store import SqliteSessionStore
 
 
 class OrchestrationStep(StrEnum):
@@ -164,6 +170,7 @@ class ModelPolicy(BaseModel):
     provider: ModelProvider = ModelProvider.OPENAI
     model: OrchestrationModel | str
     reasoning: ReasoningEffort
+    reasoning_capabilities_verified: bool = False
 
     @field_validator("model")
     @classmethod
@@ -187,21 +194,33 @@ def build_model_policies(selection: ModelSelection) -> MappingProxyType:
                 provider=selection.provider,
                 model=_model_value(selection.triage_model),
                 reasoning=selection.triage_reasoning,
+                reasoning_capabilities_verified=reasoning_capabilities_verified(
+                    selection.provider, selection.triage_model
+                ),
             ),
             OrchestrationStep.PRIMARY_REVIEW: ModelPolicy(
                 provider=selection.provider,
                 model=_model_value(selection.primary_model),
                 reasoning=selection.primary_reasoning,
+                reasoning_capabilities_verified=reasoning_capabilities_verified(
+                    selection.provider, selection.primary_model
+                ),
             ),
             OrchestrationStep.DEEP_REVIEW: ModelPolicy(
                 provider=selection.provider,
                 model=_model_value(selection.deep_model),
                 reasoning=selection.deep_reasoning,
+                reasoning_capabilities_verified=reasoning_capabilities_verified(
+                    selection.provider, selection.deep_model
+                ),
             ),
             OrchestrationStep.SYNTHESIS: ModelPolicy(
                 provider=selection.provider,
                 model=_model_value(selection.synthesis_model),
                 reasoning=selection.synthesis_reasoning,
+                reasoning_capabilities_verified=reasoning_capabilities_verified(
+                    selection.provider, selection.synthesis_model
+                ),
             ),
         }
     )
@@ -219,6 +238,7 @@ class QaOrchestrationSession(BaseModel):
     current_step: OrchestrationStep
     allowed_profiles: list[ReviewAgent] = Field(default_factory=lambda: list(ReviewAgent))
     allowed_bundles: list[ReviewBundle] = Field(default_factory=lambda: list(REVIEW_BUNDLES))
+    recommended_bundles: list[ReviewBundle] = Field(default_factory=list)
     selected_bundle: ReviewBundle | None = None
     selected_profile: ReviewAgent | None = None
     review_profiles: list[ReviewAgent] = Field(default_factory=list)
@@ -319,6 +339,7 @@ class QaOrchestrator:
         ttl_seconds: int,
         max_sessions: int,
         model_selection: ModelSelection | None = None,
+        session_store: SqliteSessionStore | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if ttl_seconds <= 0:
@@ -330,8 +351,21 @@ class QaOrchestrator:
         self._model_selection = model_selection or DEFAULT_MODEL_SELECTION
         self._model_policies = build_model_policies(self._model_selection)
         self._clock = clock
+        self._session_store = session_store
         self._sessions: dict[str, QaOrchestrationSession] = {}
+        if session_store is not None:
+            for session in session_store.load_all():
+                if session.next_action in _FINALIZED_TERMINAL_ACTIONS.values():
+                    session_store.delete(session.run_id)
+                    continue
+                self._sessions[session.run_id] = session
         self._lock = RLock()
+        if session_store is not None:
+            now = self._clock()
+            self._purge_expired(now)
+            if self._active_session_count() > self._max_sessions:
+                raise ValueError("session store exceeds the configured active session limit")
+            self._evict_terminal_sessions_until_capacity(slots_required=0)
 
     @property
     def model_selection(self) -> ModelSelection:
@@ -357,11 +391,12 @@ class QaOrchestrator:
                 current_step=OrchestrationStep.TRIAGE,
                 allowed_profiles=list(ReviewAgent),
                 allowed_bundles=list(REVIEW_BUNDLES),
+                recommended_bundles=list(recommended_bundles_for(validated_task_type)),
                 model_policy=self._model_policies[OrchestrationStep.TRIAGE],
                 next_action=_NEXT_ACTIONS[OrchestrationStep.TRIAGE],
                 expires_at=now + timedelta(seconds=self._ttl_seconds),
             )
-            self._sessions[session.run_id] = session
+            self._save_session(session)
             return self._copy(session)
 
     def advance(
@@ -398,14 +433,17 @@ class QaOrchestrator:
                 raise OrchestrationError("illegal transition")
 
             if request.status in ("partial", "blocked"):
-                updated = session.model_copy(
-                    update={
-                        "status": OrchestrationStatus(request.status),
-                        "model_policy": None,
-                        "next_action": _TERMINAL_ACTIONS[OrchestrationStatus(request.status)],
-                    }
+                updated = self._refresh_expiry(
+                    session.model_copy(
+                        update={
+                            "status": OrchestrationStatus(request.status),
+                            "model_policy": None,
+                            "next_action": _TERMINAL_ACTIONS[OrchestrationStatus(request.status)],
+                        }
+                    ),
+                    now,
                 )
-                self._sessions[request.run_id] = updated
+                self._save_session(updated)
                 return self._copy(updated)
 
             if (
@@ -415,8 +453,8 @@ class QaOrchestrator:
             ):
                 raise OrchestrationError("changed profile after triage")
 
-            updated = self._completed_transition(session, request)
-            self._sessions[request.run_id] = updated
+            updated = self._refresh_expiry(self._completed_transition(session, request), now)
+            self._save_session(updated)
             return self._copy(updated)
 
     def get(self, run_id: str) -> QaOrchestrationSession:
@@ -447,23 +485,28 @@ class QaOrchestrator:
             if session.status in _TERMINAL_SESSION_STATUSES:
                 if session.status is not final_status:
                     raise OrchestrationError("conflicting final outcome")
-                updated = session.model_copy(
-                    update={"next_action": _FINALIZED_TERMINAL_ACTIONS[final_status]}
-                )
-                self._sessions[run_id] = updated
+                final_action = _FINALIZED_TERMINAL_ACTIONS[final_status]
+                if session.next_action == final_action:
+                    return self._copy(session)
+                updated = session.model_copy(update={"next_action": final_action})
+                updated = self._refresh_expiry(updated, now)
+                self._save_session(updated, persist=False)
                 return self._copy(updated)
 
             if session.status is not OrchestrationStatus.AWAITING_HOST_OUTCOME:
                 raise OrchestrationError("outcome is not ready")
 
-            updated = session.model_copy(
-                update={
-                    "status": final_status,
-                    "model_policy": None,
-                    "next_action": _FINALIZED_TERMINAL_ACTIONS[final_status],
-                }
+            updated = self._refresh_expiry(
+                session.model_copy(
+                    update={
+                        "status": final_status,
+                        "model_policy": None,
+                        "next_action": _FINALIZED_TERMINAL_ACTIONS[final_status],
+                    }
+                ),
+                now,
             )
-            self._sessions[run_id] = updated
+            self._save_session(updated, persist=False)
             return self._copy(updated)
 
     def _completed_transition(
@@ -578,13 +621,15 @@ class QaOrchestrator:
         if session is None:
             raise OrchestrationError("unknown run_id")
         if session.expires_at <= now:
+            if self._session_store is not None:
+                self._session_store.delete(run_id)
             raise OrchestrationError("expired session")
         return session
 
     def _purge_expired(self, now: datetime, *, keep_run_id: str | None = None) -> None:
         for run_id, session in tuple(self._sessions.items()):
             if run_id != keep_run_id and session.expires_at <= now:
-                del self._sessions[run_id]
+                self._delete_session(run_id)
 
     def _active_session_count(self) -> int:
         return sum(
@@ -592,8 +637,8 @@ class QaOrchestrator:
             for session in self._sessions.values()
         )
 
-    def _evict_terminal_sessions_until_capacity(self) -> None:
-        required_evictions = len(self._sessions) - self._max_sessions + 1
+    def _evict_terminal_sessions_until_capacity(self, *, slots_required: int = 1) -> None:
+        required_evictions = len(self._sessions) - self._max_sessions + slots_required
         if required_evictions <= 0:
             return
         terminal_run_ids = sorted(
@@ -606,7 +651,31 @@ class QaOrchestrator:
         if len(terminal_run_ids) < required_evictions:
             raise OrchestrationError("session limit")
         for _, run_id in terminal_run_ids[:required_evictions]:
-            del self._sessions[run_id]
+            self._delete_session(run_id)
+
+    def _save_session(
+        self,
+        session: QaOrchestrationSession,
+        *,
+        persist: bool = True,
+    ) -> None:
+        if self._session_store is not None and persist:
+            self._session_store.save(session)
+        elif self._session_store is not None:
+            self._session_store.delete(session.run_id)
+        self._sessions[session.run_id] = session
+
+    def _delete_session(self, run_id: str) -> None:
+        if self._session_store is not None:
+            self._session_store.delete(run_id)
+        self._sessions.pop(run_id, None)
+
+    def _refresh_expiry(
+        self,
+        session: QaOrchestrationSession,
+        now: datetime,
+    ) -> QaOrchestrationSession:
+        return session.model_copy(update={"expires_at": now + timedelta(seconds=self._ttl_seconds)})
 
     @staticmethod
     def _copy(session: QaOrchestrationSession) -> QaOrchestrationSession:

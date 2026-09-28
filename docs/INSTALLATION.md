@@ -188,7 +188,7 @@ The server is started on demand by the MCP client. Do not start a second backgro
 
 ## Data and privacy
 
-Evidence, source code, logs, prompts, model responses, and final QA decisions stay with the host agent. Active orchestration state is bounded and held in process memory. The orchestrator does not persist QA task history, outcomes, or statistics. The only local file it uses is the model policy at `$HOME/.qa-orchestrator/model-policy.json` by default; set `QA_ORCHESTRATOR_DATA_DIR` or `QA_ORCHESTRATOR_MODEL_POLICY_PATH` to change that location. The model policy contains provider, model IDs, and reasoning/effort settings, not credentials or task data.
+Evidence, source code, logs, prompts, model responses, and final QA decisions stay with the host agent. Active orchestration state is bounded and held in process memory by default. To resume unfinished orchestration after a server restart, optionally set `QA_ORCHESTRATOR_SESSION_STORE_PATH` to a local SQLite file. That file holds only current structured session state and is deleted from the store at finalization; it does not contain task evidence, content, final outcomes, history, or statistics. Use one server process per store file. Without that setting, no session state is written to disk. The model policy is stored at `$HOME/.qa-orchestrator/model-policy.json` by default; set `QA_ORCHESTRATOR_DATA_DIR` or `QA_ORCHESTRATOR_MODEL_POLICY_PATH` to change that location. It contains provider, model IDs, and reasoning/effort settings, not credentials or task data.
 
 ## Updating
 

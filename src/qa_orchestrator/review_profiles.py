@@ -2,7 +2,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from qa_orchestrator.contracts import ReviewAgent, ReviewBundle, ReviewRoute
+from qa_orchestrator.contracts import QaTaskType, ReviewAgent, ReviewBundle, ReviewRoute
 
 COMMON_CONSTRAINTS = (
     "Use only the evidence gathered by the host agent.",
@@ -217,9 +217,25 @@ REVIEW_BUNDLES: Mapping[ReviewBundle, tuple[ReviewAgent, ...]] = MappingProxyTyp
     }
 )
 
+RECOMMENDED_BUNDLES_BY_TASK_TYPE: Mapping[QaTaskType, tuple[ReviewBundle, ...]] = MappingProxyType(
+    {
+        "ordinary_review": (ReviewBundle.ORDINARY_MR,),
+        "widget_review": (ReviewBundle.WIDGET, ReviewBundle.WIDGET_JS),
+        "epic_analysis": (ReviewBundle.REQUIREMENTS,),
+        "requirements_analysis": (ReviewBundle.REQUIREMENTS,),
+        "qa_planning": (ReviewBundle.REQUIREMENTS,),
+        "autotest_implementation": (ReviewBundle.AUTOTEST, ReviewBundle.ORDINARY_MR),
+        "other": (),
+    }
+)
+
 
 def bundle_profiles(bundle: ReviewBundle) -> tuple[ReviewAgent, ...]:
     return REVIEW_BUNDLES[bundle]
+
+
+def recommended_bundles_for(task_type: QaTaskType) -> tuple[ReviewBundle, ...]:
+    return RECOMMENDED_BUNDLES_BY_TASK_TYPE[task_type]
 
 
 def build_review_route(agent_profile: ReviewAgent) -> ReviewRoute:

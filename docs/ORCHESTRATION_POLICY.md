@@ -39,7 +39,7 @@ each stage and returned in the session's `model_policy`.
 | Deep escalation | configured `deep_model` | configured `deep_reasoning` (default `high`) | Optional read-only check for a complex or high-risk case |
 | Synthesis | configured `synthesis_model` | configured `synthesis_reasoning` (default `medium`) | Consolidate the result after host validation |
 
-The orchestrator returns only the next provider, model, reasoning policy, and transition constraints. Execution speed and latency preferences are controlled by the host user's settings; the orchestrator does not set or override them. The primary host runs the models in its own environment, validates findings, and makes the final decision. The orchestrator does not invoke or throttle a provider itself.
+The orchestrator returns only the next provider, model, reasoning policy, and transition constraints. `reasoning_capabilities_verified` is true only when the exact model ID has an explicit local catalog entry for that provider; false means the host must verify the selected effort with its provider. This flag does not check account access or live provider capabilities. Execution speed and latency preferences are controlled by the host user's settings; the orchestrator does not set or override them. The primary host runs the models in its own environment, validates findings, and makes the final decision. The orchestrator does not invoke or throttle a provider itself.
 
 ### Keeping the recommended model catalog current
 
@@ -54,6 +54,8 @@ Before changing the recommended model list, verify model IDs and reasoning suppo
 5. After deep review, the host returns to the configured synthesis model.
 6. After synthesis, the state becomes `awaiting_host_outcome`; the host calls `finish_qa_orchestration` with the same `run_id` and a status of `completed`, `partial`, or `blocked`. The orchestrator moves the session to its final status. For an early stop, first pass `partial` or `blocked` to `advance_qa_orchestration`, then finish the session with that same status.
 
+`recommended_bundles` in the initial session is a task-type-based shortlist: ordinary reviews recommend `ordinary_mr`; widget reviews recommend `widget` and `widget_js`; epic, requirements, and QA-planning tasks recommend `requirements`; autotest implementation recommends `autotest` and `ordinary_mr`; `other` has no shortlist. These suggestions never restrict `allowed_bundles`; the host selects based on changed paths and confirmed stack.
+
 Allowed transitions:
 
 ```text
@@ -64,7 +66,7 @@ Triage → Primary review[1] → ... → Primary review[N]
 
 Transition identifiers are model-neutral, not model selectors: use the returned `model_policy` for each stage.
 
-Sessions are content-free and in memory, with a default TTL of `1800` seconds and a default limit of `100` active sessions. The shared cache is bounded, so older terminal sessions may be evicted when new sessions are created. Unknown runs, expired sessions, illegal or repeated transitions, and invalid signals are rejected without changing state. After a restart, the host starts a new session.
+Sessions are content-free and in memory by default, with a default TTL of `1800` seconds and a default limit of `100` active sessions. Successful transitions and finalization refresh the TTL; reads do not. Set `QA_ORCHESTRATOR_SESSION_STORE_PATH` to opt into a local SQLite file that restores unfinished structured state after a restart. It contains no evidence, prompts, source, logs, model responses, finalized outcomes, history, or statistics; finalization deletes the stored row. Use one server process per file. The shared cache is bounded, so older terminal sessions may be evicted when new sessions are created. Unknown runs, expired sessions, illegal or repeated transitions, and invalid signals are rejected without changing state. Without the optional store, the host starts a new session after a restart.
 
 Normal status flow for `ordinary_mr`:
 
@@ -203,7 +205,7 @@ Every review must separate confirmed findings from hypotheses and unverified run
 
 ## Final outcome
 
-`finish_qa_orchestration` accepts only `run_id` and the host-owned final outcome. It updates the bounded in-memory session and does not write task history or statistics to disk. Repeating the same outcome is idempotent; a conflicting outcome is rejected.
+`finish_qa_orchestration` accepts only `run_id` and the host-owned final outcome. It updates the bounded in-memory session and deletes any persisted unfinished state. Repeating the same outcome is idempotent in the current process; a conflicting outcome is rejected. Final outcomes and task statistics are not written to disk.
 
 ## MCP tools
 
