@@ -13,11 +13,12 @@ permissions:
 
 jobs:
   test:
-    name: Python ${{ matrix.python-version }}
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: ["ubuntu-latest", "windows-latest"]
         python-version: ["3.12", "3.13"]
 
     steps:
@@ -53,11 +54,13 @@ jobs:
         run: uv run ruff check .
 
       - name: Check launcher syntax
+        if: runner.os != 'Windows'
         run: sh -n scripts/qa-orchestrator
 
       - name: Install built wheel
-        run: uv pip install --python .venv/bin/python --no-deps --reinstall dist/*.whl
+        run: >
+          uv run python -c 'import glob, subprocess, sys; subprocess.run(["uv", "pip", "install", "--python", sys.executable, "--no-deps", "--reinstall", *glob.glob("dist/*.whl")], check=True)'
 
       - name: Smoke-test installed wheel outside the checkout
         working-directory: ${{ runner.temp }}
-        run: ${{ github.workspace }}/.venv/bin/qa-orchestrator-doctor --json
+        run: uv run --project "${{ github.workspace }}" --no-sync python -m qa_orchestrator.doctor --json

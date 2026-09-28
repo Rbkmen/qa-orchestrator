@@ -6,22 +6,24 @@ The host client—not the orchestrator—runs the model stages, gathers evidence
 
 ## Requirements
 
-- macOS or Linux;
+- Windows, macOS, or Linux;
 - Git;
 - Python 3.12 or newer;
 - [`uv`](https://docs.astral.sh/uv/);
 - Codex CLI/Desktop or Claude Code.
 
-The current release supports native macOS and Linux. Native Windows is not
-supported because the source launcher uses POSIX facilities; Windows users can
-run the server inside WSL2.
+The current release supports native Windows, macOS, and Linux. Windows uses
+the installed `qa-orchestrator-mcp.exe` entry point; the source shell launcher
+is for macOS and Linux.
 
-Before continuing, verify the local prerequisites:
+On Windows PowerShell, verify the local prerequisites:
 
-```bash
-python3 --version
+```powershell
+python --version
 uv --version
 ```
+
+On macOS and Linux, use `python3 --version` and `uv --version`.
 
 Python must be 3.12 or newer. If `uv` is not installed, follow the [official
 installation guide](https://docs.astral.sh/uv/getting-started/installation/).
@@ -36,12 +38,16 @@ uv run qa-orchestrator-doctor
 uv run qa-orch setup
 ```
 
-`uv sync` creates the project environment, installs the server and its dependencies, and provides the `qa-orchestrator` command in `.venv`. The repository launcher uses that environment automatically.
+`uv sync` creates the project environment, installs the server and its
+dependencies, and provides the `qa-orchestrator` and `qa-orchestrator-mcp`
+commands in `.venv`. The repository launcher uses that environment
+automatically on macOS and Linux.
 
 `qa-orchestrator-doctor` performs read-only local checks for the Python version,
 installed dependencies, model policy, optional SQLite session-store integrity,
-and the source launcher. It does not contact external services, create files,
-change the session store, or report a session count. Use `--json` in scripts.
+and the platform-specific MCP launcher. It does not contact external services,
+create files, change the session store, or report a session count. Use `--json`
+in scripts.
 
 `qa-orch setup` opens the local console wizard. First choose Russian or English
 for this setup run; the language is not saved in `model-policy.json`. Then
@@ -55,8 +61,8 @@ guidance, not live capability checks; verify custom model availability and
 reasoning/effort support with the host's provider.
 The wizard saves the model policy; it does not configure provider access in
 Codex or Claude Code. Make sure the selected host can use the chosen provider
-and model. It stores only these non-secret values in
-`$HOME/.qa-orchestrator/model-policy.json` (or the path from
+and model. It stores only these non-secret values in the user's home file
+`~/.qa-orchestrator/model-policy.json` (or the path from
 `QA_ORCHESTRATOR_MODEL_POLICY_PATH`). API keys are never requested or stored.
 Inspect the result with:
 
@@ -96,8 +102,8 @@ colors or `FORCE_COLOR=1` to force them.
 
 ### Alternative: use GitHub without a checkout
 
-On macOS or Linux, `uvx` can run the commands directly from GitHub. First,
-replace `<commit-sha>` below with the full commit hash you want to use, then
+`uvx` can run the commands directly from GitHub on all supported platforms.
+First, replace `<commit-sha>` below with the full commit hash you want to use, then
 save the model policy in your user configuration:
 
 ```bash
@@ -111,10 +117,10 @@ uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-o
 uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-orch reload
 ```
 
-Then register the MCP command in the client as shown below. The `qa-orchestrator`
-command starts the STDIO server and should be launched by the MCP client, not
-run by itself as a setup command. The Codex guide includes the `uvx`
-registration command; the [Claude Code guide](clients/claude-code.md) includes
+Then register the MCP command in the client as shown below. The
+`qa-orchestrator-mcp` command starts the STDIO server and should be launched
+by the MCP client, not run by itself as a setup command. The Codex guide
+includes the `uvx` registration command; the [Claude Code guide](clients/claude-code.md) includes
 its equivalent. For reproducible team setup, pin an immutable commit SHA
 instead of a moving branch. Use the exact same pinned URL in the one-time
 setup and the MCP server command shown above.
@@ -139,12 +145,20 @@ codex mcp add qa-orchestrator -- "$(pwd)/scripts/qa-orchestrator"
 codex mcp list
 ```
 
+On Windows, run the registration from PowerShell at the repository root:
+
+```powershell
+codex --version
+codex mcp add qa-orchestrator -- "$PWD\.venv\Scripts\qa-orchestrator-mcp.exe"
+codex mcp list
+```
+
 If you use `uvx` without a checkout, register this command instead:
 
 ```bash
 codex mcp add qa-orchestrator -- uvx \
   --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' \
-  qa-orchestrator
+  qa-orchestrator-mcp
 codex mcp list
 ```
 
@@ -156,8 +170,8 @@ MCP guide](https://developers.openai.com/codex/mcp) for current UI and
 configuration options.
 
 Each user must register the server in their own local Codex environment. Use
-either the checkout launcher or the `uvx` command; MCP configuration is not
-shared automatically between machines.
+either the platform's checkout entry point or the `uvx` command. MCP
+configuration is not shared automatically between machines.
 
 ## 3. Add the host instructions
 
@@ -213,7 +227,7 @@ uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-o
 codex mcp remove qa-orchestrator
 codex mcp add qa-orchestrator -- uvx \
   --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' \
-  qa-orchestrator
+  qa-orchestrator-mcp
 ```
 
 For Claude Code, remove and re-add the entry with the same pinned URL:
@@ -222,7 +236,7 @@ For Claude Code, remove and re-add the entry with the same pinned URL:
 claude mcp remove qa-orchestrator
 claude mcp add --transport stdio --scope user qa-orchestrator -- \
   uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' \
-  qa-orchestrator
+  qa-orchestrator-mcp
 ```
 
 If you registered the server in a desktop UI or edited TOML directly, update
@@ -233,9 +247,9 @@ server command on the same commit.
 
 | Symptom | Check |
 |---|---|
-| `QA Orchestrator is not installed` | Run `uv sync` from the cloned repository and check that `scripts/qa-orchestrator` points to that checkout. |
+| `QA Orchestrator is not installed` | Run `uv sync` from the cloned repository; use `scripts/qa-orchestrator` on macOS/Linux or `.venv\Scripts\qa-orchestrator-mcp.exe` on Windows. |
 | Server is missing from Codex | Run `codex mcp list` and `codex mcp get qa-orchestrator`; if the checkout moved, remove the stale entry with `codex mcp remove qa-orchestrator`, add it again using the current absolute path, then restart Codex. |
-| Server is enabled but tools do not appear | Restart Codex and confirm the launcher exists and is executable. |
+| Server is enabled but tools do not appear | Restart Codex and confirm the configured platform entry point exists. |
 | Server is missing or disconnected in Claude Code | Run `claude mcp list`, `claude mcp get qa-orchestrator`, or `/mcp`; verify the command and arguments in the client guide. |
 | `uvx` cannot fetch the GitHub source | Confirm `uv` and Git are installed and that this machine can reach GitHub; for a reproducible team setup, pin an immutable commit SHA. |
 | Python or dependency error | Confirm Python is 3.12+ and run `uv sync` from the repository root. |

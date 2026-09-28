@@ -106,24 +106,39 @@ def collect_checks() -> list[CheckResult]:
                         )
                     )
 
-    launcher = Path.cwd() / "scripts" / "qa-orchestrator"
-    if launcher.exists():
-        executable = os.access(launcher, os.X_OK)
+    if os.name == "nt":
+        launcher = Path(sys.executable).with_name("qa-orchestrator-mcp.exe")
+        executable = launcher.exists()
         checks.append(
             CheckResult(
-                name="source launcher",
+                name="MCP launcher",
                 status="pass" if executable else "fail",
-                detail=f"{launcher} is {'executable' if executable else 'not executable'}",
+                detail=(
+                    f"{launcher} is installed"
+                    if executable
+                    else f"{launcher} is missing; run 'uv sync' to install it"
+                ),
             )
         )
     else:
-        checks.append(
-            CheckResult(
-                name="source launcher",
-                status="info",
-                detail="not in a source checkout; installed entry points are sufficient",
+        launcher = Path.cwd() / "scripts" / "qa-orchestrator"
+        if launcher.exists():
+            executable = os.access(launcher, os.X_OK)
+            checks.append(
+                CheckResult(
+                    name="MCP launcher",
+                    status="pass" if executable else "fail",
+                    detail=f"{launcher} is {'executable' if executable else 'not executable'}",
+                )
             )
-        )
+        else:
+            checks.append(
+                CheckResult(
+                    name="MCP launcher",
+                    status="info",
+                    detail="not in a source checkout; installed entry points are sufficient",
+                )
+            )
 
     return checks
 

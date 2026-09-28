@@ -8,6 +8,8 @@ import pytest
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 
+from qa_orchestrator.mcp_launcher import sanitized_environment
+
 ROOT = Path(__file__).parents[1]
 LAUNCHER = ROOT / "scripts/qa-orchestrator"
 CLIENT_RULE_FILES = tuple(
@@ -50,6 +52,7 @@ CLIENT_RULE_CONTRACT = {
 }
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell launcher")
 def test_launcher_is_executable_valid_shell():
     result = subprocess.run(
         ["/bin/sh", "-n", str(LAUNCHER)],
@@ -65,10 +68,26 @@ def test_launcher_is_executable_valid_shell():
 def test_launcher_forwards_supported_overrides():
     content = LAUNCHER.read_text(encoding="utf-8")
 
+    assert "qa-orchestrator-mcp" in content
     assert 'QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS="${QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS:-1800}"' in content
     assert 'QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS="${QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS:-100}"' in content
     assert 'QA_ORCHESTRATOR_MODEL_POLICY_PATH="$orchestrator_model_policy_path"' in content
     assert 'QA_ORCHESTRATOR_SESSION_STORE_PATH="$orchestrator_session_store_path"' in content
+
+
+def test_mcp_launcher_keeps_only_supported_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS", "900")
+    monkeypatch.setenv("PRIVATE_ACCESS_TOKEN", "must-not-reach-server")
+
+    environment = sanitized_environment()
+
+    assert environment["HOME"] == str(tmp_path)
+    assert environment["QA_ORCHESTRATOR_DATA_DIR"] == str(tmp_path / "data")
+    assert environment["QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS"] == "900"
+    assert "PRIVATE_ACCESS_TOKEN" not in environment
+    assert "OPENAI_API_KEY" not in environment
 
 
 def test_client_rule_templates_preserve_orchestration_contract():
@@ -102,12 +121,10 @@ def test_ci_uses_immutable_actions_and_builds_wheel():
     assert "cancel-in-progress: true" in content
     assert "github.event.pull_request.number || github.ref" in content
     assert "uv build --wheel --out-dir dist" in content
-    assert (
-        "uv pip install --python .venv/bin/python --no-deps --reinstall dist/*.whl"
-        in content
-    )
+    assert 'os: ["ubuntu-latest", "windows-latest"]' in content
+    assert '"uv", "pip", "install"' in content
     assert "working-directory: ${{ runner.temp }}" in content
-    assert "${{ github.workspace }}/.venv/bin/qa-orchestrator-doctor --json" in content
+    assert 'run: uv run --project "${{ github.workspace }}" --no-sync python -m qa_orchestrator.doctor --json' in content
 
 
 def test_dependency_audit_is_separate_and_keeps_manual_weekly_triggers():
@@ -137,6 +154,7 @@ def test_package_exposes_public_metadata_and_doctor():
 
     assert 'readme = "README.md"' in content
     assert 'qa-orchestrator-doctor = "qa_orchestrator.doctor:main"' in content
+    assert 'qa-orchestrator-mcp = "qa_orchestrator.mcp_launcher:main"' in content
     assert '[project.urls]' in content
     assert 'Homepage = "https://github.com/Rbkmen/qa-orchestrator"' in content
 
@@ -263,8 +281,13 @@ async def test_launcher_exposes_five_tools(monkeypatch, tmp_path):
     virtual_env = str(Path(sys.executable).parent.parent)
     monkeypatch.setenv("VIRTUAL_ENV", virtual_env)
     monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+    command = (
+        str(Path(sys.executable).with_name("qa-orchestrator-mcp.exe"))
+        if os.name == "nt"
+        else str(LAUNCHER)
+    )
     transport = StdioTransport(
-        command=str(LAUNCHER),
+        command=command,
         args=[],
         env={
             **os.environ,

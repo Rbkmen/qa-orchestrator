@@ -8,6 +8,7 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Operating System :: Microsoft :: Windows",
   "Operating System :: POSIX",
   "Topic :: Software Development :: Quality Assurance",
 ]
@@ -20,6 +21,7 @@ dependencies = [
 qa-orchestrator = "qa_orchestrator.cli:main"
 qa-orch = "qa_orchestrator.cli:main"
 qa-orchestrator-doctor = "qa_orchestrator.doctor:main"
+qa-orchestrator-mcp = "qa_orchestrator.mcp_launcher:main"
 
 [project.urls]
 Homepage = "https://github.com/Rbkmen/qa-orchestrator"

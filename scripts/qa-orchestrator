@@ -8,16 +8,16 @@ orchestrator_model_policy_path=${QA_ORCHESTRATOR_MODEL_POLICY_PATH:-"$orchestrat
 orchestrator_session_store_path=${QA_ORCHESTRATOR_SESSION_STORE_PATH:-}
 orchestrator_command=
 
-if [ -x "$orchestrator_root/.venv/bin/qa-orchestrator" ]; then
-  orchestrator_command="$orchestrator_root/.venv/bin/qa-orchestrator"
-elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/qa-orchestrator" ]; then
-  orchestrator_command="$VIRTUAL_ENV/bin/qa-orchestrator"
+if [ -x "$orchestrator_root/.venv/bin/qa-orchestrator-mcp" ]; then
+  orchestrator_command="$orchestrator_root/.venv/bin/qa-orchestrator-mcp"
+elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/qa-orchestrator-mcp" ]; then
+  orchestrator_command="$VIRTUAL_ENV/bin/qa-orchestrator-mcp"
 else
-  orchestrator_command=$(command -v qa-orchestrator || true)
+  orchestrator_command=$(command -v qa-orchestrator-mcp || true)
 fi
 
 if [ -z "$orchestrator_command" ]; then
-  echo "QA Orchestrator is not installed. Run 'uv sync' or activate a virtualenv containing qa-orchestrator." >&2
+  echo "QA Orchestrator is not installed. Run 'uv sync' or activate a virtualenv containing qa-orchestrator-mcp." >&2
   exit 127
 fi
 

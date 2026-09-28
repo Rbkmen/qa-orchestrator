@@ -2,6 +2,8 @@ import json
 import os
 import sqlite3
 import stat
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -19,14 +21,22 @@ def test_doctor_checks_are_read_only(monkeypatch, tmp_path):
 
     assert checks["python"].ok
     assert checks["dependencies"].ok
-    assert checks["source launcher"].status == "info"
+    if os.name == "nt":
+        expected_launcher_status = (
+            "pass"
+            if Path(sys.executable).with_name("qa-orchestrator-mcp.exe").exists()
+            else "fail"
+        )
+    else:
+        expected_launcher_status = "info"
+    assert checks["MCP launcher"].status == expected_launcher_status
     assert checks["session store"].status == "info"
     assert set(checks) == {
         "python",
         "dependencies",
         "model policy",
         "session store",
-        "source launcher",
+        "MCP launcher",
     }
     assert not data_dir.exists()
 

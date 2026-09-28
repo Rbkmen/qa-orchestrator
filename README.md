@@ -17,6 +17,32 @@ QA Orchestrator is a small deterministic FastMCP service for host-owned QA revie
 
 The orchestrator does not call models, choose severity or release readiness, or perform external writes.
 
+## Choose a review path
+
+Use one compatibility profile by default for a routine, narrowly scoped,
+low-risk change with one main concern. Use a fixed bundle for broad,
+cross-concern, or high-risk changes. For example, a small Ruby guard change can
+use `ruby_reviewer`; a change spanning a Rails endpoint, a background job, and
+their tests fits `ruby_backend`.
+
+`recommended_bundles` is a task-type shortlist, not a risk score or a required
+selection. The host inspects the diff and chooses the initial profile or
+bundle. The host sends structured risk signals after primary review; the
+orchestrator applies its fixed rules to decide whether optional deep review
+follows.
+
+### Example: the same review with and without the orchestrator
+
+| | Ordinary review guided by `AGENTS.md` | Review with QA Orchestrator |
+|---|---|---|
+| Small Ruby guard change | The host chooses a reviewer prompt and tracks the review in the conversation. | The host selects `ruby_reviewer`; the MCP validates the transition and returns the bounded session state. |
+| Broad Ruby change across an endpoint, job, and tests | The host coordinates review steps from its instructions. | The host selects `ruby_backend`; the fixed reviewer order and required transitions are explicit. |
+| Deeper review | The host decides from its own instructions and evidence. | The host sends structured risk signals; the orchestrator applies fixed escalation rules. |
+| Ownership | The host gathers evidence and makes the final decision. | The host still owns evidence, model calls, findings, and the final decision; the orchestrator receives no source or raw evidence. |
+
+The orchestrator adds a validated workflow contract and bounded progress state.
+It does not replace host instructions or perform the review itself.
+
 ## QA Orchestrator at a glance
 
 ![Detailed host-led QA Orchestrator workflow, including review stages, optional escalation, and ownership boundaries.](docs/assets/qa-orchestrator-workflow.png)
@@ -129,11 +155,11 @@ QA Orchestrator is responsible only for fixed routing, state transitions, read-o
 - Python 3.12+;
 - [`uv`](https://docs.astral.sh/uv/);
 - an MCP client that supports STDIO;
-- a POSIX system: macOS or Linux.
+- Windows, macOS, or Linux.
 
-Native Windows is not supported by the current release because the source
-launcher uses POSIX facilities. Windows users can run the server inside WSL2;
-native Windows support requires a separate compatibility change.
+On Windows, `uv sync` installs the native MCP entry point at
+`.venv\Scripts\qa-orchestrator-mcp.exe`. macOS and Linux use the POSIX
+source launcher.
 
 ## Installation
 
@@ -147,9 +173,12 @@ uv run qa-orchestrator-doctor
 uv run qa-orch setup
 ```
 
-The launcher first uses the project's `.venv`, then the active `VIRTUAL_ENV`, or an installed `qa-orchestrator` from `PATH`; no separate background process is required.
+On macOS and Linux, the source launcher uses the project's `.venv`, the active
+`VIRTUAL_ENV`, or an installed `qa-orchestrator-mcp` from `PATH`. On Windows,
+use the installed `.venv\Scripts\qa-orchestrator-mcp.exe` entry point. No
+separate background process is required.
 
-For a POSIX client that supports `uvx`, a checkout is optional:
+For clients that support `uvx`, a checkout is optional:
 
 Replace `<commit-sha>` with the full commit hash and use the same hash in the
 setup and server commands.
@@ -165,7 +194,7 @@ directly in a terminal. For Codex without a checkout:
 ```bash
 codex mcp add qa-orchestrator -- uvx \
   --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' \
-  qa-orchestrator
+  qa-orchestrator-mcp
 ```
 
 Use an immutable commit SHA instead of the default branch for reproducible
@@ -193,16 +222,22 @@ Example for Codex with a local checkout:
 codex mcp add qa-orchestrator -- "$(pwd)/scripts/qa-orchestrator"
 ```
 
+On Windows, run this from the repository root in PowerShell:
+
+```powershell
+codex mcp add qa-orchestrator -- "$PWD\.venv\Scripts\qa-orchestrator-mcp.exe"
+```
+
 The two supported host integrations are described in the [client guides](docs/clients/).
 
 ## Configuration
 
 | Variable | Default |
 |---|---:|
-| `QA_ORCHESTRATOR_DATA_DIR` | `$HOME/.qa-orchestrator` |
+| `QA_ORCHESTRATOR_DATA_DIR` | `~/.qa-orchestrator` |
 | `QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS` | `1800` |
 | `QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS` | `100` |
-| `QA_ORCHESTRATOR_MODEL_POLICY_PATH` | `$HOME/.qa-orchestrator/model-policy.json` |
+| `QA_ORCHESTRATOR_MODEL_POLICY_PATH` | `~/.qa-orchestrator/model-policy.json` |
 | `QA_ORCHESTRATOR_SESSION_STORE_PATH` | unset (disabled) |
 
 ## Finalize an orchestration

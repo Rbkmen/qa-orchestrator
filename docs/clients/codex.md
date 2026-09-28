@@ -1,6 +1,6 @@
 # Codex setup
 
-Codex connects QA Orchestrator as a local STDIO MCP server. The launcher uses the project's `.venv`, the active `VIRTUAL_ENV`, or an installed `qa-orchestrator` from `PATH`.
+Codex connects QA Orchestrator as a local STDIO MCP server. On macOS and Linux, the source launcher uses the project's `.venv`, the active `VIRTUAL_ENV`, or an installed `qa-orchestrator-mcp` from `PATH`. On Windows, use the installed `.venv\Scripts\qa-orchestrator-mcp.exe` entry point.
 
 ## Connection
 
@@ -11,12 +11,25 @@ codex mcp add qa-orchestrator -- "$(pwd)/scripts/qa-orchestrator"
 codex mcp list
 ```
 
-On POSIX systems, the repository checkout is optional:
+On Windows, run this from PowerShell at the repository root:
+
+```powershell
+codex mcp add qa-orchestrator -- "$PWD\.venv\Scripts\qa-orchestrator-mcp.exe"
+codex mcp list
+```
+
+Without a repository checkout, use `uvx`. In PowerShell, enter:
+
+```powershell
+codex mcp add qa-orchestrator -- uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-orchestrator-mcp
+```
+
+On macOS or Linux, enter:
 
 ```bash
 codex mcp add qa-orchestrator -- uvx \
   --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' \
-  qa-orchestrator
+  qa-orchestrator-mcp
 ```
 
 Replace `<commit-sha>` with the full commit hash and use the same hash in the
@@ -38,21 +51,25 @@ setup command and the server command.
 ### Configure in the ChatGPT desktop app
 
 Open **Settings → MCP servers → Add server**, choose **STDIO**, and enter
-`qa-orchestrator` as the server name. For a checkout, set the command to the
-absolute path of `scripts/qa-orchestrator` and leave arguments empty. Without a
+`qa-orchestrator` as the server name. For a macOS or Linux checkout, set the
+command to the absolute path of `scripts/qa-orchestrator` and leave arguments
+empty. For a Windows checkout, set it to the absolute path of
+`.venv\Scripts\qa-orchestrator-mcp.exe` and leave arguments empty. Without a
 checkout, set the command to `uvx` and use these arguments:
 
 ```text
 --from
 git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>
-qa-orchestrator
+qa-orchestrator-mcp
 ```
 
 Save the server and restart the app. The ChatGPT desktop app, Codex CLI, and
 IDE extension share the same MCP configuration; the CLI commands above are an
 alternative way to register the server.
 
-Or add it to `$HOME/.codex/config.toml`:
+Or add it to `$HOME/.codex/config.toml` on macOS and Linux. On Windows, the
+Codex CLI command above is simplest; the config file is under
+`%USERPROFILE%\.codex\config.toml`.
 
 ```toml
 [mcp_servers.qa-orchestrator]
@@ -62,8 +79,9 @@ startup_timeout_sec = 30
 tool_timeout_sec = 120
 ```
 
-For the TOML option, replace the placeholder with the absolute path to your
-own checkout. Verify the registration with `codex mcp list` and restart Codex.
+For Windows TOML, use an absolute path such as
+`C:/Users/you/qa-orchestrator/.venv/Scripts/qa-orchestrator-mcp.exe` as the
+command. Verify the registration with `codex mcp list` and restart Codex.
 
 ## Host-agent instructions
 
