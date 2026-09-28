@@ -15,22 +15,24 @@ On POSIX systems, the repository checkout is optional:
 
 ```bash
 codex mcp add qa-orchestrator -- uvx \
-  --from git+https://github.com/Rbkmen/qa-orchestrator.git \
+  --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' \
   qa-orchestrator
 ```
 
-Pin a release tag or commit instead of the default branch for a team setup.
+Replace `<commit-sha>` with the full commit hash and use the same hash in the
+setup and server commands. See the [installation guide](../INSTALLATION.md)
+for details and the update procedure.
 
 Configure the model policy once before using the server. With a checkout, run
 `uv run qa-orch setup` from the repository. Without a checkout, run:
 
 ```bash
-uvx --from git+https://github.com/Rbkmen/qa-orchestrator.git qa-orch setup
+uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-orch setup
 ```
 
 The wizard records the selected provider and model policy; it does not give
 Codex access to a model provider. Select models available to your configured
-Codex account and environment. Use the same branch, tag, or commit in the
+Codex account and environment. Use the same pinned ref in the
 setup command and the server command.
 
 ### Configure in the ChatGPT desktop app
@@ -42,7 +44,7 @@ checkout, set the command to `uvx` and use these arguments:
 
 ```text
 --from
-git+https://github.com/Rbkmen/qa-orchestrator.git
+git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>
 qa-orchestrator
 ```
 
@@ -65,20 +67,8 @@ own checkout. Verify the registration with `codex mcp list` and restart Codex.
 
 ## Host-agent instructions
 
-Add the rules from [`client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md`](../../client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md) to persistent project instructions, or adapt them to your Codex rules. If you have no checkout, use the [same canonical file on GitHub](https://github.com/Rbkmen/qa-orchestrator/blob/main/client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md), matching the branch, tag, or commit used for the server. Do not install a separate routing skill: the MCP server and these instructions are sufficient.
+Add or merge the canonical [host-agent instructions](../../client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md) in persistent Codex instructions. Without a checkout, open the same file on GitHub at the server's commit SHA by replacing `main` in the [link](https://github.com/Rbkmen/qa-orchestrator/blob/main/client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md). These instructions own profile selection, stage transitions, escalation, and finalization; workspace and repository rules should add only local routing, safety, and output requirements. Do not install a separate routing skill.
 
-The linked generic file is canonical for orchestration mechanics. Workspace and repository rules should add only task-specific routing, safety, and output requirements.
-
-Primary Codex remains the host and owner of evidence, decisions, and external actions. Use the five tools for orchestration: `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `prepare_review_route`, and `finish_qa_orchestration`.
-
-The model policy is host-owned and configured locally with `qa-orch setup`. The default provider is OpenAI/Codex; provider, model IDs, and provider-specific reasoning/effort for triage, primary review, deep review, and synthesis can be selected from the console. OpenAI uses `reasoning.effort`, Anthropic uses `output_config.effort`, and `none` means omit the provider parameter. The wizard does not contact provider APIs; verify model access and custom-ID reasoning/effort support with the host provider. Deep reasoning defaults to `high` when supported by the selected model. Execution speed and latency preferences are controlled by the user's host/provider settings; the orchestrator does not set or override them. Label stages by function only (`Triage`, `Primary review`, optional `Deep review`, `Final synthesis`); don't include model names or reasoning levels in status text. Transition identifiers are model-neutral; select the model from `model_policy`, not the step name. Send the orchestrator only structured signals; prompts, evidence, and model outputs remain in Codex.
-
-During triage, select exactly one fixed bundle or one compatibility profile, never both. For the ordinary MR bundle, the order is `code_explorer` (`Faraday — Evidence Investigator`) → `code_reviewer` (`Code Reviewer`) → `pr_test_analyzer` (`Test Analyzer`). After every primary-review role, pass its identifier as `completed_profile`; on the last role, you must also pass the structured boolean `risk_signals` object in the same call (use `{}` when none apply) so the orchestrator can select deep review or final synthesis. Do not pass `risk_signals` on the later synthesis transition. Faraday is an internal profile name, not a separate external service or model. Show status by stage only: `Triage` → `Primary review` per role → optional `Deep review` → `Final synthesis` → `Host` final outcome; pass the original `run_id` to `finish_qa_orchestration`.
-
-After each successful transition, use the updated session returned by `advance_qa_orchestration` for the next action and model policy. Call `get_qa_orchestration` only to resume or recover an interrupted or unclear session.
-
-For a low-risk, one-repository change with one narrow concern, prefer one compatibility profile: `code_reviewer` for behavior/callers, `pr_test_analyzer` for test-only changes, `typescript_reviewer` for TypeScript-only changes, `react_reviewer` for React-only changes, `ruby_reviewer` for Ruby-only changes, `python_reviewer` for Python/MCP-only changes, or `mobile_reviewer` for React Native/native-platform-only changes. For broad changes, select `ruby_backend`, `python_backend`, or `mobile` when that stack is the main changed surface. Choose from changed paths and confirmed manifests, not the repository name alone. Keep one compact Evidence Packet with `E1`-style references and bounded `F-01` finding candidates; pass only the relevant sections to each role.
-
-After synthesis, call `finish_qa_orchestration` with the original `run_id` and the host-owned final outcome. For an early stop, pass the same `partial` or `blocked` outcome already sent to `advance_qa_orchestration`. Session state stays in memory by default. If `QA_ORCHESTRATOR_SESSION_STORE_PATH` is configured, unfinished structured state can be recovered after a restart; finalization deletes its stored row, and final outcomes are not persisted.
+Codex remains the host and owns evidence, decisions, and external actions. Follow the returned `model_policy` for each stage. Execution speed and latency preferences are controlled by the user's host/provider settings; the orchestrator does not set or override them. Prompts, evidence, and model outputs stay in Codex.
 
 Reference: [official Codex MCP documentation](https://developers.openai.com/codex/mcp).

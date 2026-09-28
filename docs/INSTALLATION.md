@@ -70,8 +70,12 @@ For OpenAI, the recommended menu currently includes `gpt-6-astra`,
 and `gpt-4.1`. The wizard offers model-specific `reasoning.effort` values:
 `gpt-6-astra` starts at `low`, while `gpt-4.1` uses `none` because it does
 not support reasoning. Other exact OpenAI IDs, such as `gpt-5.5` or `gpt-5.4`,
-can be entered through the custom-ID option; unsupported combinations are
-rejected before saving.
+can be entered through the custom-ID option. The wizard rejects unsupported
+reasoning values only for model IDs with locally curated capability data.
+For an unknown custom ID, it checks the ID format and provider hint but does
+not verify the model's actual capabilities; an unsupported reasoning value
+may still be saved. A returned `reasoning_capabilities_verified: false` means
+you must confirm model access and reasoning support with the provider.
 
 For Anthropic, the recommended menu currently includes `claude-fable-5-1`,
 `claude-opus-5-5`, `claude-opus-5`, `claude-sonnet-5`, and
@@ -93,31 +97,27 @@ colors or `FORCE_COLOR=1` to force them.
 ### Alternative: use GitHub without a checkout
 
 On macOS or Linux, `uvx` can run the commands directly from GitHub. First,
+replace `<commit-sha>` below with the full commit hash you want to use, then
 save the model policy in your user configuration:
 
 ```bash
-uvx --from git+https://github.com/Rbkmen/qa-orchestrator.git qa-orch setup
+uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-orch setup
 ```
 
 To inspect the saved policy or validate it again without a checkout, run:
 
 ```bash
-uvx --from git+https://github.com/Rbkmen/qa-orchestrator.git qa-orch config show
-uvx --from git+https://github.com/Rbkmen/qa-orchestrator.git qa-orch reload
+uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-orch config show
+uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-orch reload
 ```
 
 Then register the MCP command in the client as shown below. The `qa-orchestrator`
 command starts the STDIO server and should be launched by the MCP client, not
 run by itself as a setup command. The Codex guide includes the `uvx`
 registration command; the [Claude Code guide](clients/claude-code.md) includes
-its equivalent. For a team setup, pin a release tag or commit instead of using
-the default branch by appending `@<tag-or-commit>` to the Git URL. Replace the
-placeholder and use the exact same pinned URL in both the one-time setup and
-the MCP server command, for example:
-
-```bash
-uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<tag-or-commit>' qa-orch setup
-```
+its equivalent. For reproducible team setup, pin an immutable commit SHA
+instead of a moving branch. Use the exact same pinned URL in the one-time
+setup and the MCP server command shown above.
 
 `uvx` supports Git sources and pinned refs; see the [uv
 documentation](https://docs.astral.sh/uv/guides/tools/).
@@ -143,7 +143,7 @@ If you use `uvx` without a checkout, register this command instead:
 
 ```bash
 codex mcp add qa-orchestrator -- uvx \
-  --from git+https://github.com/Rbkmen/qa-orchestrator.git \
+  --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' \
   qa-orchestrator
 codex mcp list
 ```
@@ -173,9 +173,9 @@ If the target `AGENTS.md` already exists, merge the rule instead of replacing th
 
 If you installed with `uvx` and do not have a checkout, use the canonical
 [Codex host instructions on GitHub](https://github.com/Rbkmen/qa-orchestrator/blob/main/client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md)
-from the same branch, tag, or commit as the server, then merge them into the
+from the same commit as the server, then merge them into the
 appropriate `AGENTS.md` or persistent instructions. For a pinned version,
-replace `main` in the link with the matching tag or commit.
+replace `main` in the link with the matching commit SHA.
 
 For Anthropic/Claude Code, use the [Claude Code setup guide](clients/claude-code.md).
 
@@ -203,9 +203,31 @@ uv sync
 Restart the MCP client after updating so it starts the current launcher and
 code.
 
-For a no-checkout installation, update the Git ref in both the one-time setup
-command and the MCP server command, rerun `qa-orch setup` from that ref, then
-restart the client. Keep both commands on the same tag or commit.
+For a no-checkout installation, choose the new commit SHA and use it in both
+the one-time setup command and the MCP server command. Rerun `qa-orch setup`
+from that commit, then update the existing MCP registration and restart the
+client. For Codex CLI, remove and re-add the entry:
+
+```bash
+uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-orch setup
+codex mcp remove qa-orchestrator
+codex mcp add qa-orchestrator -- uvx \
+  --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' \
+  qa-orchestrator
+```
+
+For Claude Code, remove and re-add the entry with the same pinned URL:
+
+```bash
+claude mcp remove qa-orchestrator
+claude mcp add --transport stdio --scope user qa-orchestrator -- \
+  uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' \
+  qa-orchestrator
+```
+
+If you registered the server in a desktop UI or edited TOML directly, update
+that existing entry instead of adding a second one. Keep the model setup and
+server command on the same commit.
 
 ## Troubleshooting
 
@@ -215,5 +237,5 @@ restart the client. Keep both commands on the same tag or commit.
 | Server is missing from Codex | Run `codex mcp list` and `codex mcp get qa-orchestrator`; if the checkout moved, remove the stale entry with `codex mcp remove qa-orchestrator`, add it again using the current absolute path, then restart Codex. |
 | Server is enabled but tools do not appear | Restart Codex and confirm the launcher exists and is executable. |
 | Server is missing or disconnected in Claude Code | Run `claude mcp list`, `claude mcp get qa-orchestrator`, or `/mcp`; verify the command and arguments in the client guide. |
-| `uvx` cannot fetch the GitHub source | Confirm `uv` and Git are installed and that this machine can reach GitHub; for a stable team setup, use a published tag or commit. |
+| `uvx` cannot fetch the GitHub source | Confirm `uv` and Git are installed and that this machine can reach GitHub; for a reproducible team setup, pin an immutable commit SHA. |
 | Python or dependency error | Confirm Python is 3.12+ and run `uv sync` from the repository root. |

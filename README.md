@@ -151,8 +151,11 @@ The launcher first uses the project's `.venv`, then the active `VIRTUAL_ENV`, or
 
 For a POSIX client that supports `uvx`, a checkout is optional:
 
+Replace `<commit-sha>` with the full commit hash and use the same hash in the
+setup and server commands.
+
 ```bash
-uvx --from git+https://github.com/Rbkmen/qa-orchestrator.git qa-orch setup
+uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-orch setup
 ```
 
 This saves the model policy in your user configuration. Register the server command with your
@@ -161,12 +164,13 @@ directly in a terminal. For Codex without a checkout:
 
 ```bash
 codex mcp add qa-orchestrator -- uvx \
-  --from git+https://github.com/Rbkmen/qa-orchestrator.git \
+  --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' \
   qa-orchestrator
 ```
 
-Pin a release tag or commit instead of the default branch for reproducible
-team configuration.
+Use an immutable commit SHA instead of the default branch for reproducible
+team configuration. See the [installation guide](docs/INSTALLATION.md) for
+the remaining no-checkout commands and update instructions.
 
 The setup wizard first lets you choose Russian or English for that run, then
 stores only the provider label, model IDs, and the selected provider-specific
@@ -175,9 +179,9 @@ saved, and the wizard never asks for or stores API keys. Choose a provider and
 model that your host client can use; the wizard records the policy but does not
 configure provider access. From a checkout, use `uv run qa-orch config show` and
 `uv run qa-orch reload`. Without a checkout, prefix those commands with
-`uvx --from git+https://github.com/Rbkmen/qa-orchestrator.git`. Colors in the
-wizard distinguish providers, model IDs, and reasoning values; set `NO_COLOR=1`
-to disable them or `FORCE_COLOR=1` to force them.
+`uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>'`.
+Colors in the wizard distinguish providers, model IDs, and reasoning values;
+set `NO_COLOR=1` to disable them or `FORCE_COLOR=1` to force them.
 
 The wizard uses a local recommendation/capability catalog and does not contact
 provider APIs. For custom model IDs, verify that the host account can access
