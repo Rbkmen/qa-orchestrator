@@ -1,15 +1,20 @@
 import json
 import os
 import stat
+from datetime import UTC, date, datetime
 
 import pytest
 
 from qa_orchestrator.cli import PROVIDER_OPTIONS, main
 from qa_orchestrator.model_policy import (
+    GPT6_MODEL_CATALOG_MAX_REVIEW_AGE_DAYS,
+    GPT6_MODEL_CATALOG_REVIEWED_ON,
+    GPT6_MODEL_CATALOG_SOURCE_URL,
     MODEL_CATALOGS,
     ModelProvider,
     ModelSelection,
     load_model_selection,
+    reasoning_capabilities_verified,
     reasoning_options_for,
     save_model_selection,
 )
@@ -154,6 +159,20 @@ def test_model_catalog_contains_current_recommended_models():
     assert reasoning_options_for(ModelProvider.ANTHROPIC, "claude-haiku-4-5-20251001") == (
         "none",
     )
+
+
+def test_gpt6_catalog_source_and_review_date_are_explicit_and_current():
+    reviewed_on = date.fromisoformat(GPT6_MODEL_CATALOG_REVIEWED_ON)
+    today = datetime.now(UTC).date()
+
+    assert GPT6_MODEL_CATALOG_SOURCE_URL == (
+        "https://developers.openai.com/api/docs/guides/latest-model"
+    )
+    assert reviewed_on <= today
+    assert (today - reviewed_on).days <= GPT6_MODEL_CATALOG_MAX_REVIEW_AGE_DAYS
+    for model_id in ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna"):
+        assert reasoning_capabilities_verified(ModelProvider.OPENAI, model_id)
+    assert not reasoning_capabilities_verified(ModelProvider.OPENAI, "gpt-6-custom")
 
 
 @pytest.mark.parametrize(

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .config import Settings
 from .model_policy import load_model_selection
+from .session_store import inspect_session_store
 
 MINIMUM_PYTHON = (3, 12)
 
@@ -80,6 +81,30 @@ def collect_checks() -> list[CheckResult]:
                     ),
                 )
             )
+
+            store_path = settings.orchestration_session_store_path
+            if store_path is None:
+                checks.append(
+                    CheckResult(
+                        "session store",
+                        "info",
+                        "disabled; session state remains in memory",
+                    )
+                )
+            else:
+                try:
+                    store_detail = inspect_session_store(store_path)
+                except ValueError as exc:
+                    checks.append(CheckResult("session store", "fail", str(exc)))
+                else:
+                    checks.append(
+                        CheckResult(
+                            "session store",
+                            "pass" if store_detail is not None else "info",
+                            store_detail
+                            or "not initialized; it will be created when the server starts",
+                        )
+                    )
 
     launcher = Path.cwd() / "scripts" / "qa-orchestrator"
     if launcher.exists():

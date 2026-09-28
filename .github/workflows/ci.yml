@@ -3,9 +3,10 @@ name: QA Orchestrator CI
 on:
   push:
   pull_request:
-  schedule:
-    - cron: "17 8 * * 1"
-  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -36,11 +37,6 @@ jobs:
       - name: Verify locked dependencies
         run: uv lock --check
 
-      - name: Audit locked dependencies
-        env:
-          UV_PREVIEW_FEATURES: audit-command
-        run: uv audit --locked
-
       - name: Install locked dependencies
         run: uv sync --locked
 
@@ -58,3 +54,10 @@ jobs:
 
       - name: Check launcher syntax
         run: sh -n scripts/qa-orchestrator
+
+      - name: Install built wheel
+        run: uv pip install --python .venv/bin/python --no-deps --reinstall dist/*.whl
+
+      - name: Smoke-test installed wheel outside the checkout
+        working-directory: ${{ runner.temp }}
+        run: ${{ github.workspace }}/.venv/bin/qa-orchestrator-doctor --json

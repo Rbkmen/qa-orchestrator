@@ -14,6 +14,9 @@ from typing import Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 MODEL_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+GPT6_MODEL_CATALOG_SOURCE_URL = "https://developers.openai.com/api/docs/guides/latest-model"
+GPT6_MODEL_CATALOG_REVIEWED_ON = "2026-09-28"
+GPT6_MODEL_CATALOG_MAX_REVIEW_AGE_DAYS = 180
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 REASONING_EFFORTS: tuple[ReasoningEffort, ...] = (
     "none",

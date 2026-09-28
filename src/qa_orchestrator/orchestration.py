@@ -627,9 +627,15 @@ class QaOrchestrator:
         return session
 
     def _purge_expired(self, now: datetime, *, keep_run_id: str | None = None) -> None:
-        for run_id, session in tuple(self._sessions.items()):
-            if run_id != keep_run_id and session.expires_at <= now:
-                self._delete_session(run_id)
+        expired_run_ids = [
+            run_id
+            for run_id, session in self._sessions.items()
+            if run_id != keep_run_id and session.expires_at <= now
+        ]
+        if self._session_store is not None:
+            self._session_store.delete_many(expired_run_ids)
+        for run_id in expired_run_ids:
+            self._sessions.pop(run_id, None)
 
     def _active_session_count(self) -> int:
         return sum(

@@ -39,8 +39,9 @@ uv run qa-orch setup
 `uv sync` creates the project environment, installs the server and its dependencies, and provides the `qa-orchestrator` command in `.venv`. The repository launcher uses that environment automatically.
 
 `qa-orchestrator-doctor` performs read-only local checks for the Python version,
-installed dependencies, model policy, and the source launcher.
-It does not contact external services or create files. Use `--json` in scripts.
+installed dependencies, model policy, optional SQLite session-store integrity,
+and the source launcher. It does not contact external services, create files,
+change the session store, or report a session count. Use `--json` in scripts.
 
 `qa-orch setup` opens the local console wizard. First choose Russian or English
 for this setup run; the language is not saved in `model-policy.json`. Then

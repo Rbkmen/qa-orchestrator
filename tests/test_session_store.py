@@ -79,14 +79,17 @@ def test_final_outcome_is_not_written_to_the_session_store(tmp_path):
 def test_expired_sessions_are_removed_during_restart(tmp_path):
     store = SqliteSessionStore(tmp_path / "sessions.sqlite3")
     clock = FakeClock()
-    started = _orchestrator(store, clock).start("ordinary_review")
+    orchestrator = _orchestrator(store, clock)
+    started = orchestrator.start("ordinary_review")
+    another = orchestrator.start("ordinary_review")
 
     clock.advance(60)
     _orchestrator(store, clock)
 
     assert store.load_all() == []
-    with pytest.raises(OrchestrationError, match="unknown run_id"):
-        _orchestrator(store, clock).get(started.run_id)
+    for session in (started, another):
+        with pytest.raises(OrchestrationError, match="unknown run_id"):
+            _orchestrator(store, clock).get(session.run_id)
 
 
 def test_store_can_restore_exactly_maximum_active_sessions(tmp_path):

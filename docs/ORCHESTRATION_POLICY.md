@@ -43,7 +43,7 @@ The orchestrator returns only the next provider, model, reasoning policy, and tr
 
 ### Keeping the recommended model catalog current
 
-Before changing the recommended model list, verify model IDs and reasoning support against the [official GPT-6 model guidance](https://developers.openai.com/api/docs/guides/latest-model). Update `MODEL_CATALOGS` and the exact reasoning-option assertions in `tests/test_model_policy.py` together. Keep custom model IDs available and do not add provider calls to setup; the host remains responsible for verifying its own model access.
+The GPT-6 catalog source and last-review date live beside `MODEL_CATALOGS` in `src/qa_orchestrator/model_policy.py`. Tests fail when that review is more than 180 days old. Before refreshing it, verify model IDs and reasoning support against the [official GPT-6 model guidance](https://developers.openai.com/api/docs/guides/latest-model), then update the catalog and its exact reasoning-option assertions in `tests/test_model_policy.py`. This review date covers the GPT-6 entries only. Keep custom model IDs available and do not add provider calls to setup; the host remains responsible for verifying its own model access.
 
 ## Orchestration flow
 

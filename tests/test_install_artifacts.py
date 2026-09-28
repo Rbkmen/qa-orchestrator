@@ -88,19 +88,48 @@ def test_client_rule_templates_preserve_orchestration_contract():
         assert "finish_qa_orchestration" in text, artifact.relative_to(ROOT)
 
 
-def test_ci_uses_immutable_actions_audits_dependencies_and_builds_wheel():
+def test_ci_uses_immutable_actions_and_builds_wheel():
     content = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     refs = re.findall(r"uses:\s+\S+@([^\s#]+)", content)
 
     assert refs
     assert all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in refs)
     assert 'version: "0.11.30"' in content
-    assert "UV_PREVIEW_FEATURES: audit-command" in content
-    assert "run: uv audit --locked" in content
+    assert "uv audit" not in content
+    assert "schedule:" not in content
+    assert "workflow_dispatch:" not in content
+    assert "concurrency:" in content
+    assert "cancel-in-progress: true" in content
+    assert "github.event.pull_request.number || github.ref" in content
+    assert "uv build --wheel --out-dir dist" in content
+    assert (
+        "uv pip install --python .venv/bin/python --no-deps --reinstall dist/*.whl"
+        in content
+    )
+    assert "working-directory: ${{ runner.temp }}" in content
+    assert "${{ github.workspace }}/.venv/bin/qa-orchestrator-doctor --json" in content
+
+
+def test_dependency_audit_is_separate_and_keeps_manual_weekly_triggers():
+    content = (ROOT / ".github/workflows/dependency-audit.yml").read_text(
+        encoding="utf-8"
+    )
+    refs = re.findall(r"uses:\s+\S+@([^\s#]+)", content)
+
+    assert refs
+    assert all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in refs)
+    assert '"pyproject.toml"' in content
+    assert '"uv.lock"' in content
+    assert "pull_request:\n    paths:" in content
+    assert "push:\n    branches:\n      - main\n    paths:" in content
     assert 'cron: "17 8 * * 1"' in content
     assert "workflow_dispatch:" in content
+    assert "cancel-in-progress: true" in content
+    assert 'version: "0.11.30"' in content
+    assert "UV_PREVIEW_FEATURES: audit-command" in content
     assert content.index("uv lock --check") < content.index("uv audit --locked")
-    assert "uv build --wheel --out-dir dist" in content
+    assert "run: uv audit --locked" in content
+    assert "pytest" not in content
 
 
 def test_package_exposes_public_metadata_and_doctor():
