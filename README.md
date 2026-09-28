@@ -1,63 +1,62 @@
-## Requirements
+# QA Orchestrator
 
+QA Orchestrator is a small deterministic FastMCP service for host-owned QA reviews. It keeps orchestration state bounded; evidence, source code, logs, prompts, model responses, and final decisions remain with the primary host agent.
 
+## How it works
 
+1. The primary host obtains authoritative evidence from the required systems and classifies the QA task.
+2. The host calls `start_qa_orchestration`. The orchestrator creates a content-free session and returns the first step and its configured policy. Run `qa-orch setup` to choose OpenAI or Anthropic and configure models and reasoning for each stage.
+3. The host runs each stage in its configured model environment and sends the orchestrator only a structured signal after each stage:
+   - triage — select one fixed review bundle or one compatibility profile;
+   - primary review — review every selected profile in the fixed order;
+   - optional deep review — perform one read-only analysis when fixed risk signals match;
+   - final synthesis — consolidate the results.
+   Each stage uses the model and reasoning configured for it in the returned `model_policy`.
+   The returned policy selects the provider, model, and reasoning for each stage. Execution speed and latency preferences remain controlled by the user's host/provider settings; the orchestrator does not set or override them.
+4. The host validates findings, runtime evidence, and limitations. For an orchestrated task, it calls `finish_qa_orchestration` with the same `run_id` and its final outcome.
 
+The orchestrator does not call models, choose severity or release readiness, or perform external writes.
 
+## QA Orchestrator at a glance
 
+![Detailed host-led QA Orchestrator workflow, including review stages, optional escalation, and ownership boundaries.](docs/assets/qa-orchestrator-workflow.png)
 
+### Bundles and profile names
 
+The triage stage selects one fixed bundle or one compatibility profile. `start_qa_orchestration` returns `recommended_bundles` as a task-type-based shortlist; it does not restrict `allowed_bundles`. Choose the route from the changed files and confirmed project stack. The primary-review stage executes bundle profiles sequentially. After every role, the host sends `completed_profile`, and the orchestrator returns `current_profile` and `completed_profiles`. Use the updated session returned by `advance_qa_orchestration` for the next action and model policy; call `get_qa_orchestration` only when resuming or recovering a session. Deep review or synthesis is available only after the final role. Transition identifiers are model-neutral; choose the model from the returned `model_policy`, never from the step name.
 
+| Bundle | Profile order |
+|---|---|
+| `ordinary_mr` | `code_explorer` → `code_reviewer` → `pr_test_analyzer` |
+| `widget` | `code_explorer` → `react_reviewer` → `typescript_reviewer` → `pr_test_analyzer` |
+| `widget_js` | `code_explorer` → `code_reviewer` → `react_reviewer` → `pr_test_analyzer` |
+| `ruby_backend` | `code_explorer` → `ruby_reviewer` → `pr_test_analyzer` |
+| `python_backend` | `code_explorer` → `python_reviewer` → `pr_test_analyzer` |
+| `mobile` | `code_explorer` → `mobile_reviewer` → `pr_test_analyzer` |
+| `security` | `code_explorer` → `security_reviewer` → `silent_failure_hunter` |
+| `autotest` | `code_reviewer` → `pr_test_analyzer` → `typescript_reviewer` |
+| `requirements` | `code_explorer` → `code_reviewer` |
 
+`autotest` and `widget` include a TypeScript review role; select them when TypeScript review is relevant. Use `ordinary_mr` for broad non-TypeScript automation, `widget_js` for broad JavaScript React changes, `ruby_backend` for broad Ruby backend changes, `python_backend` for broad Python/MCP changes, and `mobile` for broad React Native or native iOS/Android changes. Choose from the changed files and confirmed project manifests, not the repository name alone; monorepos can contain several stacks.
 
+Technical profiles and display names:
 
+| Profile | Host-facing name |
+|---|---|
+| `code_explorer` | `Faraday — Evidence Investigator` |
+| `code_reviewer` | `Code Reviewer` |
+| `pr_test_analyzer` | `Test Analyzer` |
+| `security_reviewer` | `Security Reviewer` |
+| `silent_failure_hunter` | `Silent Failure Hunter` |
+| `typescript_reviewer` | `TypeScript Reviewer` |
+| `react_reviewer` | `React Reviewer` |
+| `ruby_reviewer` | `Ruby Reviewer` |
+| `python_reviewer` | `Python Reviewer` |
+| `mobile_reviewer` | `Mobile Reviewer` |
 
+Faraday is only the internal display name of the `code_explorer` profile. No external agent, service, package, or model is connected under that name.
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+Ordinary MR flow with optional escalation:
 
 ```text
 Triage → Ordinary MR Review
