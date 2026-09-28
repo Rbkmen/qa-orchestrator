@@ -203,13 +203,7 @@ The two supported host integrations are described in the [client guides](docs/cl
 
 ## Finalize an orchestration
 
-After synthesis, pass the host-owned final outcome and the original `run_id` to
-`finish_qa_orchestration`. For an early stop, pass the same `partial` or
-`blocked` outcome that ended the `advance_qa_orchestration` transition. The
-session expires according to the configured TTL. By default its state stays in
-process memory; optional `QA_ORCHESTRATOR_SESSION_STORE_PATH` storage is removed
-when the host finalizes the session. No task history, final outcomes, or
-statistics are written to disk.
+For completion and early-stop instructions, see the [MCP interface section](#mcp-interface).
 
 ## Clients and rules
 
