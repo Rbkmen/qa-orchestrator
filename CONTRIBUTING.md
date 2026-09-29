@@ -26,7 +26,7 @@ The full test suite must not require network access, credentials, or a separate 
 ## Architecture boundaries
 
 - The primary host obtains sources, builds the Evidence Packet, runs model stages, and makes the final QA decision.
-- `prepare_review_route` returns only static metadata for the selected profile.
+- `prepare_qa_orchestration` returns only static metadata for the selected profile.
 - `start_qa_orchestration`, `advance_qa_orchestration`, and `get_qa_orchestration` manage content-free state only.
 - The orchestrator does not call models, create threads or agents, write user-requested files, or perform writes to external systems.
 - The model policy is configured locally with `qa-orch setup`; the default provider is OpenAI/Codex. Configure model IDs and provider-specific reasoning/effort independently of the model-neutral stage names. Deep review defaults to `high` when the selected model supports it. Execution speed and latency preferences remain controlled by the user's host/provider settings.
@@ -36,7 +36,7 @@ The full test suite must not require network access, credentials, or a separate 
 
 The public surface must remain limited to five tools:
 
-1. `prepare_review_route` — profile metadata;
+1. `prepare_qa_orchestration` — profile metadata;
 2. `start_qa_orchestration` — create a session;
 3. `advance_qa_orchestration` — validated transition;
 4. `get_qa_orchestration` — resume or recover the current content-free state;

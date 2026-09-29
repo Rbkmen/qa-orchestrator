@@ -16,7 +16,7 @@ async def test_server_exposes_five_tools(tmp_path):
         tools = {tool.name: tool for tool in await client.list_tools()}
 
     assert set(tools) == {
-        "prepare_review_route",
+        "prepare_qa_orchestration",
         "finish_qa_orchestration",
         "start_qa_orchestration",
         "advance_qa_orchestration",
@@ -73,7 +73,7 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     assert "recommended_bundles only" in task_type_description
     assert "risk level" in task_type_description
 
-    prepare_description = " ".join((tools["prepare_review_route"].description or "").split())
+    prepare_description = " ".join((tools["prepare_qa_orchestration"].description or "").split())
     assert "fixed checklist for one `agent_profile`" in prepare_description
     assert "required output sections" in prepare_description
     assert "one scoped concern" in prepare_description
@@ -104,7 +104,7 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     assert "already used for an early stop" not in outcome_description
 
     for name in (
-        "prepare_review_route",
+        "prepare_qa_orchestration",
         "get_qa_orchestration",
     ):
         annotations = tools[name].annotations
@@ -137,12 +137,12 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_prepare_review_route_returns_selected_profile(tmp_path):
+async def test_prepare_qa_orchestration_returns_selected_profile(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
         result = await client.call_tool(
-            "prepare_review_route",
+            "prepare_qa_orchestration",
             {"agent_profile": "security_reviewer"},
         )
 
@@ -480,4 +480,4 @@ async def test_unknown_profile_is_rejected_by_mcp_schema(tmp_path):
 
     async with Client(build_server(service)) as client:
         with pytest.raises(ToolError):
-            await client.call_tool("prepare_review_route", {"agent_profile": "unknown"})
+            await client.call_tool("prepare_qa_orchestration", {"agent_profile": "unknown"})

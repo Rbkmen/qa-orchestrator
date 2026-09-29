@@ -196,8 +196,8 @@ For Anthropic/Claude Code, use the [Claude Code setup guide](clients/claude-code
 ## 4. Verify the connection
 
 1. In Codex CLI, run `codex mcp list`; in Claude Code, run `claude mcp get qa-orchestrator` or `/mcp`. In the ChatGPT desktop app, check **Settings → MCP servers** or use `/mcp`.
-2. Restart the client if needed, then confirm that all five tools are available: `prepare_review_route`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, and `finish_qa_orchestration`.
-3. For a read-only smoke check, call `prepare_review_route` with `agent_profile="code_explorer"`. It should return the Faraday evidence-investigator route with `read_only=true` and `host_owns_decisions=true`.
+2. Restart the client if needed, then confirm that all five tools are available: `prepare_qa_orchestration`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, and `finish_qa_orchestration`.
+3. For a read-only smoke check, call `prepare_qa_orchestration` with `agent_profile="code_explorer"`. It should return the Faraday evidence-investigator route with `read_only=true` and `host_owns_decisions=true`.
 
 The server is started on demand by the MCP client. Do not start a second background server manually.
 
@@ -216,6 +216,10 @@ uv sync
 
 Restart the MCP client after updating so it starts the current launcher and
 code.
+
+The profile lookup tool is now named `prepare_qa_orchestration`. Replace
+`prepare_review_route` in any pinned host instructions or direct tool calls;
+the old MCP tool name is no longer published.
 
 For a no-checkout installation, choose the new commit SHA and use it in both
 the one-time setup command and the MCP server command. Rerun `qa-orch setup`

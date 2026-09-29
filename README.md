@@ -111,7 +111,7 @@ The service publishes exactly five tools:
 
 | Tool | Purpose |
 |---|---|
-| `prepare_review_route(agent_profile)` | Return the fixed checklist for one profile without creating a session |
+| `prepare_qa_orchestration(agent_profile)` | Return the fixed checklist for one profile without creating a session |
 | `start_qa_orchestration(task_type)` | Create a session and return the task-based bundle shortlist |
 | `advance_qa_orchestration(...)` | Complete triage, primary review, deep review, or synthesis and return the next action |
 | `get_qa_orchestration(run_id)` | Read the current content-free state when resuming or recovering a session |
@@ -133,7 +133,7 @@ After synthesis, the session waits for the host's final outcome. Call `finish_qa
 
 ### Review profiles
 
-`prepare_review_route` returns the focus, required sections, constraints, escalation signals, and display name for one profile. For a bundle, the host calls the route for every profile in the returned fixed order and passes its technical identifier in `completed_profile` after each call.
+`prepare_qa_orchestration` returns the focus, required sections, constraints, escalation signals, and display name for one profile. For a bundle, the host calls the route for every profile in the returned fixed order and passes its technical identifier in `completed_profile` after each call.
 
 `required_sections` is profile-specific: the evidence investigator returns `Scope`, `Evidence Map`, and `Unverified`; test analysis returns `Scope`, `Coverage Gaps`, and `Unverified`; implementation and specialist reviews return `Scope`, `Finding Candidates`, `Coverage Gaps`, and `Unverified`.
 

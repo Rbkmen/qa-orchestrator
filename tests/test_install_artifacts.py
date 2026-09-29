@@ -26,7 +26,7 @@ USER_CONTROLLED_SPEED_PATTERNS = (
 )
 CLIENT_RULE_CONTRACT = {
     "orchestration entry": (r"\bstart_qa_orchestration\b",),
-    "route preparation": (r"\bprepare_review_route\b",),
+    "route preparation": (r"\bprepare_qa_orchestration\b",),
     "state read": (r"\bget_qa_orchestration\b",),
     "orchestration finalization": (r"\bfinish_qa_orchestration\b",),
     "single route selection": (r"exactly one.*(?:bundle|profile)",),
@@ -168,7 +168,7 @@ def test_operational_artifacts_describe_primary_agent_routing():
 
     for artifact in artifacts:
         text = artifact.read_text(encoding="utf-8").lower()
-        assert "prepare_review_route" in text
+        assert "prepare_qa_orchestration" in text
         for forbidden in ("q" + "wen", "lm " + "studio", "local " + "delegation"):
             assert forbidden not in text
 
@@ -300,13 +300,18 @@ async def test_launcher_exposes_five_tools(monkeypatch, tmp_path):
     try:
         async with Client(transport) as client:
             names = {tool.name for tool in await client.list_tools()}
+            prepared = await client.call_tool(
+                "prepare_qa_orchestration",
+                {"agent_profile": "code_explorer"},
+            )
     finally:
         await transport.close()
 
     assert names == {
-        "prepare_review_route",
+        "prepare_qa_orchestration",
         "finish_qa_orchestration",
         "start_qa_orchestration",
         "advance_qa_orchestration",
         "get_qa_orchestration",
     }
+    assert prepared.structured_content["profile"] == "code_explorer"

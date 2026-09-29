@@ -4,7 +4,7 @@ This is a small, synthetic smoke pack for checking role boundaries and bundle se
 
 ## How to use it
 
-1. Call `prepare_review_route` for the profile named in the case and use only its returned sections and constraints.
+1. Call `prepare_qa_orchestration` for the profile named in the case and use only its returned sections and constraints.
 2. Give the host model the case's scope and evidence references as a compact Evidence Packet. Keep the source text in the host.
 3. Check the expected behavior below. A candidate must cite the supplied evidence and identify its confidence and verification gap.
 4. Repeat after changing a profile, bundle, model default, or host instructions. Treat these synthetic cases as smoke coverage, not proof of production quality.

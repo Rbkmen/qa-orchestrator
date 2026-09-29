@@ -50,7 +50,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
     mcp = FastMCP(name="qa-orchestrator")
 
     @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
-    def prepare_review_route(
+    def prepare_qa_orchestration(
         agent_profile: Annotated[
             ReviewAgent,
             Field(
@@ -92,7 +92,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
     ) -> QaOrchestrationSession:
         """Create a content-free QA session for a tracked review; call once before triage.
 
-        Every call creates a separate session. Use prepare_review_route for a stateless profile
+        Every call creates a separate session. Use prepare_qa_orchestration for a stateless profile
         checklist. `task_type` narrows the bundle shortlist; the host still selects the review route.
 
         - Sessions expire after the configured TTL (1800 seconds by default).

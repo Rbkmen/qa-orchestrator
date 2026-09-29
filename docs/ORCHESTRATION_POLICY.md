@@ -211,7 +211,7 @@ Every review must separate confirmed findings from hypotheses and unverified run
 
 The orchestrator must publish exactly:
 
-- `prepare_review_route`;
+- `prepare_qa_orchestration`;
 - `start_qa_orchestration`;
 - `advance_qa_orchestration`;
 - `get_qa_orchestration`;
