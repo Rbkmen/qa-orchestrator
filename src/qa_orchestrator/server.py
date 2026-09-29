@@ -162,7 +162,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ),
         ] = None,
     ) -> QaOrchestrationSession:
-        """Complete the active step and return the run's updated state and next action.
+        """Complete the active review step or mark an early stop; return the next action.
 
         Pass current_step as completed_step; stale or out-of-order steps are rejected. Malformed
         arguments, incompatible signals, and unknown or expired run_ids return errors without advancing
@@ -173,8 +173,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
           stopping early.
         - After each completed primary review, send current_profile as completed_profile. On the final
           profile, also send risk_signals ({} if none apply); omit both on an early stop.
-        - Finalize an early stop with the same partial or blocked outcome. After synthesis, call
-          finish_qa_orchestration.
+        - An early stop records partial or blocked but still needs finish_qa_orchestration with the
+          same outcome. After synthesis, use finish_qa_orchestration for the host's final outcome.
         """
         return service.advance_qa_orchestration(
             AdvanceQaOrchestrationRequest(
@@ -209,10 +209,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ),
         ],
     ) -> QaOrchestrationSession:
-        """Record the host's final outcome after synthesis or an early stop.
+        """Finalize the host's outcome after synthesis or an early stop; no review step runs here.
 
-        Call only when advance_qa_orchestration reaches `awaiting_host_outcome`; after an early stop,
-        submit the same `partial` or `blocked` outcome already recorded by advance_qa_orchestration.
+        Call when advance_qa_orchestration reaches `awaiting_host_outcome` after synthesis, or after
+        it records an early stop. For an early stop, submit the same `partial` or `blocked` outcome.
 
         - Repeating the same outcome returns the retained terminal session. A conflicting outcome is
           rejected with `conflicting final outcome` and leaves the stored status unchanged.
