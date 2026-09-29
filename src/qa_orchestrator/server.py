@@ -66,9 +66,9 @@ def build_server(service: OrchestratorService) -> FastMCP:
     ) -> ReviewRoute:
         """Return the fixed focus, constraints, and required output sections for one review profile.
 
-        Use this stateless tool for a single-profile review or a selected bundle member's checklist.
-        It does not inspect repository content, run the review, or create or change a session. For a
-        tracked multi-stage review, use start_qa_orchestration and advance_qa_orchestration.
+        Use it for one clearly scoped concern or a selected bundle member's checklist. For a review
+        spanning several concerns, use a tracked session and select a bundle during triage. This tool
+        does not inspect repository content, run the review, or create or change a session.
         """
         return service.prepare_review_route(agent_profile)
 
@@ -90,8 +90,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
         """Create a content-free QA session for a tracked review; call once before triage.
 
         Every call creates a separate session. Use prepare_review_route for a stateless profile
-        checklist. `task_type` selects only the recommended-bundle shortlist; the host selects the
-        route from changed files and evidence, and `task_type` is not a risk level.
+        checklist. `task_type` narrows the bundle shortlist; the host still selects the review route.
 
         - Sessions expire after the configured TTL (1800 seconds by default).
         - Capacity is 100 sessions by default and can be configured.
@@ -160,19 +159,19 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ),
         ] = None,
     ) -> QaOrchestrationSession:
-        """Complete the active step of a run and return its updated state and next action.
+        """Complete the active step and return the run's updated state and next action.
 
-        Pass the session's current_step as completed_step; out-of-order transitions are rejected. If a
-        successful response is lost, use get_qa_orchestration to inspect the new state before retrying:
-        replaying the previous step is rejected.
+        Pass current_step as completed_step; stale or out-of-order steps are rejected. Malformed
+        arguments, incompatible signals, and unknown or expired run_ids return errors without advancing
+        the run. This call is non-idempotent: if a successful response is lost, inspect
+        get_qa_orchestration before continuing; replaying the prior step is rejected.
 
-        - For triage with status completed, supply exactly one of selected_bundle or selected_profile;
-          when stopping with status partial or blocked, omit both.
-        - For each completed primary review step, send its current_profile as completed_profile; omit it
-          on an early stop. With the final completed primary review role, also send risk_signals (use {}
-          when none apply).
-        - For an early stop, finalize with finish_qa_orchestration using the same partial or blocked
-          status. After synthesis, call finish_qa_orchestration directly.
+        - Completed triage requires exactly one of selected_bundle or selected_profile; omit both when
+          stopping early.
+        - After each completed primary review, send current_profile as completed_profile. On the final
+          profile, also send risk_signals ({} if none apply); omit both on an early stop.
+        - Finalize an early stop with the same partial or blocked outcome. After synthesis, call
+          finish_qa_orchestration.
         """
         return service.advance_qa_orchestration(
             AdvanceQaOrchestrationRequest(
@@ -190,10 +189,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
     def get_qa_orchestration(run_id: RunId) -> QaOrchestrationSession:
         """Read a session's current content-free state without changing it.
 
-        Use the run_id returned by start_qa_orchestration to resume or recover its current step,
-        next action, and model policy. Reads do not extend the session TTL; an expired or unknown id
-        returns an error. Use advance_qa_orchestration to change an active run or finish_qa_orchestration
-        to record its final outcome.
+        Use this only to inspect a retained session's current step, next action, and model policy. Reads
+        do not extend the TTL; an unknown or expired session cannot be recovered here, so start a new one.
+        Use advance_qa_orchestration to change an active run or finish_qa_orchestration to record its
+        final outcome.
         """
         return service.get_qa_orchestration(run_id)
 
@@ -212,8 +211,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
     ) -> QaOrchestrationSession:
         """Record the host's final outcome after synthesis or an early stop.
 
-        Call when advance_qa_orchestration reaches `awaiting_host_outcome`, or finalize an early stop
-        with the same `partial` or `blocked` outcome.
+        Call only when advance_qa_orchestration reaches `awaiting_host_outcome`, or to finalize an early
+        stop with the same `partial` or `blocked` outcome.
 
         - Repeating the same outcome is idempotent while the session is retained; conflicting outcomes
           are rejected.

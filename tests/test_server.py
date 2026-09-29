@@ -38,10 +38,11 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     assert "out-of-order" in advance_description.lower()
     assert "current_step as completed_step" in advance_description
     assert "get_qa_orchestration" in advance_description
-    assert "replaying the previous step is rejected" in advance_description
-    assert "For triage with status completed" in advance_description
-    assert "status partial or blocked, omit both" in advance_description
-    assert "omit it on an early stop" in advance_description
+    assert "replaying the prior step is rejected" in advance_description
+    assert "Completed triage requires exactly one" in advance_description
+    assert "unknown or expired run_ids return errors" in advance_description
+    assert "without advancing the run" in advance_description
+    assert "omit both on an early stop" in advance_description
     advance_properties = tools["advance_qa_orchestration"].inputSchema["properties"]
     assert {"needs_deep_analysis", "reason_code"}.isdisjoint(advance_properties)
     for name, tool in tools.items():
@@ -72,12 +73,16 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     assert "recommended_bundles only" in task_type_description
     assert "risk level" in task_type_description
 
-    assert "single-profile" in tools["prepare_review_route"].description
-    assert "do not extend" in tools["get_qa_orchestration"].description
+    assert "clearly scoped concern" in tools["prepare_review_route"].description
+    assert "select a bundle during triage" in tools["prepare_review_route"].description
+    get_description = " ".join((tools["get_qa_orchestration"].description or "").split())
+    assert "do not extend the TTL" in get_description
+    assert "cannot be recovered here" in get_description
     start_description = tools["start_qa_orchestration"].description or ""
     assert "100 sessions by default" in start_description
     assert "session limit" in start_description
     finish_description = tools["finish_qa_orchestration"].description or ""
+    assert "Call only when" in finish_description
     assert "TTL expires" in finish_description
     assert "evicted to free capacity" in finish_description
     assert "service restarts" in finish_description
