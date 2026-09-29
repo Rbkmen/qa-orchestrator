@@ -78,11 +78,15 @@ def build_server(service: OrchestratorService) -> FastMCP:
 
     @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def get_qa_orchestration_model_policy() -> ModelSelection:
-        """Return the model policy loaded by this running MCP server.
+        """Return the model policy loaded by this running MCP server for new QA sessions.
 
-        The policy includes the provider, model IDs, and reasoning for every stage. This
-        read-only check returns the in-memory policy used for new QA sessions; it does not
-        reread the policy file or create a QA session.
+        Includes the provider, model IDs, and reasoning for every stage. Use
+        start_qa_orchestration to create a session, or get_qa_orchestration with run_id
+        to inspect an existing session's model_policy.
+
+        This reads an in-memory snapshot, not the policy file; restart the server connection
+        after changing that file. It creates no session, contacts no provider, and does not
+        verify which model the host executed.
         """
         return service.get_qa_orchestration_model_policy()
 
