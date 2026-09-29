@@ -39,6 +39,9 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     assert "current_step as completed_step" in advance_description
     assert "get_qa_orchestration" in advance_description
     assert "replaying the previous step is rejected" in advance_description
+    assert "For triage with status completed" in advance_description
+    assert "status partial or blocked, omit both" in advance_description
+    assert "omit it on an early stop" in advance_description
     advance_properties = tools["advance_qa_orchestration"].inputSchema["properties"]
     assert {"needs_deep_analysis", "reason_code"}.isdisjoint(advance_properties)
     for name, tool in tools.items():

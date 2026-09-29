@@ -164,10 +164,12 @@ def build_server(service: OrchestratorService) -> FastMCP:
         Pass the run_id from start_qa_orchestration and the session's current_step as completed_step;
         out-of-order transitions are rejected. If a successful call's response is lost, use
         get_qa_orchestration to inspect the new state before retrying: replaying the previous step is
-        rejected. After triage, supply exactly one of selected_bundle or selected_profile. After each
-        primary review role, send its current_profile as completed_profile; with the final role, also
-        send risk_signals (use {} when none apply). For an early stop use status partial or blocked,
-        then finalize with finish_qa_orchestration. After synthesis, call finish_qa_orchestration directly.
+        rejected. For triage with status completed, supply exactly one of selected_bundle or
+        selected_profile; when stopping with status partial or blocked, omit both. For each completed
+        primary review step, send its current_profile as completed_profile; omit it on an early stop.
+        With the final completed primary review role, also send risk_signals (use {} when none apply).
+        For an early stop, finalize with finish_qa_orchestration using the same partial or blocked
+        status. After synthesis, call finish_qa_orchestration directly.
         """
         return service.advance_qa_orchestration(
             AdvanceQaOrchestrationRequest(
