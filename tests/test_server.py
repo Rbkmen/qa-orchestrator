@@ -77,7 +77,7 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     assert "fixed checklist for one `agent_profile`" in prepare_description
     assert "required output sections" in prepare_description
     assert "one scoped concern" in prepare_description
-    assert "once per `review_profiles` member in session order" in prepare_description
+    assert "each `review_profiles` member separately in session order" in prepare_description
     assert "never selects a session profile" in prepare_description
     assert "start_qa_orchestration" in prepare_description
     assert "stateless lookup" in prepare_description
