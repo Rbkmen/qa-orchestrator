@@ -64,13 +64,14 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ),
         ],
     ) -> ReviewRoute:
-        """Return the selected profile identifier and display name, review focus, required output
-        sections, shared evidence constraints, and escalation signals to assess against evidence. The
-        route is read-only and leaves final review decisions with the host.
+        """Return a fixed checklist for one `agent_profile`. It gives review focus, required output
+        sections, shared evidence constraints, and escalation signals.
 
-        Use it for one scoped concern or a selected bundle member's checklist; use
-        start_qa_orchestration for a tracked multi-concern review. This stateless lookup returns fixed
-        guidance only; it does not inspect repository content, run the review, or change session state.
+        Use it for one scoped concern. For a selected bundle, request each `review_profiles` member
+        separately in session order; use start_qa_orchestration to track the multi-concern review.
+
+        Passing `agent_profile` never selects a session profile. This stateless lookup does not inspect
+        repository content, run the review, or change session state; the host owns final decisions.
         """
         return service.prepare_review_route(agent_profile)
 
