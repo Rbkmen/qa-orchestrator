@@ -1,6 +1,6 @@
 [project]
 name = "qa-orchestrator"
-version = "0.1.0"
+version = "0.1.1"
 description = "Deterministic QA review routing and orchestration for MCP host agents"
 readme = "README.md"
 license = "MIT"
