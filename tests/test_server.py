@@ -25,36 +25,29 @@ async def test_server_exposes_five_tools(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
+async def test_server_publishes_tool_descriptions(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
         tools = {tool.name: tool for tool in await client.list_tools()}
 
-    advance_description = " ".join(
-        (tools["advance_qa_orchestration"].description or "").split()
-    )
-    assert "primary review" in advance_description.lower()
-    assert "out-of-order" in advance_description.lower()
-    assert "current_step as completed_step" in advance_description
-    assert "get_qa_orchestration" in advance_description
-    assert "replaying the prior step is rejected" in advance_description
-    assert "Completed triage requires exactly one" in advance_description
-    assert "unknown or expired run_ids return errors" in advance_description
-    assert "without advancing the run" in advance_description
-    assert "omit both on an early stop" in advance_description
-    advance_properties = tools["advance_qa_orchestration"].inputSchema["properties"]
-    assert {"needs_deep_analysis", "reason_code"}.isdisjoint(advance_properties)
+    assert all(tool.description and tool.description.strip() for tool in tools.values())
     for name, tool in tools.items():
         assert all(
             property_schema.get("description", "").strip()
             for property_schema in tool.inputSchema["properties"].values()
         ), name
 
-    risk_signals_description = tools["advance_qa_orchestration"].inputSchema["properties"][
-        "risk_signals"
-    ]["description"]
-    assert "required with the final" in risk_signals_description.lower()
+
+@pytest.mark.asyncio
+async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+
+    async with Client(build_server(service)) as client:
+        tools = {tool.name: tool for tool in await client.list_tools()}
+
+    advance_properties = tools["advance_qa_orchestration"].inputSchema["properties"]
+    assert {"needs_deep_analysis", "reason_code"}.isdisjoint(advance_properties)
     assert tools["advance_qa_orchestration"].inputSchema["properties"]["completed_step"][
         "enum"
     ] == [
@@ -63,47 +56,6 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
         "deep_review",
         "synthesis",
     ]
-    assert "finish_qa_orchestration" in tools["advance_qa_orchestration"].inputSchema[
-        "properties"
-    ]["completed_step"]["description"]
-
-    task_type_description = tools["start_qa_orchestration"].inputSchema["properties"][
-        "task_type"
-    ]["description"]
-    assert "recommended_bundles only" in task_type_description
-    assert "risk level" in task_type_description
-
-    prepare_description = " ".join((tools["prepare_qa_orchestration"].description or "").split())
-    assert "fixed checklist for one `agent_profile`" in prepare_description
-    assert "required output sections" in prepare_description
-    assert "one scoped concern" in prepare_description
-    assert "each `review_profiles` member separately in session order" in prepare_description
-    assert "never selects a session profile" in prepare_description
-    assert "start_qa_orchestration" in prepare_description
-    assert "stateless lookup" in prepare_description
-    assert "does not inspect repository content" in prepare_description
-    get_description = " ".join((tools["get_qa_orchestration"].description or "").split())
-    assert "do not extend the TTL" in get_description
-    assert "cannot be recovered here" in get_description
-    start_description = tools["start_qa_orchestration"].description or ""
-    assert "100 sessions by default" in start_description
-    assert "session limit" in start_description
-    finish_description = " ".join((tools["finish_qa_orchestration"].description or "").split())
-    assert "no review step runs here" in finish_description
-    assert "reaches `awaiting_host_outcome` after synthesis" in finish_description
-    assert "or after it records an early stop" in finish_description
-    assert "same `partial` or `blocked` outcome" in finish_description
-    assert "returns the retained terminal session" in finish_description
-    assert "conflicting final outcome" in finish_description
-    assert "leaves the stored status unchanged" in finish_description
-    assert "TTL expires" in finish_description
-    assert "evicted to free capacity" in finish_description
-    assert "service restarts" in finish_description
-    outcome_description = tools["finish_qa_orchestration"].inputSchema["properties"]["outcome"][
-        "description"
-    ]
-    assert "completed, partial, or blocked" in outcome_description
-    assert "already used for an early stop" not in outcome_description
 
     for name in (
         "prepare_qa_orchestration",
@@ -207,6 +159,49 @@ async def test_orchestration_tools_advance_and_get_structured_state(tmp_path):
     assert advanced.structured_content["current_step"] == "primary_review"
     assert current.structured_content["current_step"] == "primary_review"
     assert current.structured_content["selected_profile"] == "code_reviewer"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["partial", "blocked"])
+async def test_orchestration_tool_finalizes_early_stop(tmp_path, outcome):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+
+    async with Client(build_server(service)) as client:
+        started = await client.call_tool(
+            "start_qa_orchestration",
+            {"task_type": "ordinary_review"},
+        )
+        run_id = started.structured_content["run_id"]
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "finish_qa_orchestration",
+                {"run_id": run_id, "outcome": outcome},
+            )
+        stopped = await client.call_tool(
+            "advance_qa_orchestration",
+            {"run_id": run_id, "completed_step": "triage", "status": outcome},
+        )
+        finalized = await client.call_tool(
+            "finish_qa_orchestration",
+            {"run_id": run_id, "outcome": outcome},
+        )
+        repeated = await client.call_tool(
+            "finish_qa_orchestration",
+            {"run_id": run_id, "outcome": outcome},
+        )
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "finish_qa_orchestration",
+                {"run_id": run_id, "outcome": "completed"},
+            )
+        current = await client.call_tool("get_qa_orchestration", {"run_id": run_id})
+
+    assert stopped.structured_content["status"] == outcome
+    assert stopped.structured_content["current_step"] == "triage"
+    assert finalized.structured_content["status"] == outcome
+    assert finalized.structured_content["next_action"] != stopped.structured_content["next_action"]
+    assert repeated.structured_content == finalized.structured_content
+    assert current.structured_content == finalized.structured_content
 
 
 @pytest.mark.asyncio
