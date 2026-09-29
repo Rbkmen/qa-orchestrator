@@ -119,6 +119,7 @@ def test_setup_offers_only_openai_and_anthropic():
 def test_model_catalog_contains_current_recommended_models():
     assert [entry.model_id for entry in MODEL_CATALOGS[ModelProvider.OPENAI]] == [
         "gpt-6-astra",
+        "gpt-6.1-sol",
         "gpt-6-sol",
         "gpt-6-luna",
         "gpt-5.6-sol",
@@ -134,6 +135,13 @@ def test_model_catalog_contains_current_recommended_models():
         "claude-haiku-4-5-20251001",
     ]
     assert reasoning_options_for(ModelProvider.OPENAI, "gpt-6-astra") == (
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    )
+    assert reasoning_options_for(ModelProvider.OPENAI, "gpt-6.1-sol") == (
         "low",
         "medium",
         "high",
@@ -156,9 +164,7 @@ def test_model_catalog_contains_current_recommended_models():
         "xhigh",
         "max",
     )
-    assert reasoning_options_for(ModelProvider.ANTHROPIC, "claude-haiku-4-5-20251001") == (
-        "none",
-    )
+    assert reasoning_options_for(ModelProvider.ANTHROPIC, "claude-haiku-4-5-20251001") == ("none",)
 
 
 def test_gpt6_catalog_source_and_review_date_are_explicit_and_current():
@@ -170,7 +176,7 @@ def test_gpt6_catalog_source_and_review_date_are_explicit_and_current():
     )
     assert reviewed_on <= today
     assert (today - reviewed_on).days <= GPT6_MODEL_CATALOG_MAX_REVIEW_AGE_DAYS
-    for model_id in ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna"):
+    for model_id in ("gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"):
         assert reasoning_capabilities_verified(ModelProvider.OPENAI, model_id)
     assert not reasoning_capabilities_verified(ModelProvider.OPENAI, "gpt-6-custom")
 
@@ -179,9 +185,13 @@ def test_gpt6_catalog_source_and_review_date_are_explicit_and_current():
     ("provider", "model", "reasoning"),
     [
         (ModelProvider.OPENAI, "gpt-6-astra", "none"),
+        (ModelProvider.OPENAI, "gpt-6.1-sol", "none"),
+        (ModelProvider.OPENAI, "gpt-6.1-sol", "minimal"),
         (ModelProvider.OPENAI, "gpt-5.4", "max"),
         (ModelProvider.OPENAI, "gpt-4.1", "high"),
         (ModelProvider.ANTHROPIC, "claude-haiku-4-5-20251001", "high"),
+        (ModelProvider.ANTHROPIC, "claude-opus-4-6", "xhigh"),
+        (ModelProvider.ANTHROPIC, "claude-sonnet-4-6", "xhigh"),
     ],
 )
 def test_model_selection_rejects_unsupported_reasoning(provider, model, reasoning):
@@ -191,7 +201,9 @@ def test_model_selection_rejects_unsupported_reasoning(provider, model, reasonin
             triage_model=model,
             primary_model=("gpt-6-sol" if provider is ModelProvider.OPENAI else "claude-sonnet-5"),
             deep_model=("gpt-6-sol" if provider is ModelProvider.OPENAI else "claude-sonnet-5"),
-            synthesis_model=("gpt-6-sol" if provider is ModelProvider.OPENAI else "claude-sonnet-5"),
+            synthesis_model=(
+                "gpt-6-sol" if provider is ModelProvider.OPENAI else "claude-sonnet-5"
+            ),
             triage_reasoning=reasoning,
         )
 
@@ -327,13 +339,13 @@ def test_setup_menu_orders_each_model_before_its_reasoning(tmp_path, monkeypatch
     assert prompts == [
         "Выбор [1]: ",
         "Номер [1]: ",
-        "Выбор [3]: ",
-        "Выбор [6]: ",
-        "Выбор [2]: ",
-        "Выбор [3]: ",
-        "Выбор [2]: ",
         "Выбор [4]: ",
-        "Выбор [2]: ",
+        "Выбор [6]: ",
+        "Выбор [3]: ",
+        "Выбор [3]: ",
+        "Выбор [3]: ",
+        "Выбор [4]: ",
+        "Выбор [3]: ",
         "Выбор [3]: ",
     ]
     output = capsys.readouterr().out
@@ -364,6 +376,46 @@ def test_setup_menu_supports_english_and_explains_workflow_stages(tmp_path, monk
     assert "Combines review results into the final QA outcome." in output
     policy = json.loads((tmp_path / "model-policy.json").read_text(encoding="utf-8"))
     assert "language" not in policy
+
+
+@pytest.mark.parametrize("answer", ["-1", "-2", "9"])
+def test_setup_rejects_out_of_range_model_menu_choice(tmp_path, monkeypatch, answer):
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+    answers = iter(("2", "1", answer, "", "", "", "", "", "", ""))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert main(["setup"]) == 2
+    assert not (tmp_path / "model-policy.json").exists()
+
+
+@pytest.mark.parametrize("answer", ["0", "-1", "7"])
+def test_setup_rejects_out_of_range_reasoning_menu_choice(tmp_path, monkeypatch, answer):
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+    answers = iter(("2", "1", "", answer, "", "", "", "", "", ""))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert main(["setup"]) == 2
+    assert not (tmp_path / "model-policy.json").exists()
+
+
+def test_english_setup_localizes_gpt61_label(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+    answers = iter(("2", "1", "b", "b"))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert main(["setup"]) == 130
+    output = capsys.readouterr().out
+    assert "GPT-6.1 Sol — complex coding and professional work" in output
+    assert "сложная разработка" not in output
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Symlinks require Windows privileges")
+def test_loading_policy_rejects_dangling_symlink(tmp_path):
+    path = tmp_path / "model-policy.json"
+    path.symlink_to(tmp_path / "missing.json")
+
+    with pytest.raises(ValueError, match="regular file"):
+        load_model_selection(path)
 
 
 def test_setup_menu_can_go_back_to_provider(tmp_path, monkeypatch):

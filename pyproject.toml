@@ -17,6 +17,8 @@ classifiers = [
 dependencies = [
   "fastmcp>=3.3,<4.0",
   "pydantic>=2.11,<3.0",
+  # Enforce the patched transitive dependency for wheel/uvx installs without uv.lock.
+  "pyjwt>=2.14,<3.0",
 ]
 
 [project.scripts]

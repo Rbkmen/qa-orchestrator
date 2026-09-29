@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import stat
 from datetime import UTC, datetime, timedelta
 
@@ -10,7 +11,7 @@ from qa_orchestrator.orchestration import (
     OrchestrationStep,
     QaOrchestrator,
 )
-from qa_orchestrator.session_store import SqliteSessionStore
+from qa_orchestrator.session_store import SqliteSessionStore, inspect_session_store
 
 
 class FakeClock:
@@ -132,3 +133,32 @@ def test_session_store_rejects_symlink_path(tmp_path):
 
     with pytest.raises(ValueError, match="regular file"):
         SqliteSessionStore(link)
+
+
+def test_store_rejects_naive_expiry_before_recovery(tmp_path):
+    path = tmp_path / "sessions.sqlite3"
+    store = SqliteSessionStore(path)
+    session = _orchestrator(store, FakeClock()).start("ordinary_review")
+    payload = session.model_copy(
+        update={"expires_at": session.expires_at.replace(tzinfo=None)}
+    ).model_dump_json()
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE sessions SET payload = ?", (payload,))
+
+    with pytest.raises(ValueError, match="invalid session data"):
+        inspect_session_store(path)
+    with pytest.raises(ValueError, match="invalid session data"):
+        _orchestrator(store, FakeClock())
+
+
+def test_store_rejects_duplicate_schema_metadata(tmp_path):
+    path = tmp_path / "sessions.sqlite3"
+    SqliteSessionStore(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute("INSERT INTO session_store_metadata VALUES (2)")
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="unsupported session store schema"):
+        SqliteSessionStore(path)
+
+    assert path.read_bytes() == before

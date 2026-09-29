@@ -49,9 +49,7 @@ def inspect_session_store(path: Path) -> str | None:
 
         tables = {
             row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
         if not {"session_store_metadata", "sessions"}.issubset(tables):
             raise ValueError("unsupported session store schema")
@@ -127,15 +125,15 @@ class SqliteSessionStore:
                 "CREATE TABLE IF NOT EXISTS sessions "
                 "(run_id TEXT PRIMARY KEY, payload TEXT NOT NULL)"
             )
-            row = connection.execute(
-                "SELECT schema_version FROM session_store_metadata LIMIT 1"
-            ).fetchone()
-            if row is None:
+            rows = connection.execute(
+                "SELECT schema_version FROM session_store_metadata"
+            ).fetchall()
+            if not rows:
                 connection.execute(
                     "INSERT INTO session_store_metadata (schema_version) VALUES (?)",
                     (_SCHEMA_VERSION,),
                 )
-            elif row[0] != _SCHEMA_VERSION:
+            elif len(rows) != 1 or rows[0][0] != _SCHEMA_VERSION:
                 raise ValueError("unsupported session store schema version")
             connection.commit()
         except Exception:

@@ -7,6 +7,7 @@ from typing import Literal
 from uuid import uuid4
 
 from pydantic import (
+    AwareDatetime,
     BaseModel,
     ConfigDict,
     Field,
@@ -147,9 +148,7 @@ def assess_deep_review(signals: DeepReviewSignals) -> DeepReviewAssessment:
                 add_reason(reason)
 
     if signals.evidence_conflict and (
-        signals.high_risk_domain
-        or signals.cross_system_scope
-        or signals.high_blast_radius
+        signals.high_risk_domain or signals.cross_system_scope or signals.high_blast_radius
     ):
         triggered_rules.append(DeepReviewRule.CRITICAL_EVIDENCE_CONFLICT)
         add_reason(OrchestrationReason.EVIDENCE_CONFLICT)
@@ -250,7 +249,7 @@ class QaOrchestrationSession(BaseModel):
     next_action: str = Field(min_length=1)
     read_only: Literal[True] = True
     host_owns_decisions: Literal[True] = True
-    expires_at: datetime
+    expires_at: AwareDatetime
 
 
 class AdvanceQaOrchestrationRequest(BaseModel):
@@ -266,10 +265,7 @@ class AdvanceQaOrchestrationRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_transition_signal(self) -> "AdvanceQaOrchestrationRequest":
-        if (
-            self.completed_step is OrchestrationStep.TRIAGE
-            and self.status == "completed"
-        ):
+        if self.completed_step is OrchestrationStep.TRIAGE and self.status == "completed":
             if (self.selected_bundle is None) == (self.selected_profile is None):
                 raise ValueError("exactly one selection is required after triage")
         elif self.selected_bundle is not None or self.selected_profile is not None:
@@ -287,9 +283,7 @@ class AdvanceQaOrchestrationRequest(BaseModel):
             self.completed_step is not OrchestrationStep.PRIMARY_REVIEW
             or self.status != "completed"
         ):
-            raise ValueError(
-                "risk signals must be sent with the final primary-review profile"
-            )
+            raise ValueError("risk signals must be sent with the final primary-review profile")
         return self
 
 
@@ -639,8 +633,7 @@ class QaOrchestrator:
 
     def _active_session_count(self) -> int:
         return sum(
-            session.status in _ACTIVE_SESSION_STATUSES
-            for session in self._sessions.values()
+            session.status in _ACTIVE_SESSION_STATUSES for session in self._sessions.values()
         )
 
     def _evict_terminal_sessions_until_capacity(self, *, slots_required: int = 1) -> None:

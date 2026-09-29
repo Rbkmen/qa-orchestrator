@@ -33,12 +33,12 @@ installation guide](https://docs.astral.sh/uv/getting-started/installation/).
 ```bash
 git clone https://github.com/Rbkmen/qa-orchestrator.git
 cd qa-orchestrator
-uv sync
+uv sync --locked
 uv run qa-orchestrator-doctor
 uv run qa-orch setup
 ```
 
-`uv sync` creates the project environment, installs the server and its
+`uv sync --locked` creates the project environment using the committed lockfile, installs the server and its
 dependencies, and provides the `qa-orchestrator` and `qa-orchestrator-mcp`
 commands in `.venv`. The repository launcher uses that environment
 automatically on macOS and Linux.
@@ -72,12 +72,17 @@ uv run qa-orch reload
 ```
 
 For OpenAI, the recommended menu currently includes `gpt-6-astra`,
-`gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`,
-and `gpt-4.1`. The wizard offers model-specific `reasoning.effort` values:
-`gpt-6-astra` starts at `low`, while `gpt-4.1` uses `none` because it does
-not support reasoning. Other exact OpenAI IDs, such as `gpt-5.5` or `gpt-5.4`,
-can be entered through the custom-ID option. The wizard rejects unsupported
-reasoning values only for model IDs with locally curated capability data.
+`gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`,
+`gpt-5.6-luna`, and `gpt-4.1`. The wizard offers model-specific
+`reasoning.effort` values: `gpt-6-astra` and `gpt-6.1-sol` support `low`,
+`medium`, `high`, `xhigh`, and `max`, but not `none` or `minimal`; `gpt-4.1`
+uses `none` as a local sentinel because it does not support reasoning; the host
+omits the parameter for that model. On reasoning models that support `none`,
+the host must send it explicitly to disable reasoning: omitting the parameter
+uses the model default instead. See the [OpenAI reasoning guide](https://developers.openai.com/api/docs/guides/reasoning). Other exact OpenAI IDs, such
+as `gpt-5.5` or `gpt-5.4`, can be entered through the custom-ID option. The
+wizard rejects unsupported reasoning values only for model IDs with locally
+curated capability data.
 For an unknown custom ID, it checks the ID format and provider hint but does
 not verify the model's actual capabilities; an unsupported reasoning value
 may still be saved. A returned `reasoning_capabilities_verified: false` means
@@ -93,12 +98,44 @@ risky deep checks when the selected model supports it. Use the exact ID
 available in the selected account. See the [OpenAI model catalog](https://developers.openai.com/api/docs/models/all),
 [OpenAI reasoning guide](https://developers.openai.com/api/docs/guides/reasoning),
 and [Anthropic model documentation](https://platform.claude.com/docs/en/models/overview)
-for current provider details.
+for current provider details. The compatibility entries for Claude Opus 4.6
+and Sonnet 4.6 allow `low`, `medium`, `high`, and `max`, but not `xhigh`; see
+the [Anthropic effort guide](https://platform.claude.com/docs/en/build-with-claude/effort).
 
-`reload` re-reads and validates the saved policy. If an MCP client is already
-connected, restart its MCP connection after changing the policy. The wizard
+`config show` reads the saved file (or defaults if it is missing). `reload`
+validates it in a separate CLI process; it does not reload a connected server.
+After changing the policy, restart the client's MCP server connection and call
+`get_qa_orchestration_model_policy` with `{}`. That read-only MCP tool returns
+the in-memory provider, four model IDs, and their reasoning levels used for new
+sessions. It does not reread the file, start a session, contact the provider,
+or prove which model the host actually executed. Use host execution details
+for that last check.
+
+If no policy exists, the server uses `gpt-6-luna` / `max` for triage and
+`gpt-6-sol` with `medium`, `high`, and `medium` for primary review, deep review,
+and synthesis respectively. Accepting defaults in setup preserves an existing
+selection. The wizard
 colors providers, model IDs, and reasoning values; use `NO_COLOR=1` to disable
 colors or `FORCE_COLOR=1` to force them.
+
+### Setup without prompts
+
+Supply a provider and all four model IDs. Supply all four reasoning flags to
+set them explicitly; if all reasoning flags are omitted, setup uses valid
+defaults for each model and preserves compatible saved reasoning values.
+For example, from a checkout:
+
+```bash
+uv run qa-orch setup --provider openai \
+  --triage-model gpt-6-luna --triage-reasoning max \
+  --primary-model gpt-6.1-sol --primary-reasoning medium \
+  --deep-model gpt-6.1-sol --deep-reasoning high \
+  --synthesis-model gpt-6.1-sol --synthesis-reasoning medium
+```
+
+This writes the local policy immediately. It does not change an already running
+server. For PowerShell, enter the command on one line or replace shell
+continuations with PowerShell backticks.
 
 ### Alternative: use GitHub without a checkout
 
@@ -196,14 +233,46 @@ For Anthropic/Claude Code, use the [Claude Code setup guide](clients/claude-code
 ## 4. Verify the connection
 
 1. In Codex CLI, run `codex mcp list`; in Claude Code, run `claude mcp get qa-orchestrator` or `/mcp`. In the ChatGPT desktop app, check **Settings → MCP servers** or use `/mcp`.
-2. Restart the client if needed, then confirm that all five tools are available: `prepare_qa_orchestration`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, and `finish_qa_orchestration`.
+2. Restart the client if needed, then confirm that all six tools are available: `prepare_qa_orchestration`, `get_qa_orchestration_model_policy`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, and `finish_qa_orchestration`.
 3. For a read-only smoke check, call `prepare_qa_orchestration` with `agent_profile="code_explorer"`. It should return the Faraday evidence-investigator route with `read_only=true` and `host_owns_decisions=true`.
+4. Call `get_qa_orchestration_model_policy` with `{}` and compare the returned selection with `qa-orch config show`. These checks create no QA session. Registration in `mcp list` alone does not prove a successful tool call.
 
 The server is started on demand by the MCP client. Do not start a second background server manually.
 
+The server disables FastMCP's startup banner and its automatic package-update
+check. Normal STDIO startup and QA tool calls need no network. Initial
+dependency installation, GitHub-based `uvx` installation, and host evidence/model
+access can still require network connectivity.
+
 ## Data and privacy
 
-Evidence, source code, logs, prompts, model responses, and final QA decisions stay with the host agent. Active orchestration state is bounded and held in process memory by default. To resume unfinished orchestration after a server restart, optionally set `QA_ORCHESTRATOR_SESSION_STORE_PATH` to a local SQLite file. That file holds only current structured session state and is deleted from the store at finalization; it does not contain task evidence, content, final outcomes, history, or statistics. Use one server process per store file. Without that setting, no session state is written to disk. The model policy is stored at `$HOME/.qa-orchestrator/model-policy.json` by default; set `QA_ORCHESTRATOR_DATA_DIR` or `QA_ORCHESTRATOR_MODEL_POLICY_PATH` to change that location. It contains provider, model IDs, and reasoning/effort settings, not credentials or task data.
+Evidence, source code, logs, prompts, model responses, and final QA decisions stay with the host agent. Active orchestration state is bounded and held in process memory by default. To resume unfinished orchestration after a server restart, optionally set `QA_ORCHESTRATOR_SESSION_STORE_PATH` to a local SQLite file. That file holds only current structured session state; finalization deletes the session's row and keeps the database file. It does not contain task evidence, content, finalized outcomes, history, or statistics. Use one server process per store file. Without that setting, no session state is written to disk. The model policy is stored at `$HOME/.qa-orchestrator/model-policy.json` by default; set `QA_ORCHESTRATOR_DATA_DIR` or `QA_ORCHESTRATOR_MODEL_POLICY_PATH` to change that location. It contains provider, model IDs, and reasoning/effort settings, not credentials or task data.
+
+### Configuration overrides
+
+The [configuration variables](../README.md#configuration) must reach the server
+through the MCP client's environment. An environment variable set only in a
+terminal may not reach a desktop client. Use the same policy path for setup
+and the server. For Codex, an existing TOML entry can include:
+
+```toml
+[mcp_servers.qa-orchestrator]
+command = "/absolute/path/to/qa-orchestrator/scripts/qa-orchestrator"
+args = []
+env = { QA_ORCHESTRATOR_MODEL_POLICY_PATH = "/absolute/path/to/model-policy.json", QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS = "1800", QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS = "100" }
+```
+
+Use the Windows entry point or pinned `uvx` command from the client guide when
+applicable. Run setup with that same `QA_ORCHESTRATOR_MODEL_POLICY_PATH` in
+your terminal. Add `QA_ORCHESTRATOR_SESSION_STORE_PATH` only for optional
+recovery. Keep the file local and use one server process per file; multiple
+clients need separate store paths. On POSIX, the server uses private file
+permissions; on Windows, restrict access using the directory's ACLs.
+
+Recovered sessions retain the policy returned for their current stage. Their
+next successful transition uses the policy loaded by the restarted server.
+`get_qa_orchestration(run_id)` is authoritative for an existing session;
+`get_qa_orchestration_model_policy` describes the current server's policy.
 
 ## Updating
 
@@ -211,7 +280,7 @@ From the checkout, first make sure you have no local changes you need to keep, t
 
 ```bash
 git pull --ff-only
-uv sync
+uv sync --locked
 ```
 
 Restart the MCP client after updating so it starts the current launcher and
@@ -254,6 +323,9 @@ server command on the same commit.
 | `QA Orchestrator is not installed` | Run `uv sync` from the cloned repository; use `scripts/qa-orchestrator` on macOS/Linux or `.venv\Scripts\qa-orchestrator-mcp.exe` on Windows. |
 | Server is missing from Codex | Run `codex mcp list` and `codex mcp get qa-orchestrator`; if the checkout moved, remove the stale entry with `codex mcp remove qa-orchestrator`, add it again using the current absolute path, then restart Codex. |
 | Server is enabled but tools do not appear | Restart Codex and confirm the configured platform entry point exists. |
+| Models differ between the CLI and MCP | Confirm both use the same policy path. Restart the server connection, then call `get_qa_orchestration_model_policy` again. `reload` alone does not update the connected server. |
+| The host uses a different model | The MCP returns instructions, not execution telemetry. Verify model selection in the host; report unavailable stage settings explicitly. |
+| Invalid model policy or session store | Run `qa-orchestrator-doctor --json`. Correct the policy with setup; preserve a broken recovery store for diagnosis and configure a new store path if you need a fresh start. |
 | Server is missing or disconnected in Claude Code | Run `claude mcp list`, `claude mcp get qa-orchestrator`, or `/mcp`; verify the command and arguments in the client guide. |
 | `uvx` cannot fetch the GitHub source | Confirm `uv` and Git are installed and that this machine can reach GitHub; for a reproducible team setup, pin an immutable commit SHA. |
 | Python or dependency error | Confirm Python is 3.12+ and run `uv sync` from the repository root. |

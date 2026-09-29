@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 MODEL_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 GPT6_MODEL_CATALOG_SOURCE_URL = "https://developers.openai.com/api/docs/guides/latest-model"
-GPT6_MODEL_CATALOG_REVIEWED_ON = "2026-09-28"
+GPT6_MODEL_CATALOG_REVIEWED_ON = "2026-09-29"
 GPT6_MODEL_CATALOG_MAX_REVIEW_AGE_DAYS = 180
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 REASONING_EFFORTS: tuple[ReasoningEffort, ...] = (
@@ -50,27 +50,45 @@ class ModelCatalogEntry:
 _OPENAI_REASONING = ("none", "low", "medium", "high", "xhigh", "max")
 _OPENAI_NO_REASONING = ("none",)
 _OPENAI_NO_MAX_REASONING = ("none", "low", "medium", "high", "xhigh")
-_OPENAI_ASTRA_REASONING = ("low", "medium", "high", "xhigh", "max")
+_OPENAI_REASONING_LOW_REQUIRED = ("low", "medium", "high", "xhigh", "max")
 _ANTHROPIC_EFFORT = ("low", "medium", "high", "xhigh", "max")
+_ANTHROPIC_NO_XHIGH_EFFORT = ("low", "medium", "high", "max")
 _ANTHROPIC_NO_EFFORT = ("none",)
 
 # This is a deliberately short list of recommended models. Any other exact
 # provider model ID remains available through the custom-ID option.
 MODEL_CATALOGS: dict[ModelProvider, tuple[ModelCatalogEntry, ...]] = {
     ModelProvider.OPENAI: (
-        ModelCatalogEntry("GPT-6 Astra — максимальное качество", "gpt-6-astra", _OPENAI_ASTRA_REASONING),
-        ModelCatalogEntry("GPT-6 Sol — сложный код и агентные задачи", "gpt-6-sol", _OPENAI_REASONING),
+        ModelCatalogEntry(
+            "GPT-6 Astra — максимальное качество", "gpt-6-astra", _OPENAI_REASONING_LOW_REQUIRED
+        ),
+        ModelCatalogEntry(
+            "GPT-6.1 Sol — сложная разработка и рабочие задачи",
+            "gpt-6.1-sol",
+            _OPENAI_REASONING_LOW_REQUIRED,
+        ),
+        ModelCatalogEntry(
+            "GPT-6 Sol — сложный код и агентные задачи", "gpt-6-sol", _OPENAI_REASONING
+        ),
         ModelCatalogEntry("GPT-6 Luna — быстрее и экономичнее", "gpt-6-luna", _OPENAI_REASONING),
         ModelCatalogEntry("GPT-5.6 Sol", "gpt-5.6-sol", _OPENAI_REASONING),
-        ModelCatalogEntry("GPT-5.6 Terra — баланс качества и цены", "gpt-5.6-terra", _OPENAI_REASONING),
+        ModelCatalogEntry(
+            "GPT-5.6 Terra — баланс качества и цены", "gpt-5.6-terra", _OPENAI_REASONING
+        ),
         ModelCatalogEntry("GPT-5.6 Luna — экономичный вариант", "gpt-5.6-luna", _OPENAI_REASONING),
         ModelCatalogEntry("GPT-4.1 — reasoning не поддерживается", "gpt-4.1", _OPENAI_NO_REASONING),
     ),
     ModelProvider.ANTHROPIC: (
-        ModelCatalogEntry("Claude Fable 5.1 — сложные reasoning-задачи", "claude-fable-5-1", _ANTHROPIC_EFFORT),
-        ModelCatalogEntry("Claude Opus 5.5 — максимальное качество", "claude-opus-5-5", _ANTHROPIC_EFFORT),
+        ModelCatalogEntry(
+            "Claude Fable 5.1 — сложные reasoning-задачи", "claude-fable-5-1", _ANTHROPIC_EFFORT
+        ),
+        ModelCatalogEntry(
+            "Claude Opus 5.5 — максимальное качество", "claude-opus-5-5", _ANTHROPIC_EFFORT
+        ),
         ModelCatalogEntry("Claude Opus 5", "claude-opus-5", _ANTHROPIC_EFFORT),
-        ModelCatalogEntry("Claude Sonnet 5 — баланс качества и скорости", "claude-sonnet-5", _ANTHROPIC_EFFORT),
+        ModelCatalogEntry(
+            "Claude Sonnet 5 — баланс качества и скорости", "claude-sonnet-5", _ANTHROPIC_EFFORT
+        ),
         ModelCatalogEntry(
             "Claude Haiku 4.5 — быстрый, без effort",
             "claude-haiku-4-5-20251001",
@@ -94,8 +112,8 @@ _MODEL_REASONING_OPTIONS.update(
         "gpt-5.4-nano": _OPENAI_NO_MAX_REASONING,
         "claude-opus-4-8": _ANTHROPIC_EFFORT,
         "claude-opus-4-7": _ANTHROPIC_EFFORT,
-        "claude-opus-4-6": _ANTHROPIC_EFFORT,
-        "claude-sonnet-4-6": _ANTHROPIC_EFFORT,
+        "claude-opus-4-6": _ANTHROPIC_NO_XHIGH_EFFORT,
+        "claude-sonnet-4-6": _ANTHROPIC_NO_XHIGH_EFFORT,
     }
 )
 _MODEL_PROVIDER_BY_ID = {
@@ -200,7 +218,7 @@ DEFAULT_MODEL_SELECTION = ModelSelection(
 def load_model_selection(path: Path) -> ModelSelection:
     """Load a local selection, or return the safe default when it is absent."""
 
-    if not path.exists():
+    if not path.exists() and not path.is_symlink():
         return DEFAULT_MODEL_SELECTION
     if path.is_symlink() or not path.is_file():
         raise ValueError(f"model policy must be a regular file: {path}")

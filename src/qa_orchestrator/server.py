@@ -11,6 +11,7 @@ from qa_orchestrator.contracts import (
     ReviewBundle,
     ReviewRoute,
 )
+from qa_orchestrator.model_policy import ModelSelection
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
     DeepReviewSignals,
@@ -74,6 +75,16 @@ def build_server(service: OrchestratorService) -> FastMCP:
         repository content, run the review, or change session state; the host owns final decisions.
         """
         return service.prepare_review_route(agent_profile)
+
+    @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
+    def get_qa_orchestration_model_policy() -> ModelSelection:
+        """Return the model policy loaded by this running MCP server.
+
+        The policy includes the provider, model IDs, and reasoning for every stage. This
+        read-only check returns the in-memory policy used for new QA sessions; it does not
+        reread the policy file or create a QA session.
+        """
+        return service.get_qa_orchestration_model_policy()
 
     @mcp.tool(annotations=STATE_TOOL_ANNOTATIONS)
     def start_qa_orchestration(
@@ -233,4 +244,5 @@ def build_server(service: OrchestratorService) -> FastMCP:
 def main() -> None:
     settings = Settings.from_env()
     service = OrchestratorService(settings)
-    build_server(service).run()
+    # FastMCP's banner checks PyPI and writes a version cache by default.
+    build_server(service).run(show_banner=False)

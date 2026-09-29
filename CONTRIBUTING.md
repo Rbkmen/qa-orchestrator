@@ -1,70 +1,151 @@
 # Contributing to QA Orchestrator
 
-QA Orchestrator must remain a small deterministic service: fixed routing and host-owned orchestration.
+QA Orchestrator is a deterministic MCP service for fixed routing and bounded,
+content-free state. The host owns evidence, model execution, and QA decisions.
 
-## Development
+## Set up development
 
-For end-user setup, see the [installation guide](docs/INSTALLATION.md). This file covers development and contribution workflow.
-
-Requirements:
-
-- Python 3.12+;
-- [`uv`](https://docs.astral.sh/uv/);
-- an MCP client for manual STDIO verification.
+Requirements: Git, Python 3.12+, and [uv](https://docs.astral.sh/uv/).
+An MCP client is useful for manual verification; automated tests use FastMCP's
+client and the real STDIO launcher without provider credentials.
 
 ```bash
 git clone https://github.com/Rbkmen/qa-orchestrator.git
 cd qa-orchestrator
-uv sync
+uv sync --locked
 uv run qa-orchestrator-doctor --json
 uv run pytest -q
 uv run ruff check .
 ```
 
-The full test suite must not require network access, credentials, or a separate external service.
+For end-user registration and host rules, follow the
+[installation guide](docs/INSTALLATION.md). `qa-orch setup` writes user
+configuration; use a temporary `QA_ORCHESTRATOR_DATA_DIR` when experimenting.
+If `QA_ORCHESTRATOR_MODEL_POLICY_PATH` is set, it takes precedence over that
+directory. Never use production session-store files in development tests.
 
-## Architecture boundaries
+## Architecture map
 
-- The primary host obtains sources, builds the Evidence Packet, runs model stages, and makes the final QA decision.
-- `prepare_qa_orchestration` returns only static metadata for the selected profile.
-- `start_qa_orchestration`, `advance_qa_orchestration`, and `get_qa_orchestration` manage content-free state only.
-- The orchestrator does not call models, create threads or agents, write user-requested files, or perform writes to external systems.
-- The model policy is configured locally with `qa-orch setup`; the default provider is OpenAI/Codex. Configure model IDs and provider-specific reasoning/effort independently of the model-neutral stage names. Deep review defaults to `high` when the selected model supports it. Execution speed and latency preferences remain controlled by the user's host/provider settings.
-- Do not add persistent QA memory, a source cache, a learning layer, or hidden external calls.
+| Module | Responsibility |
+|---|---|
+| `contracts.py` | Public task, outcome, profile, bundle, and route types |
+| `review_profiles.py` | Fixed checklists, bundle order, task-based recommendations |
+| `model_policy.py` | Local catalog, model/effort validation, atomic policy storage |
+| `orchestration.py` | State machine, fixed escalation rules, TTL and capacity |
+| `session_store.py` | Optional local recovery of unfinished structured sessions |
+| `service.py` | Service facade joining configuration and orchestration |
+| `server.py` | MCP schemas, descriptions, annotations, and tool registration |
+| `config.py` | Environment-based limits and file locations |
+| `cli.py` | Setup wizard, saved-policy inspection, validation, and console entry |
+| `mcp_launcher.py`, `scripts/qa-orchestrator` | Installed and source launchers |
+| `doctor.py` | Read-only local installation and recovery-store checks |
 
-## Changing the MCP contract
+## Keep the responsibility boundary
 
-The public surface must remain limited to five tools:
+- The host obtains sources, builds the Evidence Packet, runs model stages,
+  validates findings, and makes the final decision.
+- Profile preparation returns static metadata. Session tools accept fixed
+  identifiers and structured signals, never evidence, prompts, source, logs,
+  paths, arbitrary reasons, or model output.
+- Model IDs and reasoning are instructions to the host. The server does not
+  invoke providers, switch the host's model, or verify account access. Execution
+  speed and latency preferences remain controlled by the user's host/provider
+  settings.
+- The loaded model-policy tool returns the server's in-memory selection for
+  new sessions. Preserve its read-only, idempotent behavior and zero-argument
+  schema. CLI `config show` and `reload` inspect disk in a separate process.
+- Local state transitions are mutations even though review routes carry
+  `read_only=true`. Keep MCP annotations consistent with observable behavior.
+- Memory-only operation is the default. Optional SQLite recovery stores only
+  unfinished structured sessions; finalization deletes their rows. Never add
+  task history, statistics, persistent QA memory, a source cache, hidden external
+  calls, or another autonomous agent.
+- Invalid operations must preserve session state. Persistence failure must
+  not acknowledge a transition that was not saved. Reads must not refresh TTL.
+
+## Change a contract deliberately
+
+The public surface has six tools:
 
 1. `prepare_qa_orchestration` — profile metadata;
-2. `start_qa_orchestration` — create a session;
-3. `advance_qa_orchestration` — validated transition;
-4. `get_qa_orchestration` — resume or recover the current content-free state;
-5. `finish_qa_orchestration` — finalize the host-owned outcome for a session.
+2. `get_qa_orchestration_model_policy` — loaded server policy;
+3. `start_qa_orchestration` — create a session;
+4. `advance_qa_orchestration` — validated transition;
+5. `get_qa_orchestration` — current session state for recovery;
+6. `finish_qa_orchestration` — finalize the host-owned outcome.
 
-When changing the contract, update `contracts.py`, `orchestration.py`, `service.py`, `server.py`, tests, the README, the routing policy, and client rules. For every new branch, add checks for input validation, illegal transitions, expiry/limits, and the absence of task content.
+Update the affected types, state machine, service, and server together. Match
+the exact tool set, input/output schemas, annotations, descriptions, and real
+MCP behavior in `tests/test_server.py`; verify the installed/source launcher
+in `tests/test_install_artifacts.py`. Keep the README, installation guide,
+[routing policy](docs/ORCHESTRATION_POLICY.md), and client rules consistent.
 
-## Testing
+For a behavior fix, first add a regression test that reproduces the failure.
+Cover invalid input, prohibited transitions, duplicate/stale calls, limits,
+expiry, and data boundaries where they are affected. Assert observable
+results and use real local files or MCP calls instead of checking only prose
+or mocking the method under test.
+
+For catalog changes, verify exact model IDs and effort options against provider
+documentation. Update capability assertions, both wizard languages, and the
+catalog review date only after checking its cited source. Preserve custom IDs;
+`reasoning_capabilities_verified` means locally curated metadata, not a live
+provider check. Do not require a provider API key to run setup or tests.
+
+## Verification before review
+
+Run from the repository root:
 
 ```bash
+uv lock --check
 uv run pytest -q
 uv run ruff check .
+uv run qa-orchestrator-doctor --json
+uv build --wheel --out-dir dist
 git diff --check
+git status --short
 ```
 
-Tests must cover observable behavior: the exact MCP tool set, every profile, the model policy, state transitions, read-only flags, session finalization, and the absence of task-data persistence.
+On macOS/Linux, also run `sh -n scripts/qa-orchestrator`. Keep `dist/`, virtual
+environments, caches, databases, and derived `.codegraph/` indexes out of Git.
+Use Ruff's formatter on changed Python files; CI currently gates lint, not a
+repository-wide format check.
 
-## Documentation and client rules
+| Area | Relevant tests |
+|---|---|
+| Profiles and fixed bundles | `test_review_profiles.py`, `test_service.py` |
+| Routing, escalation, TTL, capacity, finalization | `test_orchestration.py`, `test_deep_review.py`, `test_orchestration_contracts.py` |
+| Model catalog, provider compatibility, wizard and local policy | `test_model_policy.py` |
+| Recovery, file permissions, diagnostic read-only behavior | `test_session_store.py`, `test_doctor.py` |
+| MCP contracts and complete review flows | `test_server.py` |
+| Platform launchers, environment filtering, client rules and packaging metadata | `test_install_artifacts.py`, `test_config.py` |
 
-Update [docs/ORCHESTRATION_POLICY.md](docs/ORCHESTRATION_POLICY.md) when responsibility boundaries change. When host behavior changes, update the guides in `docs/clients/` and the templates in `client-rules/`. Do not add internal URLs, credentials, issue data, local absolute paths, or source payloads to examples.
+The test suite must run without network access, credentials, or external
+services. Use temporary paths for mutable configuration and session stores.
+An autouse fixture isolates the supported environment settings from the user's
+configuration. Keep that isolation when adding tests. The real STDIO startup
+test blocks outbound sockets and checks that no update cache is created;
+preserve the disabled FastMCP banner because it otherwise checks PyPI.
+The wheel build and initial dependency installation may need cached packages
+or network access.
 
-Keep public setup examples provider-neutral and free of personal paths. If a
-change adds a platform or provider limitation, state it in the installation
-guide and support contract.
+CI checks Python 3.12 and 3.13 on Linux and Windows, builds and installs the
+wheel, and runs its doctor outside the checkout. Dependency auditing is a
+separate workflow with scheduled and manual runs. A green test suite does not
+prove a successful dependency audit, actual host model execution, or every
+desktop client's connection. Report the checks you actually ran.
 
-## Commits and review
+## Documentation and pull requests
 
-- Keep changes focused.
-- Describe the motivation, behavior change, and verification.
-- Call out anything that could not be verified separately.
-- Before review, run `pytest`, Ruff, `git diff --check`, the exact tool-surface check, and the generated/local-artifact check.
+- Keep examples free of personal paths, internal URLs, credentials, issue data,
+  and source payloads. Use absolute placeholders for client paths.
+- Update `docs/clients/` and `client-rules/` when host behavior changes. Keep
+  orchestration mechanics in the canonical rules and local requirements in
+  workspace/project instructions.
+- Preserve existing instructions when describing installation. Explain which
+  settings need a server restart and how to verify the loaded result.
+- Describe the defect or motivation, behavior change, compatibility effects,
+  and exact verification results in the pull request. Separate unavailable
+  platform, provider, network, and runtime evidence.
+- Check the staged diff and generated artifacts before committing. Follow the
+  [security policy](SECURITY.md) for private vulnerability reports.

@@ -13,11 +13,7 @@ from qa_orchestrator.mcp_launcher import sanitized_environment
 ROOT = Path(__file__).parents[1]
 LAUNCHER = ROOT / "scripts/qa-orchestrator"
 CLIENT_RULE_FILES = tuple(
-    sorted(
-        path
-        for pattern in ("*.md", "*.mdc")
-        for path in (ROOT / "client-rules").rglob(pattern)
-    )
+    sorted(path for pattern in ("*.md", "*.mdc") for path in (ROOT / "client-rules").rglob(pattern))
 )
 USER_CONTROLLED_SPEED_PATTERNS = (
     r"execution speed and latency preferences (?:are|remain) controlled by the user's host/provider settings",
@@ -69,8 +65,14 @@ def test_launcher_forwards_supported_overrides():
     content = LAUNCHER.read_text(encoding="utf-8")
 
     assert "qa-orchestrator-mcp" in content
-    assert 'QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS="${QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS:-1800}"' in content
-    assert 'QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS="${QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS:-100}"' in content
+    assert (
+        'QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS="${QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS:-1800}"'
+        in content
+    )
+    assert (
+        'QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS="${QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS:-100}"'
+        in content
+    )
     assert 'QA_ORCHESTRATOR_MODEL_POLICY_PATH="$orchestrator_model_policy_path"' in content
     assert 'QA_ORCHESTRATOR_SESSION_STORE_PATH="$orchestrator_session_store_path"' in content
 
@@ -124,13 +126,14 @@ def test_ci_uses_immutable_actions_and_builds_wheel():
     assert 'os: ["ubuntu-latest", "windows-latest"]' in content
     assert '"uv", "pip", "install"' in content
     assert "working-directory: ${{ runner.temp }}" in content
-    assert 'run: uv run --project "${{ github.workspace }}" --no-sync python -m qa_orchestrator.doctor --json' in content
+    assert (
+        'run: uv run --project "${{ github.workspace }}" --no-sync python -m qa_orchestrator.doctor --json'
+        in content
+    )
 
 
 def test_dependency_audit_is_separate_and_keeps_manual_weekly_triggers():
-    content = (ROOT / ".github/workflows/dependency-audit.yml").read_text(
-        encoding="utf-8"
-    )
+    content = (ROOT / ".github/workflows/dependency-audit.yml").read_text(encoding="utf-8")
     refs = re.findall(r"uses:\s+\S+@([^\s#]+)", content)
 
     assert refs
@@ -155,7 +158,7 @@ def test_package_exposes_public_metadata_and_doctor():
     assert 'readme = "README.md"' in content
     assert 'qa-orchestrator-doctor = "qa_orchestrator.doctor:main"' in content
     assert 'qa-orchestrator-mcp = "qa_orchestrator.mcp_launcher:main"' in content
-    assert '[project.urls]' in content
+    assert "[project.urls]" in content
     assert 'Homepage = "https://github.com/Rbkmen/qa-orchestrator"' in content
 
 
@@ -277,7 +280,7 @@ def test_documentation_contains_no_retired_runtime_terms():
 
 
 @pytest.mark.asyncio
-async def test_launcher_exposes_five_tools(monkeypatch, tmp_path):
+async def test_launcher_exposes_six_tools(monkeypatch, tmp_path):
     virtual_env = str(Path(sys.executable).parent.parent)
     monkeypatch.setenv("VIRTUAL_ENV", virtual_env)
     monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
@@ -309,9 +312,53 @@ async def test_launcher_exposes_five_tools(monkeypatch, tmp_path):
 
     assert names == {
         "prepare_qa_orchestration",
+        "get_qa_orchestration_model_policy",
         "finish_qa_orchestration",
         "start_qa_orchestration",
         "advance_qa_orchestration",
         "get_qa_orchestration",
     }
     assert prepared.structured_content["profile"] == "code_explorer"
+
+
+@pytest.mark.asyncio
+async def test_server_startup_makes_no_update_check_network_requests(tmp_path):
+    marker = tmp_path / "network-attempt"
+    dependency_home = tmp_path / "fastmcp"
+    script = """
+import os
+import sys
+from pathlib import Path
+import fastmcp
+
+fastmcp.settings.home = Path(os.environ['CHECK_DEPENDENCY_HOME'])
+fastmcp.settings.check_for_updates = 'stable'
+
+def forbid_network(event, args):
+    if event in {'socket.connect', 'socket.getaddrinfo'}:
+        Path(os.environ['CHECK_NETWORK_MARKER']).touch()
+        raise PermissionError('Network is unavailable in this local startup check')
+
+sys.addaudithook(forbid_network)
+from qa_orchestrator.server import main
+main()
+"""
+    transport = StdioTransport(
+        command=sys.executable,
+        args=["-c", script],
+        env={
+            **os.environ,
+            "CHECK_DEPENDENCY_HOME": str(dependency_home),
+            "CHECK_NETWORK_MARKER": str(marker),
+            "FASTMCP_SHOW_SERVER_BANNER": "true",
+        },
+    )
+    try:
+        async with Client(transport) as client:
+            result = await client.call_tool("get_qa_orchestration_model_policy", {})
+    finally:
+        await transport.close()
+
+    assert result.structured_content["provider"] == "openai"
+    assert not marker.exists(), "Server startup attempted an outbound request"
+    assert not dependency_home.exists(), "Server startup created a dependency update cache"

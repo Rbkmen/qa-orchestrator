@@ -24,8 +24,11 @@ QA Orchestrator owns only deterministic profile routing, bounded orchestration s
 The local console command `qa-orch setup` selects OpenAI or Anthropic and four
 model IDs. It also selects provider-specific reasoning/effort for triage,
 primary review, synthesis, and deep review: OpenAI uses `reasoning.effort`,
-while Anthropic uses `output_config.effort`. `none` means that the
-provider-specific parameter is omitted. `high` remains the default
+while Anthropic uses `output_config.effort`. For OpenAI reasoning models
+that support it, send `none` explicitly to disable reasoning; omitting the
+parameter can enable the model default instead. For non-reasoning models such
+as GPT-4.1, omit the parameter. For Anthropic, `none` is a local sentinel
+meaning omit effort and use model defaults. `high` remains the default
 recommendation for deep escalation when the selected model supports it. The
 selected values are returned in each active session's `model_policy`; the
 orchestrator never calls the models and never stores API keys. The default
@@ -212,12 +215,20 @@ Every review must separate confirmed findings from hypotheses and unverified run
 The orchestrator must publish exactly:
 
 - `prepare_qa_orchestration`;
+- `get_qa_orchestration_model_policy`;
 - `start_qa_orchestration`;
 - `advance_qa_orchestration`;
 - `get_qa_orchestration`;
 - `finish_qa_orchestration`.
 
 `read_only=true` and `host_owns_decisions=true` must be preserved in every orchestration state. Do not add a tool that generates text, accepts evidence, changes external state, selects a model for the host, or silently calls another agent.
+
+`get_qa_orchestration_model_policy` takes no arguments and returns the selection
+loaded by the current server for new sessions. It creates no session and does
+not reread disk or contact providers. After setup, restart the server connection
+before checking it. This reports configured policy, not host execution telemetry.
+For an existing recovered session, follow its returned `model_policy`; the next
+transition uses the restarted server's policy.
 
 ## Persistence and safety
 

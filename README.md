@@ -1,7 +1,26 @@
-# QA Orchestrator 
+# QA Orchestrator
 [![QA Orchestrator MCP server – quality and maintenance score on Glama](https://glama.ai/mcp/servers/Rbkmen/qa-orchestrator/badges/card.svg)](https://glama.ai/mcp/servers/Rbkmen/qa-orchestrator)
 
 QA Orchestrator is a small deterministic FastMCP service for host-owned QA reviews. It keeps orchestration state bounded; evidence, source code, logs, prompts, model responses, and final decisions remain with the primary host agent.
+
+## Quick start
+
+Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), Git, and a local
+MCP client with STDIO support.
+
+```bash
+git clone https://github.com/Rbkmen/qa-orchestrator.git
+cd qa-orchestrator
+uv sync --locked
+uv run qa-orch setup
+uv run qa-orchestrator-doctor
+```
+
+Then [register the server and add the host instructions](docs/INSTALLATION.md#2-connect-it-to-codex).
+The MCP client starts the server. To inspect the models loaded by that process,
+call `get_qa_orchestration_model_policy` with `{}` in the client.
+See the [installation guide](docs/INSTALLATION.md) for Windows, Claude Code,
+installation without a checkout, updates, and troubleshooting.
 
 ## How it works
 
@@ -47,6 +66,9 @@ It does not replace host instructions or perform the review itself.
 ## QA Orchestrator at a glance
 
 ![Detailed host-led QA Orchestrator workflow, including review stages, optional escalation, and ownership boundaries.](docs/assets/qa-orchestrator-workflow.png)
+
+The diagram shows default memory-only operation. Optional SQLite recovery is
+described in the [MCP interface](#mcp-interface).
 
 ### Bundles and profile names
 
@@ -107,11 +129,12 @@ Keep one compact per-task Evidence Packet with stable evidence references (`E1`,
 
 ## MCP interface
 
-The service publishes exactly five tools:
+The service publishes exactly six tools:
 
 | Tool | Purpose |
 |---|---|
 | `prepare_qa_orchestration(agent_profile)` | Return the fixed checklist for one profile without creating a session |
+| `get_qa_orchestration_model_policy()` | Read the provider, models, and reasoning loaded by this server for new sessions |
 | `start_qa_orchestration(task_type)` | Create a session and return the task-based bundle shortlist |
 | `advance_qa_orchestration(...)` | Complete triage, primary review, deep review, or synthesis and return the next action |
 | `get_qa_orchestration(run_id)` | Read the current content-free state when resuming or recovering a session |
@@ -151,6 +174,11 @@ The primary host is responsible for:
 
 QA Orchestrator is responsible only for fixed routing, state transitions, read-only constraints, and bounded session finalization. `advance_qa_orchestration` must not receive an Evidence Packet, prompt, model output, source text, logs, paths, or an arbitrary reason.
 
+The `read_only=true` flag describes the review boundary. MCP annotations mark
+`start`, `advance`, and `finish` as state-changing tools because they update
+local orchestration state. Profile lookup, model-policy inspection, and state
+lookup are annotated as read-only.
+
 ## Requirements
 
 - Python 3.12+;
@@ -166,13 +194,7 @@ source launcher.
 
 For the complete setup—including Codex and Claude Code registration, host instructions, verification, and troubleshooting—see the [installation guide](docs/INSTALLATION.md).
 
-```bash
-git clone https://github.com/Rbkmen/qa-orchestrator.git
-cd qa-orchestrator
-uv sync
-uv run qa-orchestrator-doctor
-uv run qa-orch setup
-```
+Start with the [quick start](#quick-start) above to install from a checkout.
 
 On macOS and Linux, the source launcher uses the project's `.venv`, the active
 `VIRTUAL_ENV`, or an installed `qa-orchestrator-mcp` from `PATH`. On Windows,
@@ -217,6 +239,25 @@ The wizard uses a local recommendation/capability catalog and does not contact
 provider APIs. For custom model IDs, verify that the host account can access
 the model and supports the selected reasoning/effort value.
 
+### Inspect and apply model settings
+
+| Check | What it proves |
+|---|---|
+| `uv run qa-orch config show` | The saved policy on disk, or built-in defaults if no file exists |
+| `uv run qa-orch reload` | The CLI can read and validate that file; the connected server still needs a restart |
+| MCP `get_qa_orchestration_model_policy({})` | The policy currently loaded by the connected server for new sessions |
+| Host execution details | Which model actually performed a review stage |
+
+After changing settings, restart the client's server connection and call the
+MCP policy tool again. The orchestrator provides policy metadata; it cannot
+switch the host's model or verify that the host executed that model. If the
+host cannot use a requested model, report that limitation in the review.
+
+Without a saved policy, defaults are `gpt-6-luna` / `max` for triage and
+`gpt-6-sol` for primary review / `medium`, deep review / `high`, and
+synthesis / `medium`. Setup preserves an existing selection when you accept
+its defaults.
+
 Example for Codex with a local checkout:
 
 ```bash
@@ -240,6 +281,12 @@ The two supported host integrations are described in the [client guides](docs/cl
 | `QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS` | `100` |
 | `QA_ORCHESTRATOR_MODEL_POLICY_PATH` | `~/.qa-orchestrator/model-policy.json` |
 | `QA_ORCHESTRATOR_SESSION_STORE_PATH` | unset (disabled) |
+
+The default policy path follows `QA_ORCHESTRATOR_DATA_DIR`. Configure the same
+policy path for setup and for the MCP client; use absolute paths for portable
+client configuration. Limits must be positive integers. See the
+[configuration example](docs/INSTALLATION.md#configuration-overrides) for
+client environment overrides.
 
 ## Finalize an orchestration
 

@@ -40,7 +40,7 @@ REASONING_ROLE_LABELS = (
     ("synthesis_reasoning", "synthesis"),
 )
 REASONING_DESCRIPTIONS = {
-    "none": "не передавать параметр reasoning/effort",
+    "none": "отключить reasoning у поддерживающей это модели OpenAI",
     "minimal": "минимальный уровень рассуждений",
     "low": "быстрее и дешевле, подходит для простых задач",
     "medium": "сбалансированный вариант по умолчанию",
@@ -49,7 +49,7 @@ REASONING_DESCRIPTIONS = {
     "max": "максимальный уровень reasoning",
 }
 REASONING_DESCRIPTIONS_EN = {
-    "none": "do not send a reasoning/effort parameter",
+    "none": "disable reasoning on an OpenAI model that supports it",
     "minimal": "minimum reasoning effort",
     "low": "faster and cheaper; suitable for simple tasks",
     "medium": "balanced default",
@@ -59,6 +59,7 @@ REASONING_DESCRIPTIONS_EN = {
 }
 MODEL_LABELS_EN = {
     "gpt-6-astra": "GPT-6 Astra — highest capability",
+    "gpt-6.1-sol": "GPT-6.1 Sol — complex coding and professional work",
     "gpt-6-sol": "GPT-6 Sol — complex code and agentic tasks",
     "gpt-6-luna": "GPT-6 Luna — faster and more economical",
     "gpt-5.6-sol": "GPT-5.6 Sol",
@@ -103,6 +104,7 @@ SETUP_COPY = {
             "synthesis": "Объединяет результаты ревью в итоговый QA-вывод.",
         },
         "reasoning_descriptions": REASONING_DESCRIPTIONS,
+        "omit_reasoning": "не передавать параметр reasoning/effort; используются настройки модели",
         "current_model": "Текущая модель: {model}",
         "current_default": " (текущая/по умолчанию)",
         "custom_model": "  0. Ввести другой model ID",
@@ -161,6 +163,7 @@ SETUP_COPY = {
             "synthesis": "Combines review results into the final QA outcome.",
         },
         "reasoning_descriptions": REASONING_DESCRIPTIONS_EN,
+        "omit_reasoning": "omit the reasoning/effort parameter; model defaults apply",
         "current_model": "Current model: {model}",
         "current_default": " (current/default)",
         "custom_model": "  0. Enter another model ID",
@@ -245,7 +248,11 @@ def _provider_choice(current: ModelProvider | None, language: str) -> ModelProvi
     print(_paint(copy["back_exit"], _COLORS["muted"]))
 
     default_index = next(
-        (index for index, (provider, _) in enumerate(PROVIDER_OPTIONS, start=1) if provider is current),
+        (
+            index
+            for index, (provider, _) in enumerate(PROVIDER_OPTIONS, start=1)
+            if provider is current
+        ),
         1,
     )
     answer = input(copy["provider_prompt"].format(default=default_index)).strip()
@@ -302,7 +309,9 @@ def _model_value(
             )
             for index, entry in enumerate(catalog, start=1):
                 suffix = copy["current_default"] if entry.model_id == selected_default else ""
-                color = _COLORS["selected"] if entry.model_id == selected_default else _COLORS["model"]
+                color = (
+                    _COLORS["selected"] if entry.model_id == selected_default else _COLORS["model"]
+                )
                 entry_label = (
                     MODEL_LABELS_EN.get(entry.model_id, entry.label)
                     if language == "en"
@@ -326,6 +335,8 @@ def _model_value(
             else:
                 try:
                     index = int(answer)
+                    if not 1 <= index <= len(catalog):
+                        raise ValueError
                     value = catalog[index - 1].model_id
                 except (ValueError, IndexError) as exc:
                     raise ValueError(copy["invalid_model"].format(label=label)) from exc
@@ -399,15 +410,13 @@ def _reasoning_value(
     )
     print(f"  {copy['stage_descriptions'][stage]}")
     default_index = next(
-        (
-            index
-            for index, value in enumerate(options, start=1)
-            if value == selected_default
-        ),
+        (index for index, value in enumerate(options, start=1) if value == selected_default),
         1,
     )
     for index, value in enumerate(options, start=1):
         description = copy["reasoning_descriptions"][value]
+        if value == "none" and (provider is ModelProvider.ANTHROPIC or options == ("none",)):
+            description = copy["omit_reasoning"]
         suffix = copy["current_default"] if value == selected_default else ""
         color = _COLORS["selected"] if value == selected_default else _COLORS["reasoning"]
         print(f"  {index}. {_paint(value, color)} — {description}{suffix}")
@@ -428,7 +437,10 @@ def _reasoning_value(
     if not answer:
         return selected_default
     try:
-        return options[int(answer) - 1]
+        index = int(answer)
+        if not 1 <= index <= len(options):
+            raise ValueError
+        return options[index - 1]
     except (ValueError, IndexError) as exc:
         raise ValueError(copy["invalid_reasoning"].format(label=label)) from exc
 
@@ -568,9 +580,11 @@ def _setup(argv: Sequence[str]) -> int:
         return 2
     save_model_selection(settings.model_policy_path, selection)
     print(f"\n{copy['saved'].format(path=settings.model_policy_path)}")
-    print(copy["provider_summary"].format(
-        provider=_paint(selection.provider.value, _COLORS["provider"])
-    ))
+    print(
+        copy["provider_summary"].format(
+            provider=_paint(selection.provider.value, _COLORS["provider"])
+        )
+    )
     for field, stage in ROLE_LABELS:
         label = copy["model_labels"][stage]
         print(f"{label}: {_paint(getattr(selection, field), _COLORS['model'])}")

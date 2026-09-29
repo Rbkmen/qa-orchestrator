@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
@@ -9,7 +11,7 @@ from qa_orchestrator.service import OrchestratorService
 
 
 @pytest.mark.asyncio
-async def test_server_exposes_five_tools(tmp_path):
+async def test_server_exposes_six_tools(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
@@ -17,6 +19,7 @@ async def test_server_exposes_five_tools(tmp_path):
 
     assert set(tools) == {
         "prepare_qa_orchestration",
+        "get_qa_orchestration_model_policy",
         "finish_qa_orchestration",
         "start_qa_orchestration",
         "advance_qa_orchestration",
@@ -59,6 +62,7 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
 
     for name in (
         "prepare_qa_orchestration",
+        "get_qa_orchestration_model_policy",
         "get_qa_orchestration",
     ):
         annotations = tools[name].annotations
@@ -66,6 +70,8 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
         assert annotations.readOnlyHint is True
         assert annotations.idempotentHint is True
         assert annotations.openWorldHint is False
+
+    assert tools["get_qa_orchestration_model_policy"].inputSchema["properties"] == {}
 
     for name in (
         "start_qa_orchestration",
@@ -104,6 +110,30 @@ async def test_prepare_qa_orchestration_returns_selected_profile(tmp_path):
     assert result.structured_content["display_name"] == "Security Reviewer"
     assert result.structured_content["read_only"] is True
     assert result.structured_content["host_owns_decisions"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_qa_orchestration_model_policy_returns_loaded_policy(tmp_path):
+    loaded_policy = {
+        "provider": "openai",
+        "triage_model": "gpt-6-luna",
+        "primary_model": "gpt-6.1-sol",
+        "deep_model": "gpt-6.1-sol",
+        "synthesis_model": "gpt-6.1-sol",
+        "triage_reasoning": "max",
+        "primary_reasoning": "medium",
+        "deep_reasoning": "high",
+        "synthesis_reasoning": "medium",
+    }
+    model_policy_path = tmp_path / "model-policy.json"
+    model_policy_path.write_text(json.dumps(loaded_policy), encoding="utf-8")
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    model_policy_path.write_text("invalid json", encoding="utf-8")
+
+    async with Client(build_server(service)) as client:
+        result = await client.call_tool("get_qa_orchestration_model_policy", {})
+
+    assert result.structured_content == loaded_policy
 
 
 @pytest.mark.asyncio

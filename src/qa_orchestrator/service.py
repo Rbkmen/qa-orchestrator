@@ -7,7 +7,7 @@ from qa_orchestrator.contracts import (
     ReviewAgent,
     ReviewRoute,
 )
-from qa_orchestrator.model_policy import load_model_selection
+from qa_orchestrator.model_policy import ModelSelection, load_model_selection
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
     QaOrchestrationSession,
@@ -43,6 +43,9 @@ class OrchestratorService:
         except (TypeError, ValueError) as exc:
             raise ValueError("unknown review agent profile") from exc
         return build_review_route(resolved_profile)
+
+    def get_qa_orchestration_model_policy(self) -> ModelSelection:
+        return self.orchestrator.model_selection
 
     def start_qa_orchestration(self, task_type: QaTaskType) -> QaOrchestrationSession:
         return self.orchestrator.start(task_type)
