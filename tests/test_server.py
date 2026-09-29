@@ -89,7 +89,9 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     assert "100 sessions by default" in start_description
     assert "session limit" in start_description
     finish_description = " ".join((tools["finish_qa_orchestration"].description or "").split())
-    assert "Call only when" in finish_description
+    assert "no review step runs here" in finish_description
+    assert "reaches `awaiting_host_outcome` after synthesis" in finish_description
+    assert "or after it records an early stop" in finish_description
     assert "same `partial` or `blocked` outcome" in finish_description
     assert "returns the retained terminal session" in finish_description
     assert "conflicting final outcome" in finish_description
