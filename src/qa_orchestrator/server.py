@@ -67,8 +67,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
         """Return a fixed checklist for one `agent_profile`. It gives review focus, required output
         sections, shared evidence constraints, and escalation signals.
 
-        Use it for one scoped concern. For a selected bundle, request each `review_profiles` member
-        separately in session order; use start_qa_orchestration to track the multi-concern review.
+        Use for one scoped concern. For a bundle, call once per `review_profiles` member in session
+        order; track the review with start_qa_orchestration.
 
         Passing `agent_profile` never selects a session profile. This stateless lookup does not inspect
         repository content, run the review, or change session state; the host owns final decisions.
@@ -162,17 +162,17 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ),
         ] = None,
     ) -> QaOrchestrationSession:
-        """Complete the active step and return the run's updated state and next action.
+        """Complete the active step; return updated state and next action.
 
-        Pass current_step as completed_step; stale or out-of-order steps are rejected. Malformed
-        arguments, incompatible signals, and unknown or expired run_ids return errors without advancing
-        the run. This call is non-idempotent: if a successful response is lost, inspect
-        get_qa_orchestration before continuing; replaying the prior step is rejected.
+        Pass current_step as completed_step. Stale or out-of-order steps, malformed arguments,
+        incompatible signals, and unknown or expired run_ids return errors without advancing the run.
+        Non-idempotent: if the response is lost, inspect get_qa_orchestration; replaying the prior
+        step is rejected.
 
-        - Completed triage requires exactly one of selected_bundle or selected_profile; omit both when
-          stopping early.
-        - After each completed primary review, send current_profile as completed_profile. On the final
-          profile, also send risk_signals ({} if none apply); omit both on an early stop.
+        - Completed triage requires exactly one of selected_bundle or selected_profile; omit both on
+          early stop.
+        - For each completed primary review, send current_profile as completed_profile. With the final
+          profile, also send risk_signals ({} if none); omit both on an early stop.
         - Finalize an early stop with the same partial or blocked outcome. After synthesis, call
           finish_qa_orchestration.
         """
