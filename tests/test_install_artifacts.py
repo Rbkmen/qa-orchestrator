@@ -326,6 +326,7 @@ async def test_server_startup_makes_no_update_check_network_requests(tmp_path):
     marker = tmp_path / "network-attempt"
     dependency_home = tmp_path / "fastmcp"
     script = """
+import ipaddress
 import os
 import sys
 from pathlib import Path
@@ -334,10 +335,27 @@ import fastmcp
 fastmcp.settings.home = Path(os.environ['CHECK_DEPENDENCY_HOME'])
 fastmcp.settings.check_for_updates = 'stable'
 
+def is_loopback(host):
+    if host is None:
+        return True
+    if isinstance(host, bytes):
+        host = host.decode('ascii', errors='ignore')
+    if host == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except (TypeError, ValueError):
+        return False
+
 def forbid_network(event, args):
-    if event in {'socket.connect', 'socket.getaddrinfo'}:
+    if event == 'socket.getaddrinfo' and not is_loopback(args[0]):
         Path(os.environ['CHECK_NETWORK_MARKER']).touch()
-        raise PermissionError('Network is unavailable in this local startup check')
+        raise PermissionError('External network is unavailable in this local startup check')
+    if event == 'socket.connect':
+        address = args[1]
+        if not isinstance(address, tuple) or not is_loopback(address[0]):
+            Path(os.environ['CHECK_NETWORK_MARKER']).touch()
+            raise PermissionError('External network is unavailable in this local startup check')
 
 sys.addaudithook(forbid_network)
 from qa_orchestrator.server import main
