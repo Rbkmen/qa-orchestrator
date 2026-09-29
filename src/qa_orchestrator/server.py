@@ -64,7 +64,9 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ),
         ],
     ) -> ReviewRoute:
-        """Return the fixed focus, constraints, and required output sections for one review profile.
+        """Return the selected profile identifier and display name, review focus, required output
+        sections, shared evidence constraints, and escalation signals to assess against evidence. The
+        route is read-only and leaves final review decisions with the host.
 
         Use it for one scoped concern or a selected bundle member's checklist; use
         start_qa_orchestration for a tracked multi-concern review. This stateless lookup returns fixed

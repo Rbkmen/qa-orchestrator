@@ -74,6 +74,13 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     assert "risk level" in task_type_description
 
     prepare_description = " ".join((tools["prepare_review_route"].description or "").split())
+    assert "profile identifier and display name" in prepare_description
+    assert "review focus" in prepare_description
+    assert "required output sections" in prepare_description
+    assert "shared evidence constraints" in prepare_description
+    assert "escalation signals to assess against evidence" in prepare_description
+    assert "route is read-only" in prepare_description
+    assert "final review decisions with the host" in prepare_description
     assert "one scoped concern" in prepare_description
     assert "start_qa_orchestration" in prepare_description
     assert "tracked multi-concern review" in prepare_description
