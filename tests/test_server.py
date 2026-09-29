@@ -31,9 +31,14 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     async with Client(build_server(service)) as client:
         tools = {tool.name: tool for tool in await client.list_tools()}
 
-    advance_description = tools["advance_qa_orchestration"].description or ""
+    advance_description = " ".join(
+        (tools["advance_qa_orchestration"].description or "").split()
+    )
     assert "primary review" in advance_description.lower()
     assert "out-of-order" in advance_description.lower()
+    assert "current_step as completed_step" in advance_description
+    assert "get_qa_orchestration" in advance_description
+    assert "replaying the previous step is rejected" in advance_description
     advance_properties = tools["advance_qa_orchestration"].inputSchema["properties"]
     assert {"needs_deep_analysis", "reason_code"}.isdisjoint(advance_properties)
     for name, tool in tools.items():
@@ -66,6 +71,13 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
 
     assert "single-profile" in tools["prepare_review_route"].description
     assert "do not extend" in tools["get_qa_orchestration"].description
+    start_description = tools["start_qa_orchestration"].description or ""
+    assert "100 sessions by default" in start_description
+    assert "session limit" in start_description
+    finish_description = tools["finish_qa_orchestration"].description or ""
+    assert "TTL expires" in finish_description
+    assert "evicted to free capacity" in finish_description
+    assert "service restarts" in finish_description
 
     for name in (
         "prepare_review_route",

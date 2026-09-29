@@ -92,7 +92,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
         Call once before triage for a tracked review; every call creates a separate session. task_type
         controls the recommended-bundle shortlist, not the selected route or risk level. Use
         prepare_review_route when you need a stateless profile checklist instead. Sessions expire
-        after the configured TTL (1800 seconds by default).
+        after the configured TTL (1800 seconds by default). Capacity is 100 sessions by default
+        and can be configured. If capacity cannot be freed without removing an active session, the
+        call returns a `session limit` error; expired sessions are purged and retained terminal
+        sessions may be evicted to make room.
         """
         return service.start_qa_orchestration(task_type)
 
@@ -158,10 +161,12 @@ def build_server(service: OrchestratorService) -> FastMCP:
     ) -> QaOrchestrationSession:
         """Complete the active step of a run and return its updated state and next action.
 
-        Pass the run_id from start_qa_orchestration and the current_step from the session; out-of-order
-        transitions are rejected. After triage, supply exactly one of selected_bundle or selected_profile.
-        After each primary review role, send its current_profile as completed_profile; with the final role,
-        also send risk_signals (use {} when none apply). For an early stop use status partial or blocked,
+        Pass the run_id from start_qa_orchestration and the session's current_step as completed_step;
+        out-of-order transitions are rejected. If a successful call's response is lost, use
+        get_qa_orchestration to inspect the new state before retrying: replaying the previous step is
+        rejected. After triage, supply exactly one of selected_bundle or selected_profile. After each
+        primary review role, send its current_profile as completed_profile; with the final role, also
+        send risk_signals (use {} when none apply). For an early stop use status partial or blocked,
         then finalize with finish_qa_orchestration. After synthesis, call finish_qa_orchestration directly.
         """
         return service.advance_qa_orchestration(
@@ -204,7 +209,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
 
         Call when advance_qa_orchestration reaches awaiting_host_outcome, or finalize an early stop
         with the same partial or blocked outcome. Repeating the same outcome is idempotent while the
-        session is retained; a conflicting outcome is rejected. This tool records the host's decision and does not make it.
+        session is retained; a conflicting outcome is rejected. Retention ends when the configured
+        TTL expires (1800 seconds by default), a terminal session is evicted to free capacity, or
+        the service restarts. After removal, the run_id is unavailable and the outcome can no longer
+        be deduplicated. This tool records the host's decision and does not make it.
         """
         return service.finish_qa_orchestration(
             outcome=outcome,
