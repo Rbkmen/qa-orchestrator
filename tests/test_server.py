@@ -73,19 +73,31 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     assert "recommended_bundles only" in task_type_description
     assert "risk level" in task_type_description
 
-    assert "clearly scoped concern" in tools["prepare_review_route"].description
-    assert "select a bundle during triage" in tools["prepare_review_route"].description
+    prepare_description = " ".join((tools["prepare_review_route"].description or "").split())
+    assert "one scoped concern" in prepare_description
+    assert "start_qa_orchestration" in prepare_description
+    assert "tracked multi-concern review" in prepare_description
+    assert "does not inspect repository content" in prepare_description
     get_description = " ".join((tools["get_qa_orchestration"].description or "").split())
     assert "do not extend the TTL" in get_description
     assert "cannot be recovered here" in get_description
     start_description = tools["start_qa_orchestration"].description or ""
     assert "100 sessions by default" in start_description
     assert "session limit" in start_description
-    finish_description = tools["finish_qa_orchestration"].description or ""
+    finish_description = " ".join((tools["finish_qa_orchestration"].description or "").split())
     assert "Call only when" in finish_description
+    assert "same `partial` or `blocked` outcome" in finish_description
+    assert "returns the retained terminal session" in finish_description
+    assert "conflicting final outcome" in finish_description
+    assert "leaves the stored status unchanged" in finish_description
     assert "TTL expires" in finish_description
     assert "evicted to free capacity" in finish_description
     assert "service restarts" in finish_description
+    outcome_description = tools["finish_qa_orchestration"].inputSchema["properties"]["outcome"][
+        "description"
+    ]
+    assert "completed, partial, or blocked" in outcome_description
+    assert "already used for an early stop" not in outcome_description
 
     for name in (
         "prepare_review_route",

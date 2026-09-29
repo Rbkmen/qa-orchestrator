@@ -66,9 +66,9 @@ def build_server(service: OrchestratorService) -> FastMCP:
     ) -> ReviewRoute:
         """Return the fixed focus, constraints, and required output sections for one review profile.
 
-        Use it for one clearly scoped concern or a selected bundle member's checklist. For a review
-        spanning several concerns, use a tracked session and select a bundle during triage. This tool
-        does not inspect repository content, run the review, or create or change a session.
+        Use it for one scoped concern or a selected bundle member's checklist; use
+        start_qa_orchestration for a tracked multi-concern review. This stateless lookup returns fixed
+        guidance only; it does not inspect repository content, run the review, or change session state.
         """
         return service.prepare_review_route(agent_profile)
 
@@ -202,20 +202,17 @@ def build_server(service: OrchestratorService) -> FastMCP:
         outcome: Annotated[
             QaTaskOutcome,
             Field(
-                description=(
-                    "Host-selected final QA outcome: completed after synthesis, or the same partial or "
-                    "blocked outcome already used for an early stop. Conflicting final outcomes are rejected."
-                )
+                description="Host-selected final session status: completed, partial, or blocked."
             ),
         ],
     ) -> QaOrchestrationSession:
         """Record the host's final outcome after synthesis or an early stop.
 
-        Call only when advance_qa_orchestration reaches `awaiting_host_outcome`, or to finalize an early
-        stop with the same `partial` or `blocked` outcome.
+        Call only when advance_qa_orchestration reaches `awaiting_host_outcome`; after an early stop,
+        submit the same `partial` or `blocked` outcome already recorded by advance_qa_orchestration.
 
-        - Repeating the same outcome is idempotent while the session is retained; conflicting outcomes
-          are rejected.
+        - Repeating the same outcome returns the retained terminal session. A conflicting outcome is
+          rejected with `conflicting final outcome` and leaves the stored status unchanged.
         - Retention ends when the configured TTL expires (1800 seconds by default), a terminal session
           is evicted to free capacity, or the service restarts. After removal, the run_id is unavailable
           and the outcome can no longer be deduplicated.

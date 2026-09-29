@@ -169,3 +169,6 @@ def test_service_rejects_a_conflicting_finalized_outcome(tmp_path):
 
     with pytest.raises(ValueError, match="conflicting final outcome"):
         service.finish_qa_orchestration(run_id=started.run_id, outcome="partial")
+
+    retained = service.get_qa_orchestration(started.run_id)
+    assert retained.status.value == "completed"
