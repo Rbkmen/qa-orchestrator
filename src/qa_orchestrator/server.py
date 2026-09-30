@@ -202,23 +202,18 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ),
         ] = None,
     ) -> QaOrchestrationSession:
-        """Record one active QA step's result; return updated session state and next_action
-        (a host instruction string). Reviews are performed by the host.
+        """Record one active QA step's result; return updated state and next_action instructions for the host.
 
-        Pass current_step as completed_step at triage, primary_review, deep_review, or synthesis.
-        For final outcomes, use finish_qa_orchestration at awaiting_host_outcome or after a
-        partial/blocked early stop, matching that outcome.
+        For finalization, use finish_qa_orchestration at awaiting_host_outcome;
+        after early stops, match the recorded outcome.
 
-        - Completed triage: supply exactly one of selected_bundle or selected_profile.
-        - Completed primary review: echo current_profile as completed_profile. The final profile also
-          requires risk_signals ({} if none apply); omit signals on earlier profiles.
+        - Triage: select exactly one bundle or profile.
+        - Primary review: follow profile order; the final profile requires risk_signals ({} if none).
         - Early stop: omit route selectors, completed_profile, and risk_signals.
-
-        - Success: saves state and refreshes expires_at.
-        - Error: invalid/stale/out-of-order steps or arguments and unknown/expired run_ids fail
-          without advancing.
-        - Lost response: read get_qa_orchestration(run_id) before continuing;
-          prior-step replay is rejected (non-idempotent).
+        - Success saves state and refreshes expires_at.
+        - Invalid/stale requests and unknown/expired run_ids fail without advancing.
+        - Non-idempotent: after a lost response, read get_qa_orchestration(run_id);
+          prior-step replay is rejected.
         """
         return service.advance_qa_orchestration(
             AdvanceQaOrchestrationRequest(
