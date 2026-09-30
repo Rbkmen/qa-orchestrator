@@ -59,8 +59,8 @@ Do not raise severity because evidence is incomplete or because a worst-case imp
 ### Finding language
 
 - Keep finding field names in English exactly as shown in the final format (`Finding ID`, `Severity`, `Affected area`, `Problem`, `Evidence`, `Impact`, `Evidence confidence`, `Verification gap`, and `Next step`).
-- Write the finding title and field values in the user's language unless the user requests another language. For a Russian-language review, for example, use `Severity: Низкая` and write the title and explanation in Russian; do not translate the field name itself.
-- Localize severity and evidence-confidence values while preserving their meaning (`Blocker` → `Блокирующая`, `High` → `Высокая`, `Medium` → `Средняя`, `Low` → `Низкая`). Keep IDs, code, paths, commit SHAs, and exact source or UI quotes unchanged; explain them in the report language.
+- Write field values in the user's language unless another language is requested; keep field names in English exactly as listed above.
+- Localize severity and evidence-confidence values into the report language while preserving their meaning and order. Keep IDs, code, paths, commit SHAs, and exact source or UI quotes unchanged; explain them in the report language.
 
 ### Final finding format
 
@@ -102,14 +102,14 @@ Verification gap: End-to-end payment behavior was not run.
 Next step: Add a focused contract or integration check for the conversion.
 
 Finding ID: F-02
-Severity: Низкая
-Affected area: экран настроек на узкой ширине
-Problem: Подпись отображается не полностью, но элемент управления остаётся доступным.
-Evidence: E3 — скриншот на затронутой ширине; E4 — соответствующее правило разметки.
-Impact: Небольшой визуальный дефект ограничен этим экраном и размером.
-Evidence confidence: Высокая — обрезание видно на скриншоте.
-Verification gap: Другие языки и размеры экрана не проверялись.
-Next step: После исправления проверить подпись на минимальной поддерживаемой ширине.
+Severity: Low
+Affected area: settings screen at a narrow viewport
+Problem: The label is clipped, but the control remains available.
+Evidence: E3 — screenshot at the affected viewport; E4 — corresponding layout rule.
+Impact: Minor visual defect limited to this screen and viewport.
+Evidence confidence: High — the clipping is visible in the screenshot.
+Verification gap: Other locales and viewport sizes were not checked.
+Next step: After the fix, verify the label at the minimum supported width.
 ```
 
 For implementation-aware reviews, list confirmed findings first, then a concise change summary, a targeted verification or manual test plan, and open questions or unverified risks. If none are confirmed, say so only for the scope actually reviewed; do not imply untested areas are clear.
