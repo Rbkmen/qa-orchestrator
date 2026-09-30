@@ -71,14 +71,16 @@ def build_server(service: OrchestratorService) -> FastMCP:
         """Return a fixed QA review checklist for one agent_profile: review focus, required sections,
         evidence constraints, and escalation signals.
 
-        Use before reviewing one scoped concern; no session is required. During primary_review, pass
-        the latest current_profile as agent_profile; for bundles, follow review_profiles order.
-        To discover profiles and bundles before choosing one, use get_qa_orchestration_catalog().
+        Use before reviewing one scoped concern; no session is required. During primary_review,
+        pass the latest current_profile as agent_profile; preserve review_profiles order for bundles.
 
-        Do not use it to run reviews or manage sessions. Use start_qa_orchestration to create a session,
-        advance_qa_orchestration to select its route, and get_qa_orchestration(run_id) to read its state.
-        This local lookup makes no external requests or session changes; local stdio needs no additional
-        credentials.
+        - Discovery: get_qa_orchestration_catalog().
+        - Sessions: start_qa_orchestration creates; advance_qa_orchestration selects the route;
+          get_qa_orchestration(run_id) reads state.
+
+        Do not use this lookup to execute reviews or select a session's route. The checklist depends
+        only on agent_profile and bundled definitions. No external requests; local stdio needs no
+        additional credentials.
         """
         return service.prepare_review_route(agent_profile)
 
@@ -86,16 +88,16 @@ def build_server(service: OrchestratorService) -> FastMCP:
     def get_qa_orchestration_catalog() -> QaOrchestrationCatalog:
         """Read all available QA profiles and bundles, their purposes, and ordered bundle routes.
 
-        Use before starting a session or selecting its triage route; takes no arguments or run_id.
+        Use before creating a session or choosing its triage route; no session or arguments required.
         Task-type recommendations are shortlists, not restrictions. Choose a bundle for broad work
         or a single profile for a narrow concern using changed files and confirmed stack.
-        For one profile's detailed checklist, use prepare_qa_orchestration(agent_profile).
-        To create a session, use start_qa_orchestration; to apply a route at triage, use
-        advance_qa_orchestration. For retained session IDs, use list_qa_orchestrations().
 
-        This fixed catalog is independent of session state and model policy. It creates no session,
-        changes no state or TTL, writes no storage, and makes no external requests;
-        local stdio requires no additional credentials. The host owns route selection and reviews.
+        - Detailed checklist: prepare_qa_orchestration(agent_profile).
+        - Session creation: start_qa_orchestration; apply the host's route: advance_qa_orchestration.
+        - Retained session IDs: list_qa_orchestrations().
+
+        Reads bundled definitions independently of sessions and model policy. No TTL renewal,
+        storage writes, or external requests; local stdio needs no additional credentials.
         """
         return service.get_qa_orchestration_catalog()
 
@@ -247,16 +249,14 @@ def build_server(service: OrchestratorService) -> FastMCP:
     def list_qa_orchestrations() -> QaOrchestrationList:
         """List non-expired QA session identifiers and brief metadata retained by this server.
 
-        Use when a run_id is lost or to discover resumable sessions; takes no arguments. Choose the
-        matching entry by task type, route, and stage, then call get_qa_orchestration(run_id) for
-        full state and next action. If several entries match, confirm which session to resume.
-        For server-wide model policy, use get_qa_orchestration_model_policy().
+        Use to recover a lost run_id; takes no arguments. Match task type, route, and stage,
+        then call get_qa_orchestration(run_id) for full state and next action. Confirm the intended
+        session if several match. For server policy, use get_qa_orchestration_model_policy().
 
-        Includes retained terminal sessions, ordered by expires_at descending with run_id as tie-breaker;
-        an empty list means none are available. Expired or evicted sessions cannot be recovered here.
-        After restart, only unfinished sessions restored from configured local storage are available.
-        This snapshot makes no external requests, writes no storage, and does not change state or TTL;
-        local stdio requires no additional credentials.
+        Includes retained terminal sessions; sorts by expires_at descending, then run_id descending.
+        Empty means none are available. Expired or evicted sessions cannot be recovered.
+        After restart, only unfinished sessions restored from configured local storage appear.
+        This snapshot does not renew TTL, write storage, or make external requests.
         """
         return service.list_qa_orchestrations()
 
@@ -279,8 +279,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
         - Same outcome: returns the retained terminal session.
         - Different outcome: `conflicting final outcome`; status unchanged.
         - Premature call: `outcome is not ready`.
-        Retention ends at configured TTL expiry (1800s default), terminal-session eviction, or restart;
-        removed run_ids cannot be deduplicated.
+        Finalized sessions expire at configured TTL (1800s default), or are removed by eviction
+        or restart. Removed run_ids cannot be deduplicated.
         """
         return service.finish_qa_orchestration(
             outcome=outcome,
