@@ -134,11 +134,11 @@ The service publishes exactly six tools:
 | Tool | Purpose |
 |---|---|
 | `prepare_qa_orchestration(agent_profile)` | Return the fixed checklist for one profile without creating a session |
-| `get_qa_orchestration_model_policy()` | Read the provider, models, and reasoning loaded by this server for new sessions |
+| `get_qa_orchestration_model_policy()` | Read the server-wide provider, models, and reasoning for all stages of new sessions; no `run_id` |
 | `start_qa_orchestration(task_type)` | Create a session and return the task-based bundle shortlist |
-| `advance_qa_orchestration(...)` | Complete triage, primary review, deep review, or synthesis and return the next action |
-| `get_qa_orchestration(run_id)` | Read the current content-free state when resuming or recovering a session |
-| `finish_qa_orchestration(run_id, outcome)` | Record the host-owned outcome after synthesis or an early stop |
+| `advance_qa_orchestration(...)` | Record one active review step's completion or an early stop; return the next action |
+| `get_qa_orchestration(run_id)` | Read one existing session's step, status, next action, and current-stage model policy |
+| `finish_qa_orchestration(run_id, outcome)` | Finalize the host-owned session outcome after synthesis or a recorded early stop |
 
 Bundle orchestration flow:
 

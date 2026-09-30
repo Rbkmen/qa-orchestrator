@@ -76,13 +76,14 @@ def build_server(service: OrchestratorService) -> FastMCP:
         """
         return service.prepare_review_route(agent_profile)
 
-    @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
+    @mcp.tool(title="Read server model policy", annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def get_qa_orchestration_model_policy() -> ModelSelection:
-        """Return the model policy loaded by this running MCP server for new QA sessions.
+        """Read the server-wide model policy for all stages of new QA sessions; takes no run_id.
 
-        Includes the provider, model IDs, and reasoning for every stage. Use
-        start_qa_orchestration to create a session, or get_qa_orchestration with run_id
-        to inspect an existing session's model_policy.
+        Returns the provider, model IDs, and reasoning loaded by this running MCP server.
+        For an existing session's current step, status, next action, and current-stage model_policy,
+        use get_qa_orchestration(run_id). Use start_qa_orchestration to create a new session
+        with this server policy.
 
         This reads an in-memory snapshot, not the policy file; restart the server connection
         after changing that file. It creates no session, contacts no provider, and does not
@@ -117,7 +118,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
         """
         return service.start_qa_orchestration(task_type)
 
-    @mcp.tool(annotations=STATE_TOOL_ANNOTATIONS)
+    @mcp.tool(title="Advance active review step", annotations=STATE_TOOL_ANNOTATIONS)
     def advance_qa_orchestration(
         run_id: RunId,
         completed_step: Annotated[
@@ -177,7 +178,11 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ),
         ] = None,
     ) -> QaOrchestrationSession:
-        """Complete the active review step or mark an early stop; return the next action.
+        """Record one active review step's completion and return the next action for run_id.
+
+        Use while current_step is triage, primary_review, deep_review, or synthesis. This updates
+        review progress; finish_qa_orchestration records the host's final session outcome only after
+        synthesis reaches awaiting_host_outcome or this tool records a partial/blocked early stop.
 
         Pass current_step as completed_step; stale or out-of-order steps are rejected. Malformed
         arguments, incompatible signals, and unknown or expired run_ids return errors without advancing
@@ -203,18 +208,21 @@ def build_server(service: OrchestratorService) -> FastMCP:
             )
         )
 
-    @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
+    @mcp.tool(title="Read QA session state", annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def get_qa_orchestration(run_id: RunId) -> QaOrchestrationSession:
-        """Read a session's current content-free state without changing it.
+        """Read one existing QA session's state by run_id: current step, status, and next action.
 
-        Use this only to inspect a retained session's current step, next action, and model policy. Reads
-        do not extend the TTL; an unknown or expired session cannot be recovered here, so start a new one.
-        Use advance_qa_orchestration to change an active run or finish_qa_orchestration to record its
-        final outcome.
+        Includes that session's current-stage model_policy. To inspect the server-wide provider,
+        models, and reasoning for all stages of new sessions without a run_id, use
+        get_qa_orchestration_model_policy().
+
+        This content-free read does not change session state or extend the TTL. An unknown or expired
+        session cannot be recovered here, so start a new one. Use advance_qa_orchestration to complete
+        an active review step or finish_qa_orchestration to record the host's final session outcome.
         """
         return service.get_qa_orchestration(run_id)
 
-    @mcp.tool(annotations=FINALIZE_TOOL_ANNOTATIONS)
+    @mcp.tool(title="Finalize QA session outcome", annotations=FINALIZE_TOOL_ANNOTATIONS)
     def finish_qa_orchestration(
         run_id: RunId,
         outcome: Annotated[
@@ -224,7 +232,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ),
         ],
     ) -> QaOrchestrationSession:
-        """Finalize the host's outcome after synthesis or an early stop; no review step runs here.
+        """Record the host's final QA session outcome for run_id after synthesis or an early stop.
+
+        This closes the review flow; it cannot complete an active review step or bypass synthesis.
+        Use advance_qa_orchestration to record review-step completion or a partial/blocked early stop.
 
         Call when advance_qa_orchestration reaches `awaiting_host_outcome` after synthesis, or after
         it records an early stop. For an early stop, submit the same `partial` or `blocked` outcome.
