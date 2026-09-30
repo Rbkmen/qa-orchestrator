@@ -66,13 +66,14 @@ def build_server(service: OrchestratorService) -> FastMCP:
         ],
     ) -> ReviewRoute:
         """Return a fixed specialist checklist: focus, required sections, evidence constraints, and
-        escalation signals. For session state, use get_qa_orchestration(run_id).
+        escalation signals. Use get_qa_orchestration(run_id) for live session state.
 
-        Pass agent_profile for one concern, or each review_profiles member in bundle order.
-        start_qa_orchestration creates sessions; advance_qa_orchestration selects the route at triage.
+        Works without a session. During primary_review, pass the latest session's current_profile as
+        agent_profile; for bundles, follow review_profiles order. advance_qa_orchestration selects routes.
 
-        This local, stateless lookup does not inspect code, run reviews, or select a session profile.
-        The host owns final decisions.
+        Results depend only on the profile and bundled definitions, independently of model policy.
+        This lookup makes no external requests or session changes. Local stdio needs no additional
+        credentials; the host executes reviews and owns final decisions.
         """
         return service.prepare_review_route(agent_profile)
 
