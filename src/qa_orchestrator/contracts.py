@@ -64,3 +64,27 @@ class ReviewRoute(BaseModel):
     )
     read_only: Literal[True] = True
     host_owns_decisions: Literal[True] = True
+
+
+class ReviewProfileSummary(BaseModel):
+    profile: ReviewAgent
+    display_name: str = Field(min_length=1)
+    focus: str = Field(min_length=1, description="Review boundary for choosing this profile.")
+
+
+class ReviewBundleSummary(BaseModel):
+    bundle: ReviewBundle
+    when_to_use: str = Field(min_length=1, description="Scope and stack suited to this bundle.")
+    profiles: list[ReviewAgent] = Field(
+        min_length=1, description="Ordered review profile identifiers; preserve this execution order."
+    )
+
+
+class QaOrchestrationCatalog(BaseModel):
+    profiles: list[ReviewProfileSummary]
+    bundles: list[ReviewBundleSummary]
+    recommended_bundles_by_task_type: dict[QaTaskType, list[ReviewBundle]] = Field(
+        description="Task-based shortlists only; they do not restrict the available bundles."
+    )
+    read_only: Literal[True] = True
+    host_owns_decisions: Literal[True] = True

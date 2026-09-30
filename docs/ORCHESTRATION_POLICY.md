@@ -216,6 +216,7 @@ The orchestrator must publish exactly:
 
 - `prepare_qa_orchestration`;
 - `get_qa_orchestration_model_policy`;
+- `get_qa_orchestration_catalog`;
 - `start_qa_orchestration`;
 - `advance_qa_orchestration`;
 - `get_qa_orchestration`;
@@ -239,6 +240,16 @@ expired rows, or writing storage. Entries are sorted by expiry descending, with
 `get_qa_orchestration(run_id)` for full state; confirm the intended session when
 multiple entries match. Expired and evicted sessions are excluded. After restart,
 only unfinished sessions restored from configured storage are available.
+
+`get_qa_orchestration_catalog` takes no arguments and returns the fixed profiles
+with their names and focus, bundles with usage guidance and ordered profile IDs,
+and task-type recommendation shortlists. It requires no session and does not
+create one, change state or TTL, write storage, or contact providers. Catalog
+definitions come from the same fixed profile and bundle definitions used by
+preparation and triage. Choose a route from the changed files and confirmed
+stack; task-based recommendations do not restrict the choices. Use
+`prepare_qa_orchestration(agent_profile)` for a chosen profile's detailed
+checklist and `advance_qa_orchestration` to apply the chosen route at triage.
 
 ## Persistence and safety
 

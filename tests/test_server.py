@@ -11,7 +11,7 @@ from qa_orchestrator.service import OrchestratorService
 
 
 @pytest.mark.asyncio
-async def test_server_exposes_seven_tools(tmp_path):
+async def test_server_exposes_eight_tools(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
@@ -25,6 +25,7 @@ async def test_server_exposes_seven_tools(tmp_path):
         "advance_qa_orchestration",
         "get_qa_orchestration",
         "list_qa_orchestrations",
+        "get_qa_orchestration_catalog",
     }
 
 
@@ -66,6 +67,7 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
         "get_qa_orchestration_model_policy",
         "get_qa_orchestration",
         "list_qa_orchestrations",
+        "get_qa_orchestration_catalog",
     ):
         annotations = tools[name].annotations
         assert annotations is not None
@@ -76,6 +78,8 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     assert tools["get_qa_orchestration_model_policy"].inputSchema["properties"] == {}
     assert tools["list_qa_orchestrations"].inputSchema["properties"] == {}
     assert tools["list_qa_orchestrations"].outputSchema is not None
+    assert tools["get_qa_orchestration_catalog"].inputSchema["properties"] == {}
+    assert tools["get_qa_orchestration_catalog"].outputSchema is not None
 
     for name in (
         "start_qa_orchestration",
@@ -114,6 +118,86 @@ async def test_prepare_qa_orchestration_returns_selected_profile(tmp_path):
     assert result.structured_content["display_name"] == "Security Reviewer"
     assert result.structured_content["read_only"] is True
     assert result.structured_content["host_owns_decisions"] is True
+
+
+@pytest.mark.asyncio
+async def test_catalog_discovers_profiles_and_ordered_bundles_without_a_session(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    async with Client(build_server(service)) as client:
+        catalog = (await client.call_tool("get_qa_orchestration_catalog", {})).structured_content
+        sessions = (await client.call_tool("list_qa_orchestrations", {})).structured_content
+        profiles = {entry["profile"]: entry for entry in catalog["profiles"]}
+        bundles = {entry["bundle"]: entry for entry in catalog["bundles"]}
+        prepared = await client.call_tool(
+            "prepare_qa_orchestration", {"agent_profile": "python_reviewer"}
+        )
+
+    assert sessions["sessions"] == []
+    assert set(profiles) == {profile.value for profile in ReviewAgent}
+    assert set(bundles) == {bundle.value for bundle in ReviewBundle}
+    assert profiles["python_reviewer"]["display_name"] == "Python Reviewer"
+    assert profiles["python_reviewer"]["focus"] == prepared.structured_content["focus"]
+    assert all(entry["display_name"] and entry["focus"] for entry in profiles.values())
+    assert bundles["python_backend"]["profiles"] == [
+        "code_explorer", "python_reviewer", "pr_test_analyzer"
+    ]
+    assert bundles["widget_js"]["profiles"] == [
+        "code_explorer", "code_reviewer", "react_reviewer", "pr_test_analyzer"
+    ]
+    assert all(entry["when_to_use"] for entry in bundles.values())
+    assert all(set(entry["profiles"]).issubset(profiles) for entry in bundles.values())
+    assert catalog["recommended_bundles_by_task_type"] == {
+        "ordinary_review": ["ordinary_mr"],
+        "widget_review": ["widget", "widget_js"],
+        "epic_analysis": ["requirements"],
+        "requirements_analysis": ["requirements"],
+        "qa_planning": ["requirements"],
+        "autotest_implementation": ["autotest", "ordinary_mr"],
+        "other": [],
+    }
+    assert catalog["read_only"] is True
+    assert catalog["host_owns_decisions"] is True
+
+
+@pytest.mark.asyncio
+async def test_catalog_read_preserves_session_state_and_persisted_bytes(tmp_path):
+    from qa_orchestrator.config import Settings
+
+    store_path = tmp_path / "sessions.sqlite3"
+    service = OrchestratorService(Settings(orchestration_session_store_path=store_path))
+    async with Client(build_server(service)) as client:
+        started = (await client.call_tool(
+            "start_qa_orchestration", {"task_type": "ordinary_review"}
+        )).structured_content
+        before = store_path.read_bytes()
+        first = await client.call_tool("get_qa_orchestration_catalog", {})
+        second = await client.call_tool("get_qa_orchestration_catalog", {})
+        current = await client.call_tool("get_qa_orchestration", {"run_id": started["run_id"]})
+
+    assert current.structured_content == started
+    assert first.structured_content == second.structured_content
+    assert store_path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bundle", list(ReviewBundle))
+async def test_catalog_bundle_route_is_accepted_by_triage(tmp_path, bundle):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    async with Client(build_server(service)) as client:
+        catalog = (await client.call_tool("get_qa_orchestration_catalog", {})).structured_content
+        discovered = next(entry for entry in catalog["bundles"] if entry["bundle"] == bundle)
+        started = (await client.call_tool(
+            "start_qa_orchestration", {"task_type": "other"}
+        )).structured_content
+        routed = await client.call_tool("advance_qa_orchestration", {
+            "run_id": started["run_id"],
+            "completed_step": "triage",
+            "status": "completed",
+            "selected_bundle": discovered["bundle"],
+        })
+
+    assert routed.structured_content["review_profiles"] == discovered["profiles"]
+    assert routed.structured_content["current_profile"] == discovered["profiles"][0]
 
 
 @pytest.mark.asyncio

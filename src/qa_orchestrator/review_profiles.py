@@ -2,7 +2,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from qa_orchestrator.contracts import QaTaskType, ReviewAgent, ReviewBundle, ReviewRoute
+from qa_orchestrator.contracts import (
+    QaOrchestrationCatalog,
+    QaTaskType,
+    ReviewAgent,
+    ReviewBundle,
+    ReviewBundleSummary,
+    ReviewProfileSummary,
+    ReviewRoute,
+)
 
 COMMON_CONSTRAINTS = (
     "Use only the evidence gathered by the host agent.",
@@ -228,6 +236,43 @@ RECOMMENDED_BUNDLES_BY_TASK_TYPE: Mapping[QaTaskType, tuple[ReviewBundle, ...]] 
         "other": (),
     }
 )
+
+
+_BUNDLE_USAGE: Mapping[ReviewBundle, str] = MappingProxyType(
+    {
+        ReviewBundle.ORDINARY_MR: "Broad implementation review across evidence, code, and coverage.",
+        ReviewBundle.WIDGET: "Broad TypeScript React widget changes.",
+        ReviewBundle.WIDGET_JS: "Broad JavaScript React widget changes.",
+        ReviewBundle.RUBY_BACKEND: "Broad Ruby backend changes.",
+        ReviewBundle.PYTHON_BACKEND: "Broad Python backend or Python/MCP changes.",
+        ReviewBundle.MOBILE: "Broad React Native or native iOS/Android changes.",
+        ReviewBundle.SECURITY: "Security-sensitive changes with possible silent failure paths.",
+        ReviewBundle.AUTOTEST: "Broad TypeScript test automation changes.",
+        ReviewBundle.REQUIREMENTS: "Requirements, epic exploration, or QA coverage planning.",
+    }
+)
+
+
+def build_review_catalog() -> QaOrchestrationCatalog:
+    """Expose the fixed routing definitions without creating a session."""
+    return QaOrchestrationCatalog(
+        profiles=[
+            ReviewProfileSummary(
+                profile=profile, display_name=definition.display_name, focus=definition.focus
+            )
+            for profile, definition in REVIEW_PROFILES.items()
+        ],
+        bundles=[
+            ReviewBundleSummary(
+                bundle=bundle, when_to_use=_BUNDLE_USAGE[bundle], profiles=list(profiles)
+            )
+            for bundle, profiles in REVIEW_BUNDLES.items()
+        ],
+        recommended_bundles_by_task_type={
+            task_type: list(bundles)
+            for task_type, bundles in RECOMMENDED_BUNDLES_BY_TASK_TYPE.items()
+        },
+    )
 
 
 def bundle_profiles(bundle: ReviewBundle) -> tuple[ReviewAgent, ...]:

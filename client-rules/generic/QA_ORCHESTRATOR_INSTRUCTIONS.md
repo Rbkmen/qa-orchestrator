@@ -47,7 +47,15 @@ On the final primary-review role, set `risk_signals` from the evidence state. Ma
   call this for a task that was not orchestrated. Repeating the same outcome is
   idempotent in the current process; a conflicting final outcome is rejected.
 
-The orchestrator publishes exactly seven tools: `prepare_qa_orchestration`, `get_qa_orchestration_model_policy`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `list_qa_orchestrations`, and `finish_qa_orchestration`.
+The orchestrator publishes exactly eight tools: `prepare_qa_orchestration`, `get_qa_orchestration_catalog`, `get_qa_orchestration_model_policy`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `list_qa_orchestrations`, and `finish_qa_orchestration`.
+
+When available profiles, bundle purposes, or route order are unclear before
+triage, call `get_qa_orchestration_catalog` with no arguments. It returns the
+fixed profile and bundle catalog without creating a session. Task-based
+recommendations are shortlists only; select from the changed files and confirmed
+stack. Use `prepare_qa_orchestration` for the selected profile's detailed
+checklist, and `advance_qa_orchestration` to apply the chosen route at triage.
+Catalog reads do not change sessions, TTL, or storage.
 
 If a session's `run_id` is lost, call `list_qa_orchestrations` with no arguments.
 Identify the intended entry by task type, route, stage, and expiry, then call

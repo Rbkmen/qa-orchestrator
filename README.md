@@ -129,17 +129,20 @@ Keep one compact per-task Evidence Packet with stable evidence references (`E1`,
 
 ## MCP interface
 
-The service publishes exactly seven tools:
+The service publishes exactly eight tools:
 
 | Tool | Purpose |
 |---|---|
 | `prepare_qa_orchestration(agent_profile)` | Return the fixed checklist for one profile without creating a session |
+| `get_qa_orchestration_catalog()` | Discover all profiles, bundle purposes and ordered routes, and task-type shortlists without creating a session |
 | `get_qa_orchestration_model_policy()` | Read the server-wide provider, models, and reasoning for all stages of new sessions; no `run_id` |
 | `start_qa_orchestration(task_type)` | Create a session and return the task-based bundle shortlist |
 | `advance_qa_orchestration(...)` | Record one active review step's completion or an early stop; return the next action |
 | `get_qa_orchestration(run_id)` | Read one existing session's step, status, next action, and current-stage model policy |
 | `list_qa_orchestrations()` | Recover lost `run_id` values from brief metadata for non-expired sessions retained by this server |
 | `finish_qa_orchestration(run_id, outcome)` | Finalize the host-owned session outcome after synthesis or a recorded early stop |
+
+Before starting a session or choosing its triage route, call `get_qa_orchestration_catalog` with `{}`. It returns all available profiles with their display names and focus, all bundles with usage guidance and ordered profile IDs, and `recommended_bundles_by_task_type`. Recommendations are shortlists, not restrictions; choose from changed files and confirmed stack. For a narrow concern, choose one profile and get its detailed checklist through `prepare_qa_orchestration`. For broad work, select a bundle and preserve its profile order. The catalog is fixed, independent of session/model-policy state, and does not create sessions, change TTL, or write storage.
 
 Bundle orchestration flow:
 

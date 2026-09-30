@@ -5,6 +5,7 @@ from pydantic import Field
 
 from qa_orchestrator.config import Settings
 from qa_orchestrator.contracts import (
+    QaOrchestrationCatalog,
     QaTaskOutcome,
     QaTaskType,
     ReviewAgent,
@@ -72,6 +73,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
 
         Use before reviewing one scoped concern; no session is required. During primary_review, pass
         the latest current_profile as agent_profile; for bundles, follow review_profiles order.
+        To discover profiles and bundles before choosing one, use get_qa_orchestration_catalog().
 
         Do not use it to run reviews or manage sessions. Use start_qa_orchestration to create a session,
         advance_qa_orchestration to select its route, and get_qa_orchestration(run_id) to read its state.
@@ -79,6 +81,23 @@ def build_server(service: OrchestratorService) -> FastMCP:
         credentials.
         """
         return service.prepare_review_route(agent_profile)
+
+    @mcp.tool(title="Read QA routing catalog", annotations=READ_ONLY_TOOL_ANNOTATIONS)
+    def get_qa_orchestration_catalog() -> QaOrchestrationCatalog:
+        """Read all available QA profiles and bundles, their purposes, and ordered bundle routes.
+
+        Use before starting a session or selecting its triage route; takes no arguments or run_id.
+        Task-type recommendations are shortlists, not restrictions. Choose a bundle for broad work
+        or a single profile for a narrow concern using changed files and confirmed stack.
+        For one profile's detailed checklist, use prepare_qa_orchestration(agent_profile).
+        To create a session, use start_qa_orchestration; to apply a route at triage, use
+        advance_qa_orchestration. For retained session IDs, use list_qa_orchestrations().
+
+        This fixed catalog is independent of session state and model policy. It creates no session,
+        changes no state or TTL, writes no storage, and makes no external requests;
+        local stdio requires no additional credentials. The host owns route selection and reviews.
+        """
+        return service.get_qa_orchestration_catalog()
 
     @mcp.tool(title="Read server model policy", annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def get_qa_orchestration_model_policy() -> ModelSelection:

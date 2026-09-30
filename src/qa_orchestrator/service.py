@@ -2,6 +2,7 @@ from pathlib import Path
 
 from qa_orchestrator.config import Settings
 from qa_orchestrator.contracts import (
+    QaOrchestrationCatalog,
     QaTaskOutcome,
     QaTaskType,
     ReviewAgent,
@@ -14,7 +15,7 @@ from qa_orchestrator.orchestration import (
     QaOrchestrationSession,
     QaOrchestrator,
 )
-from qa_orchestrator.review_profiles import build_review_route
+from qa_orchestrator.review_profiles import build_review_catalog, build_review_route
 from qa_orchestrator.session_store import SqliteSessionStore
 
 
@@ -47,6 +48,9 @@ class OrchestratorService:
 
     def get_qa_orchestration_model_policy(self) -> ModelSelection:
         return self.orchestrator.model_selection
+
+    def get_qa_orchestration_catalog(self) -> QaOrchestrationCatalog:
+        return build_review_catalog()
 
     def start_qa_orchestration(self, task_type: QaTaskType) -> QaOrchestrationSession:
         return self.orchestrator.start(task_type)

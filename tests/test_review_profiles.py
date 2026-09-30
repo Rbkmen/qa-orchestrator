@@ -175,3 +175,19 @@ def test_unknown_review_bundle_is_rejected_by_the_typed_contract():
 
     with pytest.raises(ValueError):
         bundle_type("unknown_bundle")
+
+
+def test_catalog_responses_do_not_share_mutable_routing_definitions(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    catalog = service.get_qa_orchestration_catalog()
+    next(entry for entry in catalog.bundles if entry.bundle == "python_backend").profiles.clear()
+    catalog.recommended_bundles_by_task_type["ordinary_review"].clear()
+    catalog.profiles[0].focus = "changed by caller"
+
+    fresh = service.get_qa_orchestration_catalog()
+
+    assert next(entry for entry in fresh.bundles if entry.bundle == "python_backend").profiles == [
+        "code_explorer", "python_reviewer", "pr_test_analyzer"
+    ]
+    assert fresh.recommended_bundles_by_task_type["ordinary_review"] == ["ordinary_mr"]
+    assert fresh.profiles[0].focus != "changed by caller"
