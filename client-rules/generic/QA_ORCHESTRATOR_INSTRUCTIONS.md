@@ -66,8 +66,12 @@ Do not raise severity because evidence is incomplete or because a worst-case imp
 
 Use this format for each confirmed finding. Keep IDs stable across review stages and synthesis. Omit a field only when it is genuinely not applicable; do not add empty boilerplate.
 
+Put each field on its own line; do not combine multiple fields on one line.
+
 ```text
-Finding ID: F-01 | Severity: High | Affected area: API response → web checkout
+Finding ID: F-01
+Severity: High
+Affected area: API response → web checkout
 Problem: <trigger, actual behavior, and violated expectation>
 Evidence: E1 — <direct source locator>; E2 — <direct source locator>
 Impact: <who or what is affected and the concrete consequence>
@@ -87,7 +91,9 @@ Severity and evidence confidence answer different questions. A high-impact claim
 Illustrative examples:
 
 ```text
-Finding ID: F-01 | Severity: High | Affected area: payment API → checkout client
+Finding ID: F-01
+Severity: High
+Affected area: payment API → checkout client
 Problem: The API contract now returns major currency units, but the client still divides by 100.
 Evidence: E1 — changed API contract; E2 — client conversion at the affected call site; E3 — no alternate flow for this supported route.
 Impact: Users on this supported checkout path cannot submit a correct amount, and no safe alternate route is available.
@@ -95,7 +101,9 @@ Evidence confidence: High — both sides of the contract are visible in source.
 Verification gap: End-to-end payment behavior was not run.
 Next step: Add a focused contract or integration check for the conversion.
 
-Finding ID: F-02 | Severity: Низкая | Affected area: экран настроек на узкой ширине
+Finding ID: F-02
+Severity: Низкая
+Affected area: экран настроек на узкой ширине
 Problem: Подпись отображается не полностью, но элемент управления остаётся доступным.
 Evidence: E3 — скриншот на затронутой ширине; E4 — соответствующее правило разметки.
 Impact: Небольшой визуальный дефект ограничен этим экраном и размером.
