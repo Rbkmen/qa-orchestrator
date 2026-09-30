@@ -49,12 +49,18 @@ Severity describes evidenced user or business impact, not confidence, implementa
 - `Medium` — a confirmed functional problem is limited to particular conditions or users, or a workaround exists, while the core outcome remains possible.
 - `Low` — a minor, narrow issue such as a cosmetic defect or rare edge case, with core functionality and data, security, and transaction correctness intact.
 
-Do not raise severity because evidence is incomplete or because a worst-case impact is merely possible. State uncertain scope or impact in the verification gap. Report findings in severity order: `Blocker`, `High`, `Medium`, `Low`.
+Do not raise severity because evidence is incomplete or because a worst-case impact is merely possible. State uncertain scope or impact in the verification gap. Report findings in severity order: `Blocker`, `High`, `Medium`, `Low`; localize the displayed severity values to the report language while preserving this order and meaning.
 
 ### Affected area
 
 - Use the explicit field `Affected area` and name the actual component, service, interface, data flow, or user scenario supported by evidence. For a boundary issue, name both sides (for example, `API response → web checkout`). Add platform, role, or locale only when it is relevant and verified.
 - Do not invent a universal set of domain labels or use an unqualified label such as `Consumer` unless a task-specific rule defines exactly what it means.
+
+### Finding language
+
+- Keep finding field names in English exactly as shown in the final format (`Finding ID`, `Severity`, `Affected area`, `Problem`, `Evidence`, `Impact`, `Evidence confidence`, `Verification gap`, and `Next step`).
+- Write the finding title and field values in the user's language unless the user requests another language. For a Russian-language review, for example, use `Severity: Низкая` and write the title and explanation in Russian; do not translate the field name itself.
+- Localize severity and evidence-confidence values while preserving their meaning (`Blocker` → `Блокирующая`, `High` → `Высокая`, `Medium` → `Средняя`, `Low` → `Низкая`). Keep IDs, code, paths, commit SHAs, and exact source or UI quotes unchanged; explain them in the report language.
 
 ### Final finding format
 
@@ -89,13 +95,13 @@ Evidence confidence: High — both sides of the contract are visible in source.
 Verification gap: End-to-end payment behavior was not run.
 Next step: Add a focused contract or integration check for the conversion.
 
-Finding ID: F-02 | Severity: Low | Affected area: settings screen at narrow viewport widths
-Problem: A secondary label is clipped, but its control remains usable.
-Evidence: E3 — screenshot at the affected width; E4 — corresponding layout rule.
-Impact: A small visual defect is limited to that screen and width.
-Evidence confidence: High — the clipping is visible in the captured screen.
-Verification gap: Other locales and viewport widths were not checked.
-Next step: Check the same label at the narrow supported width after correction.
+Finding ID: F-02 | Severity: Низкая | Affected area: экран настроек на узкой ширине
+Problem: Подпись отображается не полностью, но элемент управления остаётся доступным.
+Evidence: E3 — скриншот на затронутой ширине; E4 — соответствующее правило разметки.
+Impact: Небольшой визуальный дефект ограничен этим экраном и размером.
+Evidence confidence: Высокая — обрезание видно на скриншоте.
+Verification gap: Другие языки и размеры экрана не проверялись.
+Next step: После исправления проверить подпись на минимальной поддерживаемой ширине.
 ```
 
 For implementation-aware reviews, list confirmed findings first, then a concise change summary, a targeted verification or manual test plan, and open questions or unverified risks. If none are confirmed, say so only for the scope actually reviewed; do not imply untested areas are clear.
