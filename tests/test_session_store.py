@@ -57,6 +57,60 @@ def test_unfinished_session_survives_restart_and_transition_refreshes_ttl(tmp_pa
     assert restored.model_dump() == advanced.model_dump()
 
 
+def test_explicit_delete_removes_only_target_from_memory_and_recovery_storage(tmp_path):
+    store = SqliteSessionStore(tmp_path / "sessions.sqlite3")
+    clock = FakeClock()
+    orchestrator = _orchestrator(store, clock)
+    target = orchestrator.start("ordinary_review")
+    retained = orchestrator.start("widget_review")
+    clock.advance(30)
+
+    first = orchestrator.delete(target.run_id)
+    assert first.model_dump() == {"run_id": target.run_id, "deleted": True}
+    assert orchestrator.delete(target.run_id) == first
+    assert store.load_all() == [retained]
+    assert orchestrator.get(retained.run_id) == retained
+    restored = _orchestrator(store, clock)
+    assert restored.get(retained.run_id) == retained
+    assert [entry.run_id for entry in restored.list_sessions().sessions] == [retained.run_id]
+    with pytest.raises(OrchestrationError, match="unknown run_id"):
+        restored.get(target.run_id)
+
+
+def test_delete_store_failure_preserves_memory_and_can_be_retried(tmp_path, monkeypatch):
+    store = SqliteSessionStore(tmp_path / "sessions.sqlite3")
+    clock = FakeClock()
+    orchestrator = _orchestrator(store, clock)
+    target = orchestrator.start("ordinary_review")
+    retained = orchestrator.start("widget_review")
+
+    def fail_delete(run_id):
+        raise ValueError("unable to update session store")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "delete", fail_delete)
+        with pytest.raises(ValueError, match="unable to update session store"):
+            orchestrator.delete(target.run_id)
+    assert orchestrator.get(target.run_id) == target
+    assert orchestrator.get(retained.run_id) == retained
+    assert {session.run_id for session in store.load_all()} == {target.run_id, retained.run_id}
+    orchestrator.delete(target.run_id)
+    assert store.load_all() == [retained]
+
+
+def test_delete_expired_target_does_not_purge_other_expired_sessions(tmp_path):
+    store = SqliteSessionStore(tmp_path / "sessions.sqlite3")
+    clock = FakeClock()
+    orchestrator = _orchestrator(store, clock)
+    target = orchestrator.start("ordinary_review")
+    retained = orchestrator.start("widget_review")
+    clock.advance(60)
+
+    orchestrator.delete(target.run_id)
+
+    assert store.load_all() == [retained]
+
+
 def test_list_recovers_unfinished_sessions_after_restart_without_store_writes(tmp_path):
     path = tmp_path / "sessions.sqlite3"
     store = SqliteSessionStore(path)

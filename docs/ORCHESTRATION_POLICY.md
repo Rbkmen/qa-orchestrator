@@ -210,6 +210,20 @@ Every review must separate confirmed findings from hypotheses and unverified run
 
 `finish_qa_orchestration` accepts only `run_id` and the host-owned final outcome. It updates the bounded in-memory session and deletes any persisted unfinished state. Repeating the same outcome is idempotent in the current process; a conflicting outcome is rejected. Final outcomes and task statistics are not written to disk.
 
+## Discard a session
+
+`delete_qa_orchestration(run_id)` explicitly removes one session from memory and
+configured recovery storage, regardless of lifecycle stage. This is distinct
+from recording an early stop or final QA outcome: the deleted state is no longer
+available for get, advance, finish, listing, or restart recovery. The tool does
+not cancel host tasks or model executions and must not replace normal finalization.
+
+Deletion is irreversible and idempotent. The response's `deleted=true` means the
+ID is absent, including if already missing or expired. No other session is
+purged or renewed. Under the session lock, the persisted row is removed before
+memory; a storage failure leaves memory intact and permits a later retry. Use
+only when the host intentionally discards that particular session.
+
 ## MCP tools
 
 The orchestrator must publish exactly:
@@ -221,7 +235,8 @@ The orchestrator must publish exactly:
 - `advance_qa_orchestration`;
 - `get_qa_orchestration`;
 - `list_qa_orchestrations`;
-- `finish_qa_orchestration`.
+- `finish_qa_orchestration`;
+- `delete_qa_orchestration`.
 
 `read_only=true` and `host_owns_decisions=true` must be preserved in every orchestration state. Do not add a tool that generates text, accepts evidence, changes external state, selects a model for the host, or silently calls another agent.
 

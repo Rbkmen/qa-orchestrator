@@ -280,7 +280,7 @@ def test_documentation_contains_no_retired_runtime_terms():
 
 
 @pytest.mark.asyncio
-async def test_launcher_exposes_eight_tools(monkeypatch, tmp_path):
+async def test_launcher_exposes_nine_tools(monkeypatch, tmp_path):
     virtual_env = str(Path(sys.executable).parent.parent)
     monkeypatch.setenv("VIRTUAL_ENV", virtual_env)
     monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
@@ -309,6 +309,11 @@ async def test_launcher_exposes_eight_tools(monkeypatch, tmp_path):
             )
             listed = await client.call_tool("list_qa_orchestrations", {})
             catalog = await client.call_tool("get_qa_orchestration_catalog", {})
+            started = await client.call_tool("start_qa_orchestration", {"task_type": "other"})
+            deleted = await client.call_tool(
+                "delete_qa_orchestration", {"run_id": started.structured_content["run_id"]}
+            )
+            after_delete = await client.call_tool("list_qa_orchestrations", {})
     finally:
         await transport.close()
 
@@ -321,8 +326,13 @@ async def test_launcher_exposes_eight_tools(monkeypatch, tmp_path):
         "get_qa_orchestration",
         "list_qa_orchestrations",
         "get_qa_orchestration_catalog",
+        "delete_qa_orchestration",
     }
     assert prepared.structured_content["profile"] == "code_explorer"
+    assert deleted.structured_content == {
+        "run_id": started.structured_content["run_id"], "deleted": True
+    }
+    assert after_delete.structured_content["sessions"] == []
     assert listed.structured_content == {
         "sessions": [], "read_only": True, "host_owns_decisions": True
     }

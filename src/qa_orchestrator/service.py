@@ -11,6 +11,7 @@ from qa_orchestrator.contracts import (
 from qa_orchestrator.model_policy import ModelSelection, load_model_selection
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
+    QaOrchestrationDeletion,
     QaOrchestrationList,
     QaOrchestrationSession,
     QaOrchestrator,
@@ -66,6 +67,9 @@ class OrchestratorService:
 
     def list_qa_orchestrations(self) -> QaOrchestrationList:
         return self.orchestrator.list_sessions()
+
+    def delete_qa_orchestration(self, run_id: str) -> QaOrchestrationDeletion:
+        return self.orchestrator.delete(run_id)
 
     def finish_qa_orchestration(
         self,

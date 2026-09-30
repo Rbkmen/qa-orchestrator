@@ -11,7 +11,7 @@ from qa_orchestrator.service import OrchestratorService
 
 
 @pytest.mark.asyncio
-async def test_server_exposes_eight_tools(tmp_path):
+async def test_server_exposes_nine_tools(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
@@ -26,6 +26,7 @@ async def test_server_exposes_eight_tools(tmp_path):
         "get_qa_orchestration",
         "list_qa_orchestrations",
         "get_qa_orchestration_catalog",
+        "delete_qa_orchestration",
     }
 
 
@@ -94,6 +95,14 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     assert tools["start_qa_orchestration"].annotations.idempotentHint is False
     assert tools["advance_qa_orchestration"].annotations.idempotentHint is False
     assert tools["finish_qa_orchestration"].annotations.idempotentHint is True
+    deletion = tools["delete_qa_orchestration"]
+    assert deletion.annotations.readOnlyHint is False
+    assert deletion.annotations.destructiveHint is True
+    assert deletion.annotations.idempotentHint is True
+    assert deletion.annotations.openWorldHint is False
+    assert set(deletion.inputSchema["properties"]) == {"run_id"}
+    assert deletion.inputSchema["required"] == ["run_id"]
+    assert deletion.outputSchema is not None
 
     run_id_schema = tools["get_qa_orchestration"].inputSchema["properties"]["run_id"]
     assert run_id_schema["pattern"] == r"^qar-[0-9a-f]{32}$"
@@ -102,6 +111,75 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
         "outcome",
         "run_id",
     }
+    assert deletion.inputSchema["properties"]["run_id"]["pattern"] == run_id_schema["pattern"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["active", "early_stop", "awaiting_host_outcome", "finalized"])
+async def test_delete_session_removes_only_requested_run_and_is_idempotent(tmp_path, state):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    async with Client(build_server(service)) as client:
+        target = (await client.call_tool(
+            "start_qa_orchestration", {"task_type": "ordinary_review"}
+        )).structured_content
+        retained = (await client.call_tool(
+            "start_qa_orchestration", {"task_type": "widget_review"}
+        )).structured_content
+        run_id = target["run_id"]
+        if state == "early_stop":
+            await client.call_tool("advance_qa_orchestration", {
+                "run_id": run_id, "completed_step": "triage", "status": "partial"
+            })
+        elif state in {"awaiting_host_outcome", "finalized"}:
+            await client.call_tool("advance_qa_orchestration", {
+                "run_id": run_id, "completed_step": "triage", "status": "completed",
+                "selected_profile": "code_reviewer"
+            })
+            await client.call_tool("advance_qa_orchestration", {
+                "run_id": run_id, "completed_step": "primary_review", "status": "completed",
+                "completed_profile": "code_reviewer", "risk_signals": {}
+            })
+            await client.call_tool("advance_qa_orchestration", {
+                "run_id": run_id, "completed_step": "synthesis", "status": "completed"
+            })
+            if state == "finalized":
+                await client.call_tool("finish_qa_orchestration", {
+                    "run_id": run_id, "outcome": "completed"
+                })
+
+        first = await client.call_tool("delete_qa_orchestration", {"run_id": run_id})
+        repeated = await client.call_tool("delete_qa_orchestration", {"run_id": run_id})
+        assert first.structured_content == {"run_id": run_id, "deleted": True}
+        assert repeated.structured_content == first.structured_content
+        listed = (await client.call_tool("list_qa_orchestrations", {})).structured_content
+        assert [entry["run_id"] for entry in listed["sessions"]] == [retained["run_id"]]
+        current = await client.call_tool("get_qa_orchestration", {"run_id": retained["run_id"]})
+        assert current.structured_content == retained
+        for name, extra in (
+            ("get_qa_orchestration", {}),
+            ("advance_qa_orchestration", {"completed_step": "triage", "status": "partial"}),
+            ("finish_qa_orchestration", {"outcome": "partial"}),
+        ):
+            with pytest.raises(ToolError, match="unknown run_id"):
+                await client.call_tool(name, {"run_id": run_id, **extra})
+
+
+@pytest.mark.asyncio
+async def test_delete_unknown_id_succeeds_and_invalid_input_preserves_sessions(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    async with Client(build_server(service)) as client:
+        target = (await client.call_tool(
+            "start_qa_orchestration", {"task_type": "other"}
+        )).structured_content
+        unknown = "qar-" + "0" * 32
+        result = await client.call_tool("delete_qa_orchestration", {"run_id": unknown})
+        assert result.structured_content == {"run_id": unknown, "deleted": True}
+        for arguments in ({}, {"run_id": "invalid"}):
+            with pytest.raises(ToolError):
+                await client.call_tool("delete_qa_orchestration", arguments)
+        assert (await client.call_tool(
+            "get_qa_orchestration", {"run_id": target["run_id"]}
+        )).structured_content == target
 
 
 @pytest.mark.asyncio

@@ -129,7 +129,7 @@ Keep one compact per-task Evidence Packet with stable evidence references (`E1`,
 
 ## MCP interface
 
-The service publishes exactly eight tools:
+The service publishes exactly nine tools:
 
 | Tool | Purpose |
 |---|---|
@@ -141,6 +141,7 @@ The service publishes exactly eight tools:
 | `get_qa_orchestration(run_id)` | Read one existing session's step, status, next action, and current-stage model policy |
 | `list_qa_orchestrations()` | Recover lost `run_id` values from brief metadata for non-expired sessions retained by this server |
 | `finish_qa_orchestration(run_id, outcome)` | Finalize the host-owned session outcome after synthesis or a recorded early stop |
+| `delete_qa_orchestration(run_id)` | Immediately discard one session's in-memory state and its configured recovery record |
 
 Before starting a session or choosing its triage route, call `get_qa_orchestration_catalog` with `{}`. It returns all available profiles with their display names and focus, all bundles with usage guidance and ordered profile IDs, and `recommended_bundles_by_task_type`. Recommendations are shortlists, not restrictions; choose from changed files and confirmed stack. For a narrow concern, choose one profile and get its detailed checklist through `prepare_qa_orchestration`. For broad work, select a bundle and preserve its profile order. The catalog is fixed, independent of session/model-policy state, and does not create sessions, change TTL, or write storage.
 
@@ -159,6 +160,8 @@ Set `QA_ORCHESTRATOR_SESSION_STORE_PATH` to opt into a local SQLite file that re
 If a `run_id` is lost, call `list_qa_orchestrations` with `{}`. Its `sessions` entries include the ID, task type, status, stage, selected route, current profile, and expiry; use these to identify the intended session, then call `get_qa_orchestration` with its ID. Confirm the intended session if several entries match. The list includes retained terminal sessions and is sorted by expiry descending, with `run_id` as tie-breaker. It does not change state, renew TTL, or write storage. An empty list means no non-expired sessions are retained by this server; expired or evicted sessions cannot be recovered. After a restart, only unfinished sessions restored from configured recovery storage are available.
 
 After synthesis, the session waits for the host's final outcome. Call `finish_qa_orchestration` with the session `run_id` and `completed`, `partial`, or `blocked`. For an early stop, first pass `partial` or `blocked` to `advance_qa_orchestration`, then finish the session with the same outcome. Repeating the same finalization is idempotent; a conflicting outcome is rejected. Tasks that do not use orchestration need no finalization call. The service does not store or report task statistics.
+
+To intentionally discard a session, call `delete_qa_orchestration` with its `run_id`. It removes only that session from memory and optional SQLite recovery storage, at any lifecycle stage, and frees its capacity immediately. It returns `{ "run_id": "qar-...", "deleted": true }`; `deleted` confirms absence, so an already missing or expired ID also succeeds. The ID can no longer be read, advanced, finalized, or restored after restart. Storage failure leaves memory state intact and can be retried. Deletion records no QA outcome and does not stop host tasks or model executions. Use normal early-stop/finalization when the outcome should remain available; delete only when the host intends to discard that session.
 
 ### Review profiles
 

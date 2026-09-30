@@ -47,7 +47,14 @@ On the final primary-review role, set `risk_signals` from the evidence state. Ma
   call this for a task that was not orchestrated. Repeating the same outcome is
   idempotent in the current process; a conflicting final outcome is rejected.
 
-The orchestrator publishes exactly eight tools: `prepare_qa_orchestration`, `get_qa_orchestration_catalog`, `get_qa_orchestration_model_policy`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `list_qa_orchestrations`, and `finish_qa_orchestration`.
+The orchestrator publishes exactly nine tools: `prepare_qa_orchestration`, `get_qa_orchestration_catalog`, `get_qa_orchestration_model_policy`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `list_qa_orchestrations`, `finish_qa_orchestration`, and `delete_qa_orchestration`.
+
+Use `delete_qa_orchestration(run_id)` only when the user explicitly wants to discard
+that session; never as automatic cleanup or a substitute for normal finalization.
+Deletion immediately removes memory and configured recovery storage at any stage,
+records no QA outcome, and does not stop host tasks or model executions. The ID
+cannot be resumed or restored. `deleted=true` confirms absence, including for an
+already missing ID; retries are safe. If storage fails, the memory state remains.
 
 When available profiles, bundle purposes, or route order are unclear before
 triage, call `get_qa_orchestration_catalog` with no arguments. It returns the

@@ -16,6 +16,7 @@ from qa_orchestrator.model_policy import ModelSelection
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
     DeepReviewSignals,
+    QaOrchestrationDeletion,
     QaOrchestrationList,
     QaOrchestrationSession,
 )
@@ -35,6 +36,12 @@ STATE_TOOL_ANNOTATIONS = {
 FINALIZE_TOOL_ANNOTATIONS = {
     **STATE_TOOL_ANNOTATIONS,
     "idempotentHint": True,
+}
+DELETE_TOOL_ANNOTATIONS = {
+    "readOnlyHint": False,
+    "destructiveHint": True,
+    "idempotentHint": True,
+    "openWorldHint": False,
 }
 RunId = Annotated[
     str,
@@ -257,6 +264,21 @@ def build_server(service: OrchestratorService) -> FastMCP:
         - Reading does not extend session TTL.
         """
         return service.list_qa_orchestrations()
+
+    @mcp.tool(title="Discard QA session state", annotations=DELETE_TOOL_ANNOTATIONS)
+    def delete_qa_orchestration(run_id: RunId) -> QaOrchestrationDeletion:
+        """Remove one run_id's session state from memory and configured local recovery storage.
+
+        Use when the host intentionally discards an active or finished session.
+        To record a QA outcome and retain terminal state, use finish_qa_orchestration.
+
+        - Idempotent: deleted=true confirms absence; missing or expired IDs also succeed.
+        - Irreversible: get, advance, and finish can no longer use this ID; restart cannot restore it.
+        - Storage failure leaves memory state intact; retry after resolving the failure.
+
+        Deletes only orchestration state, without stopping host tasks or model executions.
+        """
+        return service.delete_qa_orchestration(run_id)
 
     @mcp.tool(title="Record final QA outcome", annotations=FINALIZE_TOOL_ANNOTATIONS)
     def finish_qa_orchestration(

@@ -16,6 +16,18 @@ from qa_orchestrator.orchestration import (
 from qa_orchestrator.review_profiles import REVIEW_BUNDLES
 
 
+def test_delete_frees_capacity_and_concurrent_repeats_are_idempotent():
+    orchestrator = QaOrchestrator(ttl_seconds=60, max_sessions=1)
+    started = orchestrator.start("ordinary_review")
+    with pytest.raises(OrchestrationError, match="session limit"):
+        orchestrator.start("other")
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(orchestrator.delete, [started.run_id] * 8))
+    assert all(result == results[0] for result in results)
+    assert orchestrator.list_sessions().sessions == []
+    assert orchestrator.start("other").run_id != started.run_id
+
+
 def test_list_includes_retained_terminal_sessions_and_returns_independent_results():
     orchestrator = QaOrchestrator(ttl_seconds=60, max_sessions=2)
     assert orchestrator.list_sessions().sessions == []

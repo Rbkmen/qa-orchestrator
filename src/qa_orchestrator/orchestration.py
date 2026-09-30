@@ -275,6 +275,16 @@ class QaOrchestrationList(BaseModel):
     host_owns_decisions: Literal[True] = True
 
 
+class QaOrchestrationDeletion(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: str = Field(pattern=r"^qar-[0-9a-f]{32}$")
+    deleted: Literal[True] = Field(
+        default=True,
+        description="The run_id is absent from this server and its recovery store, including if already absent.",
+    )
+
+
 class AdvanceQaOrchestrationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -504,6 +514,12 @@ class QaOrchestrator:
                     for session in retained
                 ]
             )
+
+    def delete(self, run_id: str) -> QaOrchestrationDeletion:
+        result = QaOrchestrationDeletion(run_id=run_id)
+        with self._lock:
+            self._delete_session(run_id)
+        return result
 
     def finish(self, *, run_id: str, outcome: QaTaskOutcome) -> QaOrchestrationSession:
         """Record the host-owned final outcome for a completed orchestration flow."""
