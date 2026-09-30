@@ -93,11 +93,11 @@ def build_server(service: OrchestratorService) -> FastMCP:
         or a single profile for a narrow concern using changed files and confirmed stack.
 
         - Detailed checklist: prepare_qa_orchestration(agent_profile).
-        - Session creation: start_qa_orchestration; apply the host's route: advance_qa_orchestration.
-        - Retained session IDs: list_qa_orchestrations().
+        - Create a session: start_qa_orchestration; set its route: advance_qa_orchestration.
+        - Session IDs: list_qa_orchestrations().
 
-        Reads bundled definitions independently of sessions and model policy. No TTL renewal,
-        storage writes, or external requests; local stdio needs no additional credentials.
+        Available routes come from the installed server's bundled definitions;
+        active sessions and configured models do not change this catalog.
         """
         return service.get_qa_orchestration_catalog()
 
@@ -105,14 +105,13 @@ def build_server(service: OrchestratorService) -> FastMCP:
     def get_qa_orchestration_model_policy() -> ModelSelection:
         """Read server-wide model settings for every stage: provider, model IDs, and reasoning.
 
-        Use without run_id to inspect the policy loaded by this running server for new sessions.
-        For an existing session's current step, status, next action, and current-stage model_policy,
-        use get_qa_orchestration(run_id). Use start_qa_orchestration to create a new session
-        with this server policy.
+        Use to inspect the policy loaded for new sessions; takes no arguments.
+        - Existing session state and current-stage policy: get_qa_orchestration(run_id).
+        - Create a session with these settings: start_qa_orchestration.
 
-        This reads an in-memory snapshot, not the policy file; restart the server connection
-        after changing that file. It creates no session, contacts no provider, and does not
-        verify which model the host executed.
+        Reads the loaded in-memory snapshot, not the current policy file; restart the server
+        connection after file changes. No session is created and no provider is contacted;
+        the result does not verify which model the host executed.
         """
         return service.get_qa_orchestration_model_policy()
 
@@ -203,21 +202,24 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ),
         ] = None,
     ) -> QaOrchestrationSession:
-        """Record one active QA step's result and return the next action; finalization requires
-        finish_qa_orchestration.
+        """Record one active QA step's result and return the updated QaOrchestrationSession.
+        status, current_step, and current_profile describe the returned state;
+        next_action is a text instruction for the host. The call does not execute reviews.
 
         Pass current_step as completed_step only at triage, primary_review, deep_review, or synthesis.
-        After synthesis, finish_qa_orchestration records the whole run's outcome at awaiting_host_outcome.
-        After a partial/blocked early stop, finish_qa_orchestration must match that recorded outcome.
+        Finalize with finish_qa_orchestration after synthesis (awaiting_host_outcome), or after
+        a partial/blocked early stop with the same recorded outcome.
 
         - Completed triage: supply exactly one of selected_bundle or selected_profile.
         - Completed primary review: echo current_profile as completed_profile. The final profile also
           requires risk_signals ({} if none apply); omit signals on earlier profiles.
         - Early stop: omit route selectors, completed_profile, and risk_signals.
 
-        Stale/out-of-order steps, invalid arguments/signals, and unknown/expired run_ids fail without advancing.
-        Non-idempotent: after a lost successful response, read get_qa_orchestration before continuing;
-        replaying the prior step is rejected.
+        - Success: saves session state and refreshes expires_at.
+        - Error: stale/out-of-order steps, invalid arguments/signals, and unknown/expired run_ids
+          fail without advancing.
+        - Lost response: read get_qa_orchestration(run_id) before continuing.
+          Calls are non-idempotent; replaying the prior step is rejected.
         """
         return service.advance_qa_orchestration(
             AdvanceQaOrchestrationRequest(
