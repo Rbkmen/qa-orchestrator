@@ -84,9 +84,9 @@ def build_server(service: OrchestratorService) -> FastMCP:
         """
         return service.prepare_review_route(agent_profile)
 
-    @mcp.tool(title="Read QA routing catalog", annotations=READ_ONLY_TOOL_ANNOTATIONS)
+    @mcp.tool(title="Discover QA profiles and bundles", annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def get_qa_orchestration_catalog() -> QaOrchestrationCatalog:
-        """Read all available QA profiles and bundles, their purposes, and ordered bundle routes.
+        """Read the static profile/bundle catalog: available specialists, review scopes, and ordered routes.
 
         Use before creating a session or choosing its triage route; no session or arguments required.
         Task-type recommendations are shortlists, not restrictions. Choose a bundle for broad work
@@ -101,11 +101,11 @@ def build_server(service: OrchestratorService) -> FastMCP:
         """
         return service.get_qa_orchestration_catalog()
 
-    @mcp.tool(title="Read server model policy", annotations=READ_ONLY_TOOL_ANNOTATIONS)
+    @mcp.tool(title="Inspect server model settings", annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def get_qa_orchestration_model_policy() -> ModelSelection:
-        """Read the server-wide model policy for all stages of new QA sessions; takes no run_id.
+        """Read server-wide model settings for every stage: provider, model IDs, and reasoning.
 
-        Returns the provider, model IDs, and reasoning loaded by this running MCP server.
+        Use without run_id to inspect the policy loaded by this running server for new sessions.
         For an existing session's current step, status, next action, and current-stage model_policy,
         use get_qa_orchestration(run_id). Use start_qa_orchestration to create a new session
         with this server policy.
@@ -143,7 +143,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
         """
         return service.start_qa_orchestration(task_type)
 
-    @mcp.tool(title="Advance active review step", annotations=STATE_TOOL_ANNOTATIONS)
+    @mcp.tool(title="Record QA step result", annotations=STATE_TOOL_ANNOTATIONS)
     def advance_qa_orchestration(
         run_id: RunId,
         completed_step: Annotated[
@@ -203,11 +203,12 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ),
         ] = None,
     ) -> QaOrchestrationSession:
-        """Record one active review step's completion or an early stop; return the next action.
+        """Record one active QA step's result and return the next action; finalization requires
+        finish_qa_orchestration.
 
         Pass current_step as completed_step only at triage, primary_review, deep_review, or synthesis.
-        For awaiting_host_outcome or a partial/blocked early stop, use finish_qa_orchestration;
-        match the recorded outcome after an early stop.
+        After synthesis, finish_qa_orchestration records the whole run's outcome at awaiting_host_outcome.
+        After a partial/blocked early stop, finish_qa_orchestration must match that recorded outcome.
 
         - Completed triage: supply exactly one of selected_bundle or selected_profile.
         - Completed primary review: echo current_profile as completed_profile. The final profile also
@@ -230,9 +231,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
             )
         )
 
-    @mcp.tool(title="Read QA session state", annotations=READ_ONLY_TOOL_ANNOTATIONS)
+    @mcp.tool(title="Inspect one QA session", annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def get_qa_orchestration(run_id: RunId) -> QaOrchestrationSession:
-        """Read a retained session's content-free QA state and stage model policy.
+        """Read one retained run_id's content-free state: status, current step, next action,
+        and current-stage model policy.
 
         Use run_id on the server retaining that session to resume or reconcile a lost
         advance_qa_orchestration response. Reads do not extend expires_at. Errors `unknown run_id` or
@@ -260,7 +262,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
         """
         return service.list_qa_orchestrations()
 
-    @mcp.tool(title="Finalize QA session outcome", annotations=FINALIZE_TOOL_ANNOTATIONS)
+    @mcp.tool(title="Record final QA outcome", annotations=FINALIZE_TOOL_ANNOTATIONS)
     def finish_qa_orchestration(
         run_id: RunId,
         outcome: Annotated[
@@ -270,11 +272,12 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ),
         ],
     ) -> QaOrchestrationSession:
-        """Record the host's final QA session outcome after synthesis or an early stop.
+        """Finalize the whole QA run's outcome; active step results belong to advance_qa_orchestration.
 
-        Use the retained run_id at awaiting_host_outcome to choose completed, partial, or blocked.
+        After synthesis, use the retained run_id at awaiting_host_outcome to choose completed,
+        partial, or blocked.
         After an early stop recorded by advance_qa_orchestration, outcome must match its partial/blocked
-        status. For active review steps, use advance_qa_orchestration.
+        status.
 
         - Same outcome: returns the retained terminal session.
         - Different outcome: `conflicting final outcome`; status unchanged.
