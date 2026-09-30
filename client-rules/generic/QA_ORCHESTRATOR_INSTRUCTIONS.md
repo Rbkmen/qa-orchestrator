@@ -2,7 +2,7 @@
 
 Use `qa-orchestrator` as a deterministic helper for QA profiles and bounded, content-free orchestration state. The primary host agent remains the sole owner of evidence, analysis, decisions, and external actions.
 
-This file is the canonical source for orchestrator mechanics. Workspace and repository rules own task-specific routing and output shape; they should reference this file instead of duplicating its mechanics.
+This file is the canonical source for orchestration mechanics and the generic evidence, finding, and final-output contract. Workspace and repository rules may add local routing, safety, and domain-specific requirements, but must preserve these generic evidence and finding standards and reference this file instead of duplicating orchestration mechanics.
 
 ## Availability and failure fallback
 
@@ -28,8 +28,77 @@ This file is the canonical source for orchestrator mechanics. Workspace and repo
 - On the final primary-review role, pass `completed_profile` and the structured boolean `risk_signals` object in the same `advance_qa_orchestration` call. Send `{}` when no signals apply. Do not send `risk_signals` on the later synthesis transition.
 - After each stage, call `advance_qa_orchestration` with its required transition fields; pass `completed_profile` for each profile. Use the updated session returned by `advance_qa_orchestration` for the next action and model policy. Call `get_qa_orchestration` only to resume or recover an interrupted or unclear session. If escalation is selected, run the configured deep stage once before synthesis.
 - Obtain authoritative evidence from the issue tracker, code host, test-management system, observability, and code systems yourself; inspect the diff, and separate confirmed findings from hypotheses and unverified runtime or release facts.
-- Keep one compact per-task Evidence Packet with stable `E1`, `E2`, ... references. Give each profile only relevant sections. `code_explorer` returns an evidence map and unresolved links, not defect candidates; `code_reviewer` uses that map and reports only concrete candidates supported by the changed code and evidence. Other profiles stay within their returned focus. Use `F-01`, `F-02`, ... for bounded finding candidates, each with evidence references, confidence, and a verification gap; keep coverage gaps separate and do not repeat full diffs or raw logs.
+- Keep one compact per-task Evidence Packet with stable `E1`, `E2`, ... references. Give each profile only relevant sections. `code_explorer` returns an evidence map and unresolved links, not defect candidates; `code_reviewer` uses that map and reports only concrete candidates supported by the changed code and evidence. Other profiles stay within their returned focus. Use stable `F-01`, `F-02`, ... IDs for bounded finding candidates; each candidate cites evidence references, states evidence confidence, and names its verification gap. Keep coverage gaps separate, deduplicate candidates during synthesis, and do not repeat full diffs or raw logs. A candidate is not a confirmed final finding until the host validates it.
 - Routes and orchestration states are marked `read_only=true` and `host_owns_decisions=true`; do not treat the orchestrator as an autonomous agent or delegate external writes to it.
+
+## Evidence and final findings
+
+### Confirmation and traceability
+
+- Put a defect in final `Findings` only when evidence supports both the failure condition and its material impact. Direct source and contract evidence can confirm a code-level defect; state clearly when runtime, deployment, or release behavior was not tested.
+- Do not turn a missing test, unavailable environment, coverage gap, assumption, style preference, or speculative worst case into a finding. Put these under `Open Questions / Could Not Verify`, `Coverage Gaps`, or `Residual Risks` as appropriate.
+- Every finding must point to a verifiable source. `E1`, `E2`, and similar IDs are useful inside orchestration, but the final report must map each ID to a direct locator: repository and file/line/commit, issue or MR link, test or pipeline run, or log source with time and environment. Do not leave evidence IDs unexplained.
+- Keep evidence confidence separate from severity. If a candidate is too uncertain to assert as a defect, do not promote it to a confirmed finding; report the uncertainty and the missing verification separately.
+
+### Severity
+
+Severity describes evidenced user or business impact, not confidence, implementation effort, or release readiness by itself. Consider the affected flow and scope, the consequence, and whether a safe workaround exists. Use these levels consistently:
+
+- `Blocker` — a confirmed failure makes a critical in-scope flow unusable or makes the affected behavior unsafe, such as loss or corruption of data or a serious security or transaction-integrity failure; no reasonable mitigation is available.
+- `High` — a confirmed failure breaks a major user or business flow, or materially affects correctness or security for a meaningful in-scope group; there is no reasonable workaround.
+- `Medium` — a confirmed functional problem is limited to particular conditions or users, or a workaround exists, while the core outcome remains possible.
+- `Low` — a minor, narrow issue such as a cosmetic defect or rare edge case, with core functionality and data, security, and transaction correctness intact.
+
+Do not raise severity because evidence is incomplete or because a worst-case impact is merely possible. State uncertain scope or impact in the verification gap. Report findings in severity order: `Blocker`, `High`, `Medium`, `Low`.
+
+### Affected area
+
+- Use the explicit field `Affected area` and name the actual component, service, interface, data flow, or user scenario supported by evidence. For a boundary issue, name both sides (for example, `API response → web checkout`). Add platform, role, or locale only when it is relevant and verified.
+- Do not invent a universal set of domain labels or use an unqualified label such as `Consumer` unless a task-specific rule defines exactly what it means.
+
+### Final finding format
+
+Use this format for each confirmed finding. Keep IDs stable across review stages and synthesis. Omit a field only when it is genuinely not applicable; do not add empty boilerplate.
+
+```text
+Finding ID: F-01 | Severity: High | Affected area: API response → web checkout
+Problem: <trigger, actual behavior, and violated expectation>
+Evidence: E1 — <direct source locator>; E2 — <direct source locator>
+Impact: <who or what is affected and the concrete consequence>
+Evidence confidence: <High or Medium, with a brief reason>
+Verification gap: <what was not checked, or None for the reviewed scope>
+Next step: <targeted verification or correction>
+```
+
+Evidence confidence describes how directly the available evidence supports the finding, not how serious the impact is:
+
+- `High` — direct source, contract, or test evidence supports the failure condition and expected behavior.
+- `Medium` — the failure condition is supported, but runtime behavior or the extent of impact remains unverified; name that gap.
+- `Low` — a key causal link, expected behavior, or claimed impact is still inferred. Keep it as an open question or unverified candidate, not a confirmed finding.
+
+Severity and evidence confidence answer different questions. A high-impact claim with low confidence is not a high-severity confirmed finding.
+
+Illustrative examples:
+
+```text
+Finding ID: F-01 | Severity: High | Affected area: payment API → checkout client
+Problem: The API contract now returns major currency units, but the client still divides by 100.
+Evidence: E1 — changed API contract; E2 — client conversion at the affected call site; E3 — no alternate flow for this supported route.
+Impact: Users on this supported checkout path cannot submit a correct amount, and no safe alternate route is available.
+Evidence confidence: High — both sides of the contract are visible in source.
+Verification gap: End-to-end payment behavior was not run.
+Next step: Add a focused contract or integration check for the conversion.
+
+Finding ID: F-02 | Severity: Low | Affected area: settings screen at narrow viewport widths
+Problem: A secondary label is clipped, but its control remains usable.
+Evidence: E3 — screenshot at the affected width; E4 — corresponding layout rule.
+Impact: A small visual defect is limited to that screen and width.
+Evidence confidence: High — the clipping is visible in the captured screen.
+Verification gap: Other locales and viewport widths were not checked.
+Next step: Check the same label at the narrow supported width after correction.
+```
+
+For implementation-aware reviews, list confirmed findings first, then a concise change summary, a targeted verification or manual test plan, and open questions or unverified risks. If none are confirmed, say so only for the scope actually reviewed; do not imply untested areas are clear.
 
 ## Optional deep analysis
 

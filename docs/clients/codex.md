@@ -85,7 +85,7 @@ command. Verify the registration with `codex mcp list` and restart Codex.
 
 ## Host-agent instructions
 
-Add or merge the canonical [host-agent instructions](../../client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md) in persistent Codex instructions. Without a checkout, open the same file on GitHub at the server's commit SHA by replacing `main` in the [link](https://github.com/Rbkmen/qa-orchestrator/blob/main/client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md). These instructions own profile selection, stage transitions, escalation, and finalization; workspace and repository rules should add only local routing, safety, and output requirements. Do not install a separate routing skill.
+Add or merge the canonical [host-agent instructions](../../client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md) in persistent Codex instructions. They include the shared evidence, severity, affected-area, and final-finding contract as well as orchestration mechanics. Registering the MCP server alone does not load these instructions. Without a checkout, open the same file on GitHub at the server's commit SHA by replacing `main` in the [link](https://github.com/Rbkmen/qa-orchestrator/blob/main/client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md). Workspace and repository rules may add local routing, safety, and domain-specific details, but must preserve the shared evidence and finding standards. Do not install a separate routing skill.
 
 Codex remains the host and owns evidence, decisions, and external actions. Follow the returned `model_policy` for each stage. Execution speed and latency preferences are controlled by the user's host/provider settings; the orchestrator does not set or override them. Prompts, evidence, and model outputs stay in Codex.
 

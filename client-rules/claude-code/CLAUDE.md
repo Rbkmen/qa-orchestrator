@@ -1,6 +1,6 @@
 # QA Orchestrator usage
 
-The generic QA Orchestrator instructions are canonical for orchestration mechanics; workspace and repository rules add only scope-specific routing and output requirements.
+The shared `client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md` defines orchestration mechanics and the cross-project evidence and finding contract. Use it together with this Claude Code-specific workflow. Workspace and repository rules may add local routing, safety, and domain requirements, but must preserve the shared evidence and finding standards.
 
 When the `qa-orchestrator` MCP server is available, use it as a deterministic QA-orchestration helper.
 
@@ -33,7 +33,7 @@ When the `qa-orchestrator` MCP server is available, use it as a deterministic QA
   finalization deletes its stored row. Final outcomes are not persisted. Do not
   call this for a task that was not orchestrated. Repeating the same outcome is
   idempotent in the current process; a conflicting final outcome is rejected.
-- For implementation-aware reviews, use Findings, Changes, Manual Test Plan, and Open Questions / Could Not Verify; follow the workspace flow when it defines another output shape for requirements or planning.
+- For implementation-aware reviews, use the shared final-finding format, followed by Changes, Manual Test Plan, and Open Questions / Could Not Verify. Follow the workspace flow for additional requirements or planning sections without weakening the shared evidence and finding standards.
 - Do not add persistent QA memory, a source cache, or hidden tool calls.
 - When asked which models are loaded, call `get_qa_orchestration_model_policy`
   with no arguments. It returns the current server's policy for new sessions,

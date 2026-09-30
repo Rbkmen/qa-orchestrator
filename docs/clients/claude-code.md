@@ -52,22 +52,23 @@ Verify the connection with `claude mcp get qa-orchestrator`, `claude mcp list`, 
 
 ## Host-agent instructions
 
-For a project without `CLAUDE.md`:
-
-Run this command from the QA Orchestrator repository root:
+For a project without `CLAUDE.md`, combine the shared host-agent instructions with the Claude Code-specific workflow. From the QA Orchestrator repository root, run:
 
 ```bash
-cp "$(pwd)/client-rules/claude-code/CLAUDE.md" \
-  /absolute/path/to/your-project/CLAUDE.md
+cat client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md \
+  client-rules/claude-code/CLAUDE.md \
+  > /absolute/path/to/your-project/CLAUDE.md
 ```
 
-If the file already exists, merge the rules manually. The Claude-specific
-instruction file is the complete host workflow; keep this setup guide focused
-on installation and use workspace or repository rules for local requirements.
+The generic file defines the shared evidence and finding contract; the Claude
+file adds the client workflow. If `CLAUDE.md` already exists, merge both files
+into it without replacing existing project instructions. Registering the MCP
+server alone does not load host-agent rules.
 
-If you installed with `uvx` and have no checkout, open the [canonical Claude
-Code instructions on GitHub](https://github.com/Rbkmen/qa-orchestrator/blob/main/client-rules/claude-code/CLAUDE.md)
-at the server's commit SHA by replacing `main` in the link. Merge them into the
+If you installed with `uvx` and have no checkout, open both the [shared
+instructions](https://github.com/Rbkmen/qa-orchestrator/blob/main/client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md)
+and the [Claude Code instructions](https://github.com/Rbkmen/qa-orchestrator/blob/main/client-rules/claude-code/CLAUDE.md)
+at the server's commit SHA by replacing `main` in each link. Merge both into the
 project's `CLAUDE.md`; do not replace existing project instructions.
 
 Claude Code remains the host and owns evidence, decisions, model calls, and

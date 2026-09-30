@@ -35,7 +35,7 @@ installation without a checkout, updates, and troubleshooting.
    The returned policy selects the provider, model, and reasoning for each stage. Execution speed and latency preferences remain controlled by the user's host/provider settings; the orchestrator does not set or override them.
 4. The host validates findings, runtime evidence, and limitations. For an orchestrated task, it calls `finish_qa_orchestration` with the same `run_id` and its final outcome.
 
-The orchestrator does not call models, choose severity or release readiness, or perform external writes.
+The orchestrator does not call models, choose severity or release readiness, or perform external writes. Its client-rule templates provide portable host-agent instructions for evidence quality and finding presentation; registering the MCP server alone does not load those instructions into the host.
 
 ## Choose a review path
 
