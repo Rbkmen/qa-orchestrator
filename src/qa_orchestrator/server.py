@@ -267,19 +267,18 @@ def build_server(service: OrchestratorService) -> FastMCP:
 
     @mcp.tool(title="Discard QA session state", annotations=DELETE_TOOL_ANNOTATIONS)
     def delete_qa_orchestration(run_id: RunId) -> QaOrchestrationDeletion:
-        """Remove one QA session's state from memory and configured local recovery storage.
+        """Delete one QA session from memory and configured recovery storage.
+        To retain a final QA outcome, use finish_qa_orchestration.
 
-        Use for intentional discard; use finish_qa_orchestration to record and retain a QA outcome.
+        run_id selects one session at any stage; no prior advance or finish required.
+        Recover a lost ID via list_qa_orchestrations(), matching task type, route, and stage;
+        confirm the target if several entries match.
 
-        run_id selects exactly one session on this server at any stage; no prior advance or finish
-        is required. Recover a lost ID by matching task type, route, and stage in
-        list_qa_orchestrations(); if several entries match, confirm which session to discard.
+        - Idempotent: deleted=true confirms absence, including unknown or expired IDs.
+        - Irreversible: get/advance/finish cannot use the ID, even after restart.
+        - Storage failure: memory stays intact; resolve the error and retry.
 
-        - Idempotent: deleted=true confirms absence; missing or expired IDs also succeed.
-        - Irreversible: get, advance, and finish can no longer use this ID; restart cannot restore it.
-        - Storage failure leaves memory state intact; retry after resolving the failure.
-
-        Deletes only orchestration state, without stopping host tasks or model executions.
+        Host tasks and model executions are unaffected.
         """
         return service.delete_qa_orchestration(run_id)
 
