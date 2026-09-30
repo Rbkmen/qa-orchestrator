@@ -15,6 +15,7 @@ from qa_orchestrator.model_policy import ModelSelection
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
     DeepReviewSignals,
+    QaOrchestrationList,
     QaOrchestrationSession,
 )
 from qa_orchestrator.service import OrchestratorService
@@ -39,8 +40,9 @@ RunId = Annotated[
     Field(
         pattern=r"^qar-[0-9a-f]{32}$",
         description=(
-            "Session identifier returned by start_qa_orchestration: qar- followed by "
-            "32 lowercase hexadecimal characters. Reuse it for this session; do not invent or transform it."
+            "Session identifier returned by start_qa_orchestration or list_qa_orchestrations: qar- "
+            "followed by 32 lowercase hexadecimal characters. Reuse it for this session; "
+            "do not invent or transform it."
         ),
     ),
 ]
@@ -214,12 +216,30 @@ def build_server(service: OrchestratorService) -> FastMCP:
         Use run_id on the server retaining that session to resume or reconcile a lost
         advance_qa_orchestration response. Reads do not extend expires_at. Errors `unknown run_id` or
         `expired session` require a new session via start_qa_orchestration.
+        If run_id is lost, use list_qa_orchestrations() to find retained sessions first.
 
         For all-stage server policy, use get_qa_orchestration_model_policy(); for review progress or
         final outcome, use advance_qa_orchestration or finish_qa_orchestration, respectively.
         Local stdio access requires no additional credentials.
         """
         return service.get_qa_orchestration(run_id)
+
+    @mcp.tool(title="List retained QA sessions", annotations=READ_ONLY_TOOL_ANNOTATIONS)
+    def list_qa_orchestrations() -> QaOrchestrationList:
+        """List non-expired QA session identifiers and brief metadata retained by this server.
+
+        Use when a run_id is lost or to discover resumable sessions; takes no arguments. Choose the
+        matching entry by task type, route, and stage, then call get_qa_orchestration(run_id) for
+        full state and next action. If several entries match, confirm which session to resume.
+        For server-wide model policy, use get_qa_orchestration_model_policy().
+
+        Includes retained terminal sessions, ordered by expires_at descending with run_id as tie-breaker;
+        an empty list means none are available. Expired or evicted sessions cannot be recovered here.
+        After restart, only unfinished sessions restored from configured local storage are available.
+        This snapshot makes no external requests, writes no storage, and does not change state or TTL;
+        local stdio requires no additional credentials.
+        """
+        return service.list_qa_orchestrations()
 
     @mcp.tool(title="Finalize QA session outcome", annotations=FINALIZE_TOOL_ANNOTATIONS)
     def finish_qa_orchestration(

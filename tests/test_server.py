@@ -11,7 +11,7 @@ from qa_orchestrator.service import OrchestratorService
 
 
 @pytest.mark.asyncio
-async def test_server_exposes_six_tools(tmp_path):
+async def test_server_exposes_seven_tools(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
@@ -24,6 +24,7 @@ async def test_server_exposes_six_tools(tmp_path):
         "start_qa_orchestration",
         "advance_qa_orchestration",
         "get_qa_orchestration",
+        "list_qa_orchestrations",
     }
 
 
@@ -64,6 +65,7 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
         "prepare_qa_orchestration",
         "get_qa_orchestration_model_policy",
         "get_qa_orchestration",
+        "list_qa_orchestrations",
     ):
         annotations = tools[name].annotations
         assert annotations is not None
@@ -72,6 +74,8 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
         assert annotations.openWorldHint is False
 
     assert tools["get_qa_orchestration_model_policy"].inputSchema["properties"] == {}
+    assert tools["list_qa_orchestrations"].inputSchema["properties"] == {}
+    assert tools["list_qa_orchestrations"].outputSchema is not None
 
     for name in (
         "start_qa_orchestration",
@@ -134,6 +138,38 @@ async def test_get_qa_orchestration_model_policy_returns_loaded_policy(tmp_path)
         result = await client.call_tool("get_qa_orchestration_model_policy", {})
 
     assert result.structured_content == loaded_policy
+
+
+@pytest.mark.asyncio
+async def test_list_qa_orchestrations_recovers_run_id_without_changing_state(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+
+    async with Client(build_server(service)) as client:
+        empty = await client.call_tool("list_qa_orchestrations", {})
+        assert empty.structured_content["sessions"] == []
+        started = await client.call_tool(
+            "start_qa_orchestration", {"task_type": "ordinary_review"}
+        )
+        listed = await client.call_tool("list_qa_orchestrations", {})
+        entries = listed.structured_content["sessions"]
+        assert len(entries) == 1
+        assert entries[0] == {
+            "run_id": started.structured_content["run_id"],
+            "task_type": "ordinary_review",
+            "status": "active",
+            "current_step": "triage",
+            "selected_bundle": None,
+            "selected_profile": None,
+            "current_profile": None,
+            "expires_at": started.structured_content["expires_at"],
+        }
+        recovered = await client.call_tool(
+            "get_qa_orchestration", {"run_id": entries[0]["run_id"]}
+        )
+
+    assert recovered.structured_content == started.structured_content
+    assert listed.structured_content["read_only"] is True
+    assert listed.structured_content["host_owns_decisions"] is True
 
 
 @pytest.mark.asyncio

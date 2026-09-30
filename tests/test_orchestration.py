@@ -16,6 +16,29 @@ from qa_orchestrator.orchestration import (
 from qa_orchestrator.review_profiles import REVIEW_BUNDLES
 
 
+def test_list_includes_retained_terminal_sessions_and_returns_independent_results():
+    orchestrator = QaOrchestrator(ttl_seconds=60, max_sessions=2)
+    assert orchestrator.list_sessions().sessions == []
+    started = orchestrator.start("ordinary_review")
+    orchestrator.advance(run_id=started.run_id, completed_step="triage", status="partial")
+    orchestrator.finish(run_id=started.run_id, outcome="partial")
+    active = orchestrator.start("widget_review")
+
+    listed = orchestrator.list_sessions()
+    assert {entry.run_id: entry.status.value for entry in listed.sessions} == {
+        started.run_id: "partial",
+        active.run_id: "active",
+    }
+    listed.sessions.clear()
+    assert len(orchestrator.list_sessions().sessions) == 2
+
+    newest = orchestrator.start("qa_planning")
+    assert {entry.run_id for entry in orchestrator.list_sessions().sessions} == {
+        active.run_id,
+        newest.run_id,
+    }
+
+
 def test_normal_flow_skips_sol():
     orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
     session = orchestrator.start("ordinary_review")

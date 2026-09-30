@@ -65,14 +65,15 @@ directory. Never use production session-store files in development tests.
 
 ## Change a contract deliberately
 
-The public surface has six tools:
+The public surface has seven tools:
 
 1. `prepare_qa_orchestration` — profile metadata;
 2. `get_qa_orchestration_model_policy` — loaded server policy;
 3. `start_qa_orchestration` — create a session;
 4. `advance_qa_orchestration` — validated transition;
 5. `get_qa_orchestration` — current session state for recovery;
-6. `finish_qa_orchestration` — finalize the host-owned outcome.
+6. `list_qa_orchestrations` — recover retained, non-expired session identifiers;
+7. `finish_qa_orchestration` — finalize the host-owned outcome.
 
 Update the affected types, state machine, service, and server together. Match
 the exact tool set, input/output schemas, annotations, descriptions, and real

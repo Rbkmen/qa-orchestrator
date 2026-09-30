@@ -219,6 +219,7 @@ The orchestrator must publish exactly:
 - `start_qa_orchestration`;
 - `advance_qa_orchestration`;
 - `get_qa_orchestration`;
+- `list_qa_orchestrations`;
 - `finish_qa_orchestration`.
 
 `read_only=true` and `host_owns_decisions=true` must be preserved in every orchestration state. Do not add a tool that generates text, accepts evidence, changes external state, selects a model for the host, or silently calls another agent.
@@ -229,6 +230,15 @@ not reread disk or contact providers. After setup, restart the server connection
 before checking it. This reports configured policy, not host execution telemetry.
 For an existing recovered session, follow its returned `model_policy`; the next
 transition uses the restarted server's policy.
+
+`list_qa_orchestrations` takes no arguments and returns brief content-free metadata
+for non-expired sessions retained by this server, including retained terminal
+sessions. It reads a locked in-memory snapshot without renewing TTL, deleting
+expired rows, or writing storage. Entries are sorted by expiry descending, with
+`run_id` as tie-breaker. Use it to recover a lost ID, then call
+`get_qa_orchestration(run_id)` for full state; confirm the intended session when
+multiple entries match. Expired and evicted sessions are excluded. After restart,
+only unfinished sessions restored from configured storage are available.
 
 ## Persistence and safety
 

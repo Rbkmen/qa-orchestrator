@@ -280,7 +280,7 @@ def test_documentation_contains_no_retired_runtime_terms():
 
 
 @pytest.mark.asyncio
-async def test_launcher_exposes_six_tools(monkeypatch, tmp_path):
+async def test_launcher_exposes_seven_tools(monkeypatch, tmp_path):
     virtual_env = str(Path(sys.executable).parent.parent)
     monkeypatch.setenv("VIRTUAL_ENV", virtual_env)
     monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
@@ -307,6 +307,7 @@ async def test_launcher_exposes_six_tools(monkeypatch, tmp_path):
                 "prepare_qa_orchestration",
                 {"agent_profile": "code_explorer"},
             )
+            listed = await client.call_tool("list_qa_orchestrations", {})
     finally:
         await transport.close()
 
@@ -317,8 +318,12 @@ async def test_launcher_exposes_six_tools(monkeypatch, tmp_path):
         "start_qa_orchestration",
         "advance_qa_orchestration",
         "get_qa_orchestration",
+        "list_qa_orchestrations",
     }
     assert prepared.structured_content["profile"] == "code_explorer"
+    assert listed.structured_content == {
+        "sessions": [], "read_only": True, "host_owns_decisions": True
+    }
 
 
 @pytest.mark.asyncio

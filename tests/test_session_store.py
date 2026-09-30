@@ -57,6 +57,47 @@ def test_unfinished_session_survives_restart_and_transition_refreshes_ttl(tmp_pa
     assert restored.model_dump() == advanced.model_dump()
 
 
+def test_list_recovers_unfinished_sessions_after_restart_without_store_writes(tmp_path):
+    path = tmp_path / "sessions.sqlite3"
+    store = SqliteSessionStore(path)
+    clock = FakeClock()
+    first_process = _orchestrator(store, clock)
+    started = first_process.start("ordinary_review")
+    first_process.advance(
+        run_id=started.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_profile=ReviewAgent.CODE_REVIEWER,
+    )
+    restored = _orchestrator(store, clock)
+    before = path.read_bytes()
+
+    entries = restored.list_sessions().sessions
+
+    assert len(entries) == 1
+    assert entries[0].run_id == started.run_id
+    assert entries[0].current_step is OrchestrationStep.PRIMARY_REVIEW
+    assert entries[0].selected_profile is ReviewAgent.CODE_REVIEWER
+    assert restored.get(entries[0].run_id).current_step is OrchestrationStep.PRIMARY_REVIEW
+    assert path.read_bytes() == before
+
+
+def test_list_omits_expired_sessions_without_extending_ttl_or_deleting_store_rows(tmp_path):
+    path = tmp_path / "sessions.sqlite3"
+    store = SqliteSessionStore(path)
+    clock = FakeClock()
+    orchestrator = _orchestrator(store, clock)
+    started = orchestrator.start("ordinary_review")
+    before = path.read_bytes()
+
+    clock.advance(59)
+    assert orchestrator.list_sessions().sessions[0].expires_at == started.expires_at
+    clock.advance(1)
+    assert orchestrator.list_sessions().sessions == []
+    assert store.load_all()[0].expires_at == started.expires_at
+    assert path.read_bytes() == before
+
+
 def test_final_outcome_is_not_written_to_the_session_store(tmp_path):
     store = SqliteSessionStore(tmp_path / "sessions.sqlite3")
     clock = FakeClock()

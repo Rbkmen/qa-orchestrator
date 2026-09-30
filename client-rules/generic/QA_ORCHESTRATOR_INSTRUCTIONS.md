@@ -47,7 +47,15 @@ On the final primary-review role, set `risk_signals` from the evidence state. Ma
   call this for a task that was not orchestrated. Repeating the same outcome is
   idempotent in the current process; a conflicting final outcome is rejected.
 
-The orchestrator publishes exactly six tools: `prepare_qa_orchestration`, `get_qa_orchestration_model_policy`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, and `finish_qa_orchestration`.
+The orchestrator publishes exactly seven tools: `prepare_qa_orchestration`, `get_qa_orchestration_model_policy`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `list_qa_orchestrations`, and `finish_qa_orchestration`.
+
+If a session's `run_id` is lost, call `list_qa_orchestrations` with no arguments.
+Identify the intended entry by task type, route, stage, and expiry, then call
+`get_qa_orchestration` with its ID. Ask the user which session to resume if several
+entries match; do not guess or create another session before checking. Listing
+includes retained terminal sessions, excludes expired/evicted sessions, and does
+not renew TTL or write storage. After restart, only unfinished sessions restored
+from configured local storage are available.
 
 When asked which models are loaded, call `get_qa_orchestration_model_policy`
 with no arguments. It returns the current server's policy for new sessions,

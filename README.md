@@ -129,7 +129,7 @@ Keep one compact per-task Evidence Packet with stable evidence references (`E1`,
 
 ## MCP interface
 
-The service publishes exactly six tools:
+The service publishes exactly seven tools:
 
 | Tool | Purpose |
 |---|---|
@@ -138,6 +138,7 @@ The service publishes exactly six tools:
 | `start_qa_orchestration(task_type)` | Create a session and return the task-based bundle shortlist |
 | `advance_qa_orchestration(...)` | Record one active review step's completion or an early stop; return the next action |
 | `get_qa_orchestration(run_id)` | Read one existing session's step, status, next action, and current-stage model policy |
+| `list_qa_orchestrations()` | Recover lost `run_id` values from brief metadata for non-expired sessions retained by this server |
 | `finish_qa_orchestration(run_id, outcome)` | Finalize the host-owned session outcome after synthesis or a recorded early stop |
 
 Bundle orchestration flow:
@@ -151,6 +152,8 @@ Triage → Primary review[1] → ... → Primary review[N]
 Sessions are kept in process memory by default. Successful state changes refresh the 1,800-second default TTL; reads do not. The maximum is 100 active sessions, and the shared cache is bounded, so older terminal sessions may be evicted when capacity is needed. Repeating the final call is idempotent while its session is retained. After a restart, the host starts a new session unless optional recovery storage is enabled. `read_only=true` and `host_owns_decisions=true` are part of every state.
 
 Set `QA_ORCHESTRATOR_SESSION_STORE_PATH` to opt into a local SQLite file that restores unfinished orchestration state after a restart. It stores only the current structured session needed for recovery; finalization removes that row. It never stores evidence, prompts, source, logs, model responses, finalized outcomes, history, or statistics. Use one server process per store file. The default remains memory-only.
+
+If a `run_id` is lost, call `list_qa_orchestrations` with `{}`. Its `sessions` entries include the ID, task type, status, stage, selected route, current profile, and expiry; use these to identify the intended session, then call `get_qa_orchestration` with its ID. Confirm the intended session if several entries match. The list includes retained terminal sessions and is sorted by expiry descending, with `run_id` as tie-breaker. It does not change state, renew TTL, or write storage. An empty list means no non-expired sessions are retained by this server; expired or evicted sessions cannot be recovered. After a restart, only unfinished sessions restored from configured recovery storage are available.
 
 After synthesis, the session waits for the host's final outcome. Call `finish_qa_orchestration` with the session `run_id` and `completed`, `partial`, or `blocked`. For an early stop, first pass `partial` or `blocked` to `advance_qa_orchestration`, then finish the session with the same outcome. Repeating the same finalization is idempotent; a conflicting outcome is rejected. Tasks that do not use orchestration need no finalization call. The service does not store or report task statistics.
 

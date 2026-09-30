@@ -10,6 +10,7 @@ from qa_orchestrator.contracts import (
 from qa_orchestrator.model_policy import ModelSelection, load_model_selection
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
+    QaOrchestrationList,
     QaOrchestrationSession,
     QaOrchestrator,
 )
@@ -58,6 +59,9 @@ class OrchestratorService:
 
     def get_qa_orchestration(self, run_id: str) -> QaOrchestrationSession:
         return self.orchestrator.get(run_id)
+
+    def list_qa_orchestrations(self) -> QaOrchestrationList:
+        return self.orchestrator.list_sessions()
 
     def finish_qa_orchestration(
         self,

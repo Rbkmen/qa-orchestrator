@@ -233,9 +233,10 @@ For Anthropic/Claude Code, use the [Claude Code setup guide](clients/claude-code
 ## 4. Verify the connection
 
 1. In Codex CLI, run `codex mcp list`; in Claude Code, run `claude mcp get qa-orchestrator` or `/mcp`. In the ChatGPT desktop app, check **Settings → MCP servers** or use `/mcp`.
-2. Restart the client if needed, then confirm that all six tools are available: `prepare_qa_orchestration`, `get_qa_orchestration_model_policy`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, and `finish_qa_orchestration`.
+2. Restart the client if needed, then confirm that all seven tools are available: `prepare_qa_orchestration`, `get_qa_orchestration_model_policy`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `list_qa_orchestrations`, and `finish_qa_orchestration`.
 3. For a read-only smoke check, call `prepare_qa_orchestration` with `agent_profile="code_explorer"`. It should return the Faraday evidence-investigator route with `read_only=true` and `host_owns_decisions=true`.
 4. Call `get_qa_orchestration_model_policy` with `{}` and compare the returned selection with `qa-orch config show`. These checks create no QA session. Registration in `mcp list` alone does not prove a successful tool call.
+5. Call `list_qa_orchestrations` with `{}` to discover retained, non-expired session IDs. An empty `sessions` list is valid. To recover a lost ID, identify the intended entry and call `get_qa_orchestration` with its `run_id`; confirm which session to resume if several match. Listing does not extend TTL or write storage.
 
 The server is started on demand by the MCP client. Do not start a second background server manually.
 

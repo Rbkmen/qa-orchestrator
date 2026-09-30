@@ -252,6 +252,29 @@ class QaOrchestrationSession(BaseModel):
     expires_at: AwareDatetime
 
 
+class QaOrchestrationSummary(BaseModel):
+    """Content-free metadata for identifying a retained session."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: str = Field(pattern=r"^qar-[0-9a-f]{32}$")
+    task_type: QaTaskType
+    status: OrchestrationStatus
+    current_step: OrchestrationStep
+    selected_bundle: ReviewBundle | None
+    selected_profile: ReviewAgent | None
+    current_profile: ReviewAgent | None
+    expires_at: AwareDatetime
+
+
+class QaOrchestrationList(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sessions: list[QaOrchestrationSummary]
+    read_only: Literal[True] = True
+    host_owns_decisions: Literal[True] = True
+
+
 class AdvanceQaOrchestrationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -456,6 +479,31 @@ class QaOrchestrator:
             now = self._clock()
             self._purge_expired(now, keep_run_id=run_id)
             return self._copy(self._require_session(run_id, now))
+
+    def list_sessions(self) -> QaOrchestrationList:
+        """Read non-expired session metadata without changing memory or persistence."""
+        with self._lock:
+            now = self._clock()
+            retained = sorted(
+                (session for session in self._sessions.values() if session.expires_at > now),
+                key=lambda session: (session.expires_at, session.run_id),
+                reverse=True,
+            )
+            return QaOrchestrationList(
+                sessions=[
+                    QaOrchestrationSummary(
+                        run_id=session.run_id,
+                        task_type=session.task_type,
+                        status=session.status,
+                        current_step=session.current_step,
+                        selected_bundle=session.selected_bundle,
+                        selected_profile=session.selected_profile,
+                        current_profile=session.current_profile,
+                        expires_at=session.expires_at,
+                    )
+                    for session in retained
+                ]
+            )
 
     def finish(self, *, run_id: str, outcome: QaTaskOutcome) -> QaOrchestrationSession:
         """Record the host-owned final outcome for a completed orchestration flow."""
