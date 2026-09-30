@@ -269,6 +269,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
     def delete_qa_orchestration(run_id: RunId) -> QaOrchestrationDeletion:
         """Remove one run_id's session state from memory and configured local recovery storage.
 
+        Pass run_id unchanged from start_qa_orchestration or recover it with list_qa_orchestrations():
+        qar- followed by 32 lowercase hexadecimal characters. Malformed IDs fail validation
+        before deletion.
+
         Use when the host intentionally discards an active or finished session.
         To record a QA outcome and retain terminal state, use finish_qa_orchestration.
 
