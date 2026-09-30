@@ -50,7 +50,7 @@ CompletableStep = Literal["triage", "primary_review", "deep_review", "synthesis"
 def build_server(service: OrchestratorService) -> FastMCP:
     mcp = FastMCP(name="qa-orchestrator")
 
-    @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
+    @mcp.tool(title="Read specialist review checklist", annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def prepare_qa_orchestration(
         agent_profile: Annotated[
             ReviewAgent,
@@ -65,14 +65,14 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ),
         ],
     ) -> ReviewRoute:
-        """Return a specialist checklist: review focus, output sections, and evidence/escalation rules.
+        """Return a fixed specialist checklist: focus, required sections, evidence constraints, and
+        escalation signals. For session state, use get_qa_orchestration(run_id).
 
-        Use agent_profile for one scoped concern. For a tracked bundle, request each review_profiles
-        member in session order; start_qa_orchestration creates the session and advance_qa_orchestration
-        selects its profile or bundle at triage.
+        Pass agent_profile for one concern, or each review_profiles member in bundle order.
+        start_qa_orchestration creates sessions; advance_qa_orchestration selects the route at triage.
 
-        This stateless lookup does not select a session profile, inspect code, execute reviews, or
-        change session state; the host owns final decisions.
+        This local, stateless lookup does not inspect code, run reviews, or select a session profile.
+        The host owns final decisions.
         """
         return service.prepare_review_route(agent_profile)
 
