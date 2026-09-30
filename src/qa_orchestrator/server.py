@@ -202,24 +202,23 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ),
         ] = None,
     ) -> QaOrchestrationSession:
-        """Record one active QA step's result and return the updated QaOrchestrationSession.
-        status, current_step, and current_profile describe the returned state;
-        next_action is a text instruction for the host. The call does not execute reviews.
+        """Record one active QA step's result; return updated session state and next_action
+        (a host instruction string). Reviews are performed by the host.
 
-        Pass current_step as completed_step only at triage, primary_review, deep_review, or synthesis.
-        Finalize with finish_qa_orchestration after synthesis (awaiting_host_outcome), or after
-        a partial/blocked early stop with the same recorded outcome.
+        Pass current_step as completed_step at triage, primary_review, deep_review, or synthesis.
+        For final outcomes, use finish_qa_orchestration at awaiting_host_outcome or after a
+        partial/blocked early stop, matching that outcome.
 
         - Completed triage: supply exactly one of selected_bundle or selected_profile.
         - Completed primary review: echo current_profile as completed_profile. The final profile also
           requires risk_signals ({} if none apply); omit signals on earlier profiles.
         - Early stop: omit route selectors, completed_profile, and risk_signals.
 
-        - Success: saves session state and refreshes expires_at.
-        - Error: stale/out-of-order steps, invalid arguments/signals, and unknown/expired run_ids
-          fail without advancing.
-        - Lost response: read get_qa_orchestration(run_id) before continuing.
-          Calls are non-idempotent; replaying the prior step is rejected.
+        - Success: saves state and refreshes expires_at.
+        - Error: invalid/stale/out-of-order steps or arguments and unknown/expired run_ids fail
+          without advancing.
+        - Lost response: read get_qa_orchestration(run_id) before continuing;
+          prior-step replay is rejected (non-idempotent).
         """
         return service.advance_qa_orchestration(
             AdvanceQaOrchestrationRequest(
