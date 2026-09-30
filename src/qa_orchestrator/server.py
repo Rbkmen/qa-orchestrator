@@ -68,17 +68,19 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ),
         ],
     ) -> ReviewRoute:
-        """Return a fixed QA review checklist for one agent_profile: review focus, required sections,
-        evidence constraints, and escalation signals.
+        """Return one specialist's fixed ReviewRoute checklist: profile, display_name, focus,
+        required_sections, constraints, and escalation_signals.
 
-        Use before reviewing one scoped concern; no session is required. During primary_review,
-        pass the latest current_profile as agent_profile; preserve review_profiles order for bundles.
+        Use before reviewing one scoped concern; no session is required.
+        - Standalone review: use get_qa_orchestration_catalog() to match profile focus to
+          changed files and confirmed stack.
+        - Session primary_review: pass the latest current_profile as agent_profile;
+          preserve review_profiles order for bundles.
 
-        Discover profiles with get_qa_orchestration_catalog(); apply session routes with
-        advance_qa_orchestration. This lookup does not execute reviews.
-
-        Fixed bundled definitions determine the result for agent_profile; local stdio needs no credentials.
-        Invalid profiles fail input validation; retry with a listed enum value.
+        This local lookup reads bundled definitions, without executing reviews or calling models.
+        Use advance_qa_orchestration to apply a session route.
+        Results depend only on agent_profile. Invalid values fail input validation;
+        retry with a listed enum value.
         """
         return service.prepare_review_route(agent_profile)
 
@@ -251,10 +253,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
         Call get_qa_orchestration(run_id) for full state and next action, or
         get_qa_orchestration_model_policy() for server policy. Takes no arguments.
 
-        Includes terminal sessions; sorts by expires_at, then run_id, both descending.
-        Empty means none are retained. Expired or evicted sessions are unrecoverable;
-        after restart, only unfinished sessions restored from configured local storage appear.
-        Reading does not extend session TTL.
+        - Includes retained terminal sessions; expired or evicted sessions are unrecoverable.
+        - Sorts by expires_at descending, then run_id descending; empty means none are retained.
+        - After restart, only unfinished sessions restored from configured local storage appear.
+        - Reading does not extend session TTL.
         """
         return service.list_qa_orchestrations()
 
