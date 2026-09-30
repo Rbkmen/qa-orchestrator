@@ -74,13 +74,12 @@ def build_server(service: OrchestratorService) -> FastMCP:
         Use before reviewing one scoped concern; no session is required. During primary_review,
         pass the latest current_profile as agent_profile; preserve review_profiles order for bundles.
 
-        - Discovery: get_qa_orchestration_catalog().
-        - Sessions: start_qa_orchestration creates; advance_qa_orchestration selects the route;
-          get_qa_orchestration(run_id) reads state.
+        Discover profiles with get_qa_orchestration_catalog(); apply session routes with
+        advance_qa_orchestration. This lookup does not execute reviews.
 
-        Do not use this lookup to execute reviews or select a session's route. The checklist depends
-        only on agent_profile and bundled definitions. No external requests; local stdio needs no
-        additional credentials.
+        Invalid agent_profile values fail input validation; retry with a listed enum value.
+        Results depend only on agent_profile and bundled definitions. No external requests;
+        local stdio needs no additional credentials.
         """
         return service.prepare_review_route(agent_profile)
 
@@ -249,14 +248,14 @@ def build_server(service: OrchestratorService) -> FastMCP:
     def list_qa_orchestrations() -> QaOrchestrationList:
         """List non-expired QA session identifiers and brief metadata retained by this server.
 
-        Use to recover a lost run_id; takes no arguments. Match task type, route, and stage,
-        then call get_qa_orchestration(run_id) for full state and next action. Confirm the intended
-        session if several match. For server policy, use get_qa_orchestration_model_policy().
+        Recover a lost run_id by matching task type, route, and stage; confirm if several match.
+        Call get_qa_orchestration(run_id) for full state and next action, or
+        get_qa_orchestration_model_policy() for server policy. Takes no arguments.
 
-        Includes retained terminal sessions; sorts by expires_at descending, then run_id descending.
-        Empty means none are available. Expired or evicted sessions cannot be recovered.
-        After restart, only unfinished sessions restored from configured local storage appear.
-        This snapshot does not renew TTL, write storage, or make external requests.
+        Includes terminal sessions; sorts by expires_at, then run_id, both descending.
+        Empty means none are retained. Expired or evicted sessions are unrecoverable;
+        after restart, only unfinished sessions restored from configured local storage appear.
+        Read-only local snapshot: TTL and storage unchanged; no network requests.
         """
         return service.list_qa_orchestrations()
 
