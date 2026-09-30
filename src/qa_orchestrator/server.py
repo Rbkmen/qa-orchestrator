@@ -77,9 +77,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
         Discover profiles with get_qa_orchestration_catalog(); apply session routes with
         advance_qa_orchestration. This lookup does not execute reviews.
 
-        Invalid agent_profile values fail input validation; retry with a listed enum value.
-        Results depend only on agent_profile and bundled definitions. No external requests;
-        local stdio needs no additional credentials.
+        Fixed bundled definitions determine the result for agent_profile; local stdio needs no credentials.
+        Invalid profiles fail input validation; retry with a listed enum value.
         """
         return service.prepare_review_route(agent_profile)
 
@@ -255,7 +254,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
         Includes terminal sessions; sorts by expires_at, then run_id, both descending.
         Empty means none are retained. Expired or evicted sessions are unrecoverable;
         after restart, only unfinished sessions restored from configured local storage appear.
-        Read-only local snapshot: TTL and storage unchanged; no network requests.
+        Reading does not extend session TTL.
         """
         return service.list_qa_orchestrations()
 
