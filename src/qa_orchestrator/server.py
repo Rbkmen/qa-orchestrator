@@ -65,14 +65,14 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ),
         ],
     ) -> ReviewRoute:
-        """Return a fixed checklist for one `agent_profile`. It gives review focus, required output
-        sections, shared evidence constraints, and escalation signals.
+        """Return a specialist checklist: review focus, output sections, and evidence/escalation rules.
 
-        Use it for one scoped concern. For a selected bundle, request each `review_profiles` member
-        separately in session order; use start_qa_orchestration to track the multi-concern review.
+        Use agent_profile for one scoped concern. For a tracked bundle, request each review_profiles
+        member in session order; start_qa_orchestration creates the session and advance_qa_orchestration
+        selects its profile or bundle at triage.
 
-        Passing `agent_profile` never selects a session profile. This stateless lookup does not inspect
-        repository content, run the review, or change session state; the host owns final decisions.
+        This stateless lookup does not select a session profile, inspect code, execute reviews, or
+        change session state; the host owns final decisions.
         """
         return service.prepare_review_route(agent_profile)
 
@@ -178,23 +178,20 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ),
         ] = None,
     ) -> QaOrchestrationSession:
-        """Record one active review step's completion and return the next action for run_id.
+        """Record one active review step's completion or an early stop; return the next action.
 
-        Use while current_step is triage, primary_review, deep_review, or synthesis. This updates
-        review progress; finish_qa_orchestration records the host's final session outcome only after
-        synthesis reaches awaiting_host_outcome or this tool records a partial/blocked early stop.
+        Use only at triage, primary_review, deep_review, or synthesis; pass current_step as
+        completed_step. To finalize awaiting_host_outcome after synthesis or a partial/blocked early
+        stop, call finish_qa_orchestration; an early stop requires the same outcome.
 
-        Pass current_step as completed_step; stale or out-of-order steps are rejected. Malformed
-        arguments, incompatible signals, and unknown or expired run_ids return errors without advancing
-        the run. This call is non-idempotent: if a successful response is lost, inspect
+        - Completed triage: supply exactly one of selected_bundle or selected_profile.
+        - Completed primary review: echo current_profile as completed_profile. The final profile also
+          requires risk_signals ({} if none apply); omit signals on earlier profiles.
+        - Early stop: omit route selectors, completed_profile, and risk_signals.
+
+        Stale/out-of-order steps, malformed arguments, incompatible signals, and unknown/expired
+        run_ids fail without advancing. Non-idempotent: after a lost successful response, read
         get_qa_orchestration before continuing; replaying the prior step is rejected.
-
-        - Completed triage requires exactly one of selected_bundle or selected_profile; omit both when
-          stopping early.
-        - After each completed primary review, send current_profile as completed_profile. On the final
-          profile, also send risk_signals ({} if none apply); omit both on an early stop.
-        - An early stop records partial or blocked but still needs finish_qa_orchestration with the
-          same outcome. After synthesis, use finish_qa_orchestration for the host's final outcome.
         """
         return service.advance_qa_orchestration(
             AdvanceQaOrchestrationRequest(
@@ -210,15 +207,15 @@ def build_server(service: OrchestratorService) -> FastMCP:
 
     @mcp.tool(title="Read QA session state", annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def get_qa_orchestration(run_id: RunId) -> QaOrchestrationSession:
-        """Read one existing QA session's state by run_id: current step, status, and next action.
+        """Read a retained session's content-free QA state and stage model policy.
 
-        Includes that session's current-stage model_policy. To inspect the server-wide provider,
-        models, and reasoning for all stages of new sessions without a run_id, use
-        get_qa_orchestration_model_policy().
+        Use run_id on the server retaining that session to resume or reconcile a lost
+        advance_qa_orchestration response. Reads do not extend expires_at. Errors `unknown run_id` or
+        `expired session` require a new session via start_qa_orchestration.
 
-        This content-free read does not change session state or extend the TTL. An unknown or expired
-        session cannot be recovered here, so start a new one. Use advance_qa_orchestration to complete
-        an active review step or finish_qa_orchestration to record the host's final session outcome.
+        For all-stage server policy, use get_qa_orchestration_model_policy(); for review progress or
+        final outcome, use advance_qa_orchestration or finish_qa_orchestration, respectively.
+        Local stdio access requires no additional credentials.
         """
         return service.get_qa_orchestration(run_id)
 
@@ -232,21 +229,18 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ),
         ],
     ) -> QaOrchestrationSession:
-        """Record the host's final QA session outcome for run_id after synthesis or an early stop.
+        """Record the host's final QA session outcome after synthesis or an early stop.
 
-        This closes the review flow; it cannot complete an active review step or bypass synthesis.
-        Use advance_qa_orchestration to record review-step completion or a partial/blocked early stop.
+        Call only at awaiting_host_outcome or after advance_qa_orchestration records an early stop.
+        After synthesis, the host chooses completed, partial, or blocked; after an early stop, outcome
+        must match its recorded partial/blocked status. Active review steps need advance_qa_orchestration.
 
-        Call when advance_qa_orchestration reaches `awaiting_host_outcome` after synthesis, or after
-        it records an early stop. For an early stop, submit the same `partial` or `blocked` outcome.
+        Repeating the same outcome returns the retained terminal session. A different outcome raises
+        `conflicting final outcome` without changing status; premature finalization raises
+        `outcome is not ready`.
 
-        - Repeating the same outcome returns the retained terminal session. A conflicting outcome is
-          rejected with `conflicting final outcome` and leaves the stored status unchanged.
-        - Retention ends when the configured TTL expires (1800 seconds by default), a terminal session
-          is evicted to free capacity, or the service restarts. After removal, the run_id is unavailable
-          and the outcome can no longer be deduplicated.
-
-        This tool records the host's decision; it does not make it.
+        Retention ends at configured TTL expiry (1800s default), terminal-session eviction, or server
+        restart; removed run_ids cannot be deduplicated.
         """
         return service.finish_qa_orchestration(
             outcome=outcome,
