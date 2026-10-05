@@ -30,10 +30,10 @@ Project instructions still guide the host. The orchestrator adds explicit sessio
 
 ## Quick start
 
-Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), Git, and Codex CLI/Desktop. Replace `<commit-sha>` with the full hash of the revision you want to run:
+Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), Git, and Codex CLI/Desktop. Quick Start uses the reviewed server revision:
 
 ```bash
-codex mcp add qa-orchestrator -- uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-orchestrator-mcp
+codex mcp add qa-orchestrator -- uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@06b68cedbcdde7e3c7faa5f1c49833391e1ea315' qa-orchestrator-mcp
 ```
 
 This registers the server without a checkout or model-setup wizard. With no saved policy, `model_policy` is `host_default`: use the model and reasoning configured by the MCP host. Existing explicit policies remain active; see the installation guide to switch one back to host defaults.

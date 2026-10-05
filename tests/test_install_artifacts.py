@@ -292,7 +292,10 @@ def test_readme_leads_with_pinned_uvx_and_a_short_ruby_example():
     quick_start = readme.split("## Quick start", 1)[1].split("\n## ", 1)[0]
 
     assert "codex mcp add qa-orchestrator -- uvx" in quick_start
-    assert "git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>" in quick_start
+    assert re.search(
+        r"git\+https://github\.com/Rbkmen/qa-orchestrator\.git@[0-9a-f]{40}",
+        quick_start,
+    )
     assert "qa-orchestrator-mcp" in quick_start
     assert "qa-orch setup" not in quick_start
     assert "Ruby" in readme
