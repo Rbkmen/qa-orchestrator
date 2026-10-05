@@ -70,15 +70,19 @@ def collect_checks() -> list[CheckResult]:
             checks.append(CheckResult("model policy", "fail", str(exc)))
         else:
             configured = settings.model_policy_path.exists()
+            if selection.mode == "host_default":
+                detail = (
+                    f"host_default policy loaded from {settings.model_policy_path}"
+                    if configured
+                    else "host model and reasoning defaults are active; no model policy file is configured"
+                )
+            else:
+                detail = f"{selection.provider.value} policy loaded from {settings.model_policy_path}"
             checks.append(
                 CheckResult(
                     name="model policy",
                     status="pass" if configured else "info",
-                    detail=(
-                        f"{selection.provider.value} policy loaded from {settings.model_policy_path}"
-                        if configured
-                        else "default OpenAI policy is active; run 'qa-orch setup' to choose Anthropic"
-                    ),
+                    detail=detail,
                 )
             )
 

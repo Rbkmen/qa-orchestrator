@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import stat
@@ -6,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from qa_orchestrator.contracts import ReviewAgent
+from qa_orchestrator.model_policy import ModelProvider, ModelSelection
 from qa_orchestrator.orchestration import (
     OrchestrationError,
     OrchestrationStep,
@@ -55,6 +57,41 @@ def test_unfinished_session_survives_restart_and_transition_refreshes_ttl(tmp_pa
     restored = _orchestrator(store, clock).get(started.run_id)
 
     assert restored.model_dump() == advanced.model_dump()
+
+
+
+def test_legacy_session_without_policy_mode_restores_as_configured(tmp_path):
+    path = tmp_path / "sessions.sqlite3"
+    store = SqliteSessionStore(path)
+    selection = ModelSelection(
+        provider=ModelProvider.OPENAI,
+        triage_model="gpt-6-luna",
+        primary_model="gpt-6-sol",
+        deep_model="gpt-6-sol",
+        synthesis_model="gpt-6-sol",
+    )
+    orchestrator = QaOrchestrator(
+        ttl_seconds=60,
+        max_sessions=10,
+        model_selection=selection,
+        session_store=store,
+        clock=FakeClock(),
+    )
+    started = orchestrator.start("ordinary_review")
+    payload = json.loads(started.model_dump_json())
+    payload["model_policy"].pop("mode", None)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE sessions SET payload = ? WHERE run_id = ?",
+            (json.dumps(payload), started.run_id),
+        )
+
+    restored = _orchestrator(store, FakeClock()).get(started.run_id)
+
+    assert restored.model_policy.mode == "configured"
+    assert restored.model_policy.provider is ModelProvider.OPENAI
+    assert restored.model_policy.model == "gpt-6-luna"
+    assert restored.model_policy.reasoning == "max"
 
 
 def test_explicit_delete_removes_only_target_from_memory_and_recovery_storage(tmp_path):

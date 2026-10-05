@@ -20,8 +20,9 @@ from pydantic import (
 from qa_orchestrator.contracts import QaTaskOutcome, QaTaskType, ReviewAgent, ReviewBundle
 from qa_orchestrator.model_policy import (
     DEFAULT_MODEL_SELECTION,
+    HostDefaultModelSelection,
+    ModelPolicySelection,
     ModelProvider,
-    ModelSelection,
     ReasoningEffort,
     is_valid_model_id,
     reasoning_capabilities_verified,
@@ -166,6 +167,7 @@ def assess_deep_review(signals: DeepReviewSignals) -> DeepReviewAssessment:
 class ModelPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    mode: Literal["configured"] = "configured"
     provider: ModelProvider = ModelProvider.OPENAI
     model: OrchestrationModel | str
     reasoning: ReasoningEffort
@@ -179,6 +181,15 @@ class ModelPolicy(BaseModel):
         return value
 
 
+class HostDefaultStagePolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mode: Literal["host_default"] = "host_default"
+
+
+StageModelPolicy = ModelPolicy | HostDefaultStagePolicy
+
+
 def _model_value(model: str) -> OrchestrationModel | str:
     try:
         return OrchestrationModel(model)
@@ -186,7 +197,20 @@ def _model_value(model: str) -> OrchestrationModel | str:
         return model
 
 
-def build_model_policies(selection: ModelSelection) -> MappingProxyType:
+def build_model_policies(selection: ModelPolicySelection) -> MappingProxyType:
+    if isinstance(selection, HostDefaultModelSelection):
+        return MappingProxyType(
+            {
+                step: HostDefaultStagePolicy()
+                for step in (
+                    OrchestrationStep.TRIAGE,
+                    OrchestrationStep.PRIMARY_REVIEW,
+                    OrchestrationStep.DEEP_REVIEW,
+                    OrchestrationStep.SYNTHESIS,
+                )
+            }
+        )
+
     return MappingProxyType(
         {
             OrchestrationStep.TRIAGE: ModelPolicy(
@@ -245,7 +269,7 @@ class QaOrchestrationSession(BaseModel):
     completed_profiles: list[ReviewAgent] = Field(default_factory=list)
     deep_assessment: DeepReviewAssessment | None = None
     deep_reason_code: OrchestrationReason | None = None
-    model_policy: ModelPolicy | None = None
+    model_policy: StageModelPolicy | None = None
     next_action: str = Field(min_length=1)
     read_only: Literal[True] = True
     host_owns_decisions: Literal[True] = True
@@ -365,7 +389,7 @@ class QaOrchestrator:
         *,
         ttl_seconds: int,
         max_sessions: int,
-        model_selection: ModelSelection | None = None,
+        model_selection: ModelPolicySelection | None = None,
         session_store: SqliteSessionStore | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
@@ -395,7 +419,7 @@ class QaOrchestrator:
             self._evict_terminal_sessions_until_capacity(slots_required=0)
 
     @property
-    def model_selection(self) -> ModelSelection:
+    def model_selection(self) -> ModelPolicySelection:
         return self._model_selection
 
     def start(self, task_type: QaTaskType) -> QaOrchestrationSession:

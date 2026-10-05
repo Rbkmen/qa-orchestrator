@@ -30,6 +30,7 @@ def test_model_policy_assigns_requested_models_and_reasoning(step, model, reason
     assert policy.model.value == model
     assert policy.reasoning == reasoning
     assert set(policy.model_dump(mode="json")) == {
+        "mode",
         "provider",
         "model",
         "reasoning",

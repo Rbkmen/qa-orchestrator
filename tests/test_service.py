@@ -61,8 +61,7 @@ def test_service_exposes_fixed_profiles_and_bundles(tmp_path):
     assert session.recommended_bundles == [ReviewBundle.ORDINARY_MR]
     assert session.selected_bundle is None
     assert session.review_profiles == []
-    assert session.model_policy.model.value == "gpt-6-luna"
-    assert session.model_policy.reasoning == "max"
+    assert session.model_policy.mode == "host_default"
     assert service.prepare_review_route(ReviewAgent.CODE_EXPLORER).display_name == (
         "Faraday — Evidence Investigator"
     )
@@ -83,6 +82,35 @@ def test_service_advances_with_a_fixed_bundle(tmp_path):
 
     assert advanced.selected_bundle is ReviewBundle.ORDINARY_MR
     assert advanced.review_profiles == list(REVIEW_BUNDLES[ReviewBundle.ORDINARY_MR])
+
+
+
+def test_service_keeps_host_default_policy_across_stage_transitions(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review")
+
+    primary = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=OrchestrationStep.TRIAGE,
+            status="completed",
+            selected_profile=ReviewAgent.CODE_REVIEWER,
+        )
+    )
+    synthesis = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=primary.current_step,
+            status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+            risk_signals=DeepReviewSignals(),
+        )
+    )
+
+    assert started.model_policy.mode == "host_default"
+    assert primary.model_policy.mode == "host_default"
+    assert synthesis.current_step is OrchestrationStep.SYNTHESIS
+    assert synthesis.model_policy.mode == "host_default"
 
 
 def test_service_rejects_unknown_review_profile(tmp_path):

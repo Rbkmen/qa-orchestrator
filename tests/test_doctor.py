@@ -41,6 +41,29 @@ def test_doctor_checks_are_read_only(monkeypatch, tmp_path):
     assert not data_dir.exists()
 
 
+def test_doctor_reports_host_defaults_when_no_model_policy_exists(monkeypatch, tmp_path):
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("QA_ORCHESTRATOR_SESSION_STORE_PATH", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    checks = {check.name: check for check in collect_checks()}
+
+    assert checks["model policy"].status == "info"
+    assert "host model and reasoning defaults are active" in checks["model policy"].detail
+
+
+def test_doctor_reports_saved_host_default_policy(monkeypatch, tmp_path):
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("QA_ORCHESTRATOR_SESSION_STORE_PATH", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "model-policy.json").write_text('{"mode":"host_default"}', encoding="utf-8")
+
+    checks = {check.name: check for check in collect_checks()}
+
+    assert checks["model policy"].status == "pass"
+    assert "host_default policy loaded" in checks["model policy"].detail
+
+
 def test_doctor_json_output(capsys, monkeypatch, tmp_path):
     monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.delenv("QA_ORCHESTRATOR_SESSION_STORE_PATH", raising=False)

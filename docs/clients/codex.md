@@ -32,21 +32,9 @@ codex mcp add qa-orchestrator -- uvx \
   qa-orchestrator-mcp
 ```
 
-Replace `<commit-sha>` with the full commit hash and use the same hash in the
-setup and server commands. See the [installation guide](../INSTALLATION.md)
-for details and the update procedure.
+Replace `<commit-sha>` with the full commit hash. If you later configure explicit models with `uvx`, use the same pinned ref for setup and the server. See the [installation guide](../INSTALLATION.md) for the update procedure.
 
-Configure the model policy once before using the server. With a checkout, run
-`uv run qa-orch setup` from the repository. Without a checkout, run:
-
-```bash
-uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-orch setup
-```
-
-The wizard records the selected provider and model policy; it does not give
-Codex access to a model provider. Select models available to your configured
-Codex account and environment. Use the same pinned ref in the
-setup command and the server command.
+No model setup is needed before first use. Without a saved policy, `host_default` uses the model and reasoning already configured in Codex. To use explicit per-stage settings, run `uv run qa-orch setup` from a checkout or the matching pinned `uvx` command; return to host settings with `qa-orch setup --host-default`. The wizard records settings but does not grant Codex access to a provider.
 
 ### Configure in the ChatGPT desktop app
 
@@ -85,7 +73,7 @@ command. Verify the registration with `codex mcp list` and restart Codex.
 
 ## Host-agent instructions
 
-Add or merge the canonical [host-agent instructions](../../client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md) in persistent Codex instructions. They include the shared evidence, severity, affected-area, and final-finding contract as well as orchestration mechanics. Registering the MCP server alone does not load these instructions. Without a checkout, open the same file on GitHub at the server's commit SHA by replacing `main` in the [link](https://github.com/Rbkmen/qa-orchestrator/blob/main/client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md). Workspace and repository rules may add local routing, safety, and domain-specific details, but must preserve the shared evidence and finding standards. Do not install a separate routing skill.
+FastMCP sends concise advisory instructions in MCP initialization to clients that surface them. The full canonical [host-agent instructions](../../client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md) include the shared evidence, severity, affected-area, and final-finding contract. Add a reference to them in persistent Codex instructions when you want the full contract kept in scope; this is not required for registration. Without a checkout, open the same file on GitHub at the server's commit SHA by replacing `main` in the [link](https://github.com/Rbkmen/qa-orchestrator/blob/main/client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md). Workspace and repository rules may add local routing, safety, and domain-specific details, but must preserve the shared evidence and finding standards. Do not install a separate routing skill.
 
 Codex remains the host and owns evidence, decisions, and external actions. Follow the returned `model_policy` for each stage. Execution speed and latency preferences are controlled by the user's host/provider settings; the orchestrator does not set or override them. Prompts, evidence, and model outputs stay in Codex.
 

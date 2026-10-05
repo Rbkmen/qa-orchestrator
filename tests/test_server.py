@@ -31,6 +31,34 @@ async def test_server_exposes_nine_tools(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_server_initialization_includes_advisory_trust_boundary(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+
+    async with Client(build_server(service)) as client:
+        initialization = await client.initialize()
+
+    instructions = initialization.instructions
+    assert instructions
+    assert "advisory" in instructions.lower()
+    assert "cannot confirm" in instructions.lower()
+    assert "each review ran" in instructions.lower()
+    assert "host_default" in instructions
+
+
+@pytest.mark.asyncio
+async def test_advance_tool_documents_host_reported_transition_limits(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+
+    async with Client(build_server(service)) as client:
+        tools = {tool.name: tool for tool in await client.list_tools()}
+
+    description = tools["advance_qa_orchestration"].description
+    assert "host-reported" in description
+    assert "cannot confirm" in description
+    assert "risk_signals reflect evidence" in description
+
+
+@pytest.mark.asyncio
 async def test_server_publishes_tool_descriptions(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
@@ -76,7 +104,13 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
         assert annotations.idempotentHint is True
         assert annotations.openWorldHint is False
 
-    assert tools["get_qa_orchestration_model_policy"].inputSchema["properties"] == {}
+    policy_tool = tools["get_qa_orchestration_model_policy"]
+    assert policy_tool.inputSchema["properties"] == {}
+    policy_output = policy_tool.outputSchema
+    assert policy_output is not None
+    mode_schema = policy_output.get("properties", {}).get("mode")
+    assert mode_schema is not None
+    assert set(mode_schema.get("enum", [])) == {"configured", "host_default"}
     assert tools["list_qa_orchestrations"].inputSchema["properties"] == {}
     assert tools["list_qa_orchestrations"].outputSchema is not None
     assert tools["get_qa_orchestration_catalog"].inputSchema["properties"] == {}
@@ -299,7 +333,17 @@ async def test_get_qa_orchestration_model_policy_returns_loaded_policy(tmp_path)
     async with Client(build_server(service)) as client:
         result = await client.call_tool("get_qa_orchestration_model_policy", {})
 
-    assert result.structured_content == loaded_policy
+    assert result.structured_content == {"mode": "configured", **loaded_policy}
+
+
+@pytest.mark.asyncio
+async def test_model_policy_tool_reports_host_default_when_unconfigured(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+
+    async with Client(build_server(service)) as client:
+        result = await client.call_tool("get_qa_orchestration_model_policy", {})
+
+    assert result.structured_content == {"mode": "host_default"}
 
 
 @pytest.mark.asyncio
@@ -345,12 +389,7 @@ async def test_orchestration_tools_return_no_evidence_fields(tmp_path):
         )
 
     payload = result.structured_content
-    assert payload["model_policy"] == {
-        "provider": "openai",
-        "model": "gpt-6-luna",
-        "reasoning": "max",
-        "reasoning_capabilities_verified": True,
-    }
+    assert payload["model_policy"] == {"mode": "host_default"}
     assert payload["read_only"] is True
     assert payload["host_owns_decisions"] is True
     assert payload["allowed_profiles"] == [profile.value for profile in ReviewAgent]

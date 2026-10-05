@@ -5,8 +5,10 @@ from datetime import UTC, date, datetime
 
 import pytest
 
+import qa_orchestrator.model_policy as model_policy_module
 from qa_orchestrator.cli import PROVIDER_OPTIONS, main
 from qa_orchestrator.model_policy import (
+    DEFAULT_MODEL_SELECTION,
     GPT6_MODEL_CATALOG_MAX_REVIEW_AGE_DAYS,
     GPT6_MODEL_CATALOG_REVIEWED_ON,
     GPT6_MODEL_CATALOG_SOURCE_URL,
@@ -36,6 +38,73 @@ def test_model_selection_round_trips_without_credentials(tmp_path):
 
     assert load_model_selection(path) == selection
     assert "api_key" not in json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_missing_model_policy_uses_host_default(tmp_path):
+    selection = load_model_selection(tmp_path / "missing.json")
+
+    assert getattr(selection, "mode", None) == "host_default"
+    assert selection.model_dump(mode="json") == {"mode": "host_default"}
+
+
+def test_legacy_model_policy_without_mode_remains_configured(tmp_path):
+    path = tmp_path / "model-policy.json"
+    path.write_text(
+        json.dumps(
+            {
+                "provider": "anthropic",
+                "triage_model": "claude-triage",
+                "primary_model": "claude-review",
+                "deep_model": "claude-deep",
+                "synthesis_model": "claude-summary",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    selection = load_model_selection(path)
+
+    assert getattr(selection, "mode", None) == "configured"
+    assert selection.provider is ModelProvider.ANTHROPIC
+    assert selection.primary_model == "claude-review"
+
+
+def test_host_default_model_policy_round_trips(tmp_path):
+    selection_type = getattr(model_policy_module, "HostDefaultModelSelection", None)
+    assert selection_type is not None
+
+    path = tmp_path / "model-policy.json"
+    selection = selection_type()
+    save_model_selection(path, selection)
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"mode": "host_default"}
+    assert load_model_selection(path) == selection
+
+
+
+def test_host_default_policy_builds_a_policy_for_every_stage(tmp_path):
+    selection = load_model_selection(tmp_path / "missing.json")
+
+    policies = build_model_policies(selection)
+
+    assert set(policies) == {
+        OrchestrationStep.TRIAGE,
+        OrchestrationStep.PRIMARY_REVIEW,
+        OrchestrationStep.DEEP_REVIEW,
+        OrchestrationStep.SYNTHESIS,
+    }
+    assert all(
+        policy.model_dump(mode="json") == {"mode": "host_default"}
+        for policy in policies.values()
+    )
+
+
+def test_loading_malformed_model_policy_still_fails(tmp_path):
+    path = tmp_path / "model-policy.json"
+    path.write_text("{", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="invalid model policy"):
+        load_model_selection(path)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission modes are not available")
@@ -95,12 +164,14 @@ def test_service_uses_selected_models(tmp_path):
 
     session = service.start_qa_orchestration("ordinary_review")
 
+    assert session.model_policy.mode == "configured"
     assert session.model_policy.model == "claude-triage"
     assert session.model_policy.provider is ModelProvider.ANTHROPIC
     assert session.model_policy.reasoning_capabilities_verified is False
 
 
 def test_gpt6_policies_mark_curated_capabilities_as_verified(tmp_path):
+    save_model_selection(tmp_path / "model-policy.json", DEFAULT_MODEL_SELECTION)
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     session = service.start_qa_orchestration("ordinary_review")
@@ -272,6 +343,70 @@ def test_setup_command_writes_selected_policy(tmp_path, monkeypatch):
     selection = load_model_selection(tmp_path / "model-policy.json")
     assert selection.provider is ModelProvider.ANTHROPIC
     assert selection.primary_model == "claude-balanced"
+
+
+def test_setup_host_default_writes_policy_without_provider_values(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+
+    assert main(["setup", "--host-default"]) == 0
+
+    payload = json.loads((tmp_path / "model-policy.json").read_text(encoding="utf-8"))
+    assert payload == {"mode": "host_default"}
+    assert "хостом" in capsys.readouterr().out.lower()
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("--provider", "anthropic"),
+        ("--triage-model", "claude-fast"),
+        ("--triage-reasoning", "high"),
+    ],
+)
+def test_setup_host_default_rejects_explicit_model_options(
+    tmp_path, monkeypatch, capsys, option, value
+):
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+
+    assert main(["setup", "--host-default", option, value]) == 2
+
+    assert not (tmp_path / "model-policy.json").exists()
+    assert "combine" in capsys.readouterr().err.lower()
+
+
+def test_config_show_reports_host_default_without_model_values(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+
+    assert main(["config", "show"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["configured"] is False
+    assert payload["selection"] == {"mode": "host_default"}
+
+
+def test_setup_wizard_replaces_existing_host_default_policy(tmp_path, monkeypatch):
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+    (tmp_path / "model-policy.json").write_text('{"mode": "host_default"}', encoding="utf-8")
+
+    assert main(
+        [
+            "setup",
+            "--provider",
+            "anthropic",
+            "--triage-model",
+            "claude-fast",
+            "--primary-model",
+            "claude-balanced",
+            "--deep-model",
+            "claude-deep",
+            "--synthesis-model",
+            "claude-balanced",
+        ]
+    ) == 0
+
+    selection = load_model_selection(tmp_path / "model-policy.json")
+    assert selection.mode == "configured"
+    assert selection.provider is ModelProvider.ANTHROPIC
 
 
 def test_setup_command_writes_openai_reasoning(tmp_path, monkeypatch):

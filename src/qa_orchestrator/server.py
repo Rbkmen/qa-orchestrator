@@ -12,7 +12,7 @@ from qa_orchestrator.contracts import (
     ReviewBundle,
     ReviewRoute,
 )
-from qa_orchestrator.model_policy import ModelSelection
+from qa_orchestrator.model_policy import ModelPolicyResponse
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
     DeepReviewSignals,
@@ -57,8 +57,18 @@ RunId = Annotated[
 CompletableStep = Literal["triage", "primary_review", "deep_review", "synthesis"]
 
 
+SERVER_INSTRUCTIONS = (
+    "These instructions are advisory; the host owns review decisions and model execution. "
+    "Follow the ordered review profiles and report completed_profile and risk_signals accurately. "
+    "The orchestrator validates the sequence the host reports; it cannot confirm each review ran "
+    "or verify that host-reported risk_signals reflect evidence. "
+    "In host_default model-policy mode, use the model and reasoning configured by the host. "
+    "Full workflow guidance remains in client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md."
+)
+
+
 def build_server(service: OrchestratorService) -> FastMCP:
-    mcp = FastMCP(name="qa-orchestrator")
+    mcp = FastMCP(name="qa-orchestrator", instructions=SERVER_INSTRUCTIONS)
 
     @mcp.tool(title="Read specialist review checklist", annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def prepare_qa_orchestration(
@@ -108,9 +118,16 @@ def build_server(service: OrchestratorService) -> FastMCP:
         """
         return service.get_qa_orchestration_catalog()
 
-    @mcp.tool(title="Inspect server model settings", annotations=READ_ONLY_TOOL_ANNOTATIONS)
-    def get_qa_orchestration_model_policy() -> ModelSelection:
-        """Read server-wide model settings for every stage: provider, model IDs, and reasoning.
+    @mcp.tool(
+        title="Inspect server model settings",
+        annotations=READ_ONLY_TOOL_ANNOTATIONS,
+        output_schema=ModelPolicyResponse.model_json_schema(),
+    )
+    def get_qa_orchestration_model_policy() -> ModelPolicyResponse:
+        """Read the server-wide model policy used to create new sessions.
+
+        The mode is either host_default (use the host's configured model and reasoning)
+        or configured (use the returned per-stage provider, model IDs, and reasoning).
 
         Use to inspect the policy loaded for new sessions; takes no arguments.
         - Existing session state and current-stage policy: get_qa_orchestration(run_id).
@@ -120,7 +137,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
         connection after file changes. No session is created and no provider is contacted;
         the result does not verify which model the host executed.
         """
-        return service.get_qa_orchestration_model_policy()
+        return ModelPolicyResponse.from_selection(service.get_qa_orchestration_model_policy())
 
     @mcp.tool(annotations=STATE_TOOL_ANNOTATIONS)
     def start_qa_orchestration(
@@ -216,6 +233,9 @@ def build_server(service: OrchestratorService) -> FastMCP:
 
         - Triage: select exactly one bundle or profile.
         - Primary review: follow profile order; the final profile requires risk_signals ({} if none).
+        - Trust boundary: completed_profile and risk_signals are host-reported. The server
+          validates the reported sequence, but cannot confirm each review ran or that
+          risk_signals reflect evidence.
         - Early stop: omit route selectors, completed_profile, and risk_signals.
         - Success saves state and refreshes expires_at.
         - Invalid/stale requests and unknown/expired run_ids fail without advancing.

@@ -45,6 +45,13 @@ CLIENT_RULE_CONTRACT = {
     "MCP failure fallback": (r"MCP is unavailable",),
     "terminal task outcome": (r"final (?:reported )?(?:status|outcome)",),
     "run-id consistency": (r"run_id",),
+    "host-default model mode": (r"\bhost_default\b",),
+    "reported sequence limit": (
+        r"orchestrator validates.*host reports.*cannot confirm",
+    ),
+    "risk-signal evidence limit": (
+        r"cannot verify.*risk_signals.*reflect evidence",
+    ),
 }
 
 
@@ -226,7 +233,6 @@ def test_canonical_client_rules_use_transition_state_and_recovery_read():
 
 def test_operational_artifacts_describe_review_bundles_and_statuses():
     artifacts = [
-        ROOT / "README.md",
         ROOT / "docs/ORCHESTRATION_POLICY.md",
         ROOT / "client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md",
     ]
@@ -261,6 +267,52 @@ def test_operational_artifacts_describe_review_bundles_and_statuses():
             assert phrase in text, f"{phrase} is missing from {artifact}"
         for phrase in forbidden:
             assert phrase not in text
+
+
+def test_uvx_update_keeps_existing_model_policy():
+    installation = (ROOT / "docs/INSTALLATION.md").read_text(encoding="utf-8")
+    update = installation.split("For a no-checkout installation", 1)[1].split(
+        "For Claude Code", 1
+    )[0]
+
+    assert "@<commit-sha>' qa-orch setup" not in update
+    assert "Do not rerun `qa-orch setup` as part of a" in update
+    assert "only if you want to configure explicit per-stage models" in update
+
+
+def test_policy_docs_tie_deep_review_to_risk_assessment():
+    policy = (ROOT / "docs/ORCHESTRATION_POLICY.md").read_text(encoding="utf-8")
+
+    assert "according to the deep-review assessment" in policy
+    assert "according to the active model-policy mode" not in policy
+
+
+def test_readme_leads_with_pinned_uvx_and_a_short_ruby_example():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    quick_start = readme.split("## Quick start", 1)[1].split("\n## ", 1)[0]
+
+    assert "codex mcp add qa-orchestrator -- uvx" in quick_start
+    assert "git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>" in quick_start
+    assert "qa-orchestrator-mcp" in quick_start
+    assert "qa-orch setup" not in quick_start
+    assert "Ruby" in readme
+    assert "ordinary qa" in readme.lower()
+    assert "advance_qa_orchestration" in readme
+    assert "[bundle and profile catalog](docs/ORCHESTRATION_POLICY.md#fixed-bundles-and-profile-names)" in readme
+    assert "[complete MCP tool contract](docs/ORCHESTRATION_POLICY.md#mcp-tools)" in readme
+    assert "## MCP interface" not in readme
+    assert len(readme.splitlines()) <= 120
+
+
+def test_host_default_is_documented_as_the_no_setup_first_run():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    installation = (ROOT / "docs/INSTALLATION.md").read_text(encoding="utf-8")
+    policy = (ROOT / "docs/ORCHESTRATION_POLICY.md").read_text(encoding="utf-8")
+
+    assert "host_default" in readme
+    assert "setup --host-default" in installation
+    assert "host_default" in policy
+    assert "cannot confirm" in policy.lower()
 
 
 def test_documentation_contains_no_retired_runtime_terms():
@@ -397,6 +449,6 @@ main()
     finally:
         await transport.close()
 
-    assert result.structured_content["provider"] == "openai"
+    assert result.structured_content == {"mode": "host_default"}
     assert not marker.exists(), "Server startup attempted an outbound request"
     assert not dependency_home.exists(), "Server startup created a dependency update cache"

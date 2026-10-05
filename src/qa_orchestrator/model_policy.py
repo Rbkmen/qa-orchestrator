@@ -9,9 +9,17 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from tempfile import mkstemp
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    model_serializer,
+    model_validator,
+)
 
 MODEL_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 GPT6_MODEL_CATALOG_SOURCE_URL = "https://developers.openai.com/api/docs/guides/latest-model"
@@ -171,6 +179,7 @@ class ModelSelection(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    mode: Literal["configured"] = "configured"
     provider: ModelProvider
     triage_model: str = Field(min_length=1, max_length=128, pattern=MODEL_ID_PATTERN)
     primary_model: str = Field(min_length=1, max_length=128, pattern=MODEL_ID_PATTERN)
@@ -205,6 +214,81 @@ class ModelSelection(BaseModel):
         return self
 
 
+class HostDefaultModelSelection(BaseModel):
+    """Use the connected host's model and reasoning defaults for every stage."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mode: Literal["host_default"] = "host_default"
+
+
+ModelPolicySelection = Annotated[
+    ModelSelection | HostDefaultModelSelection,
+    Field(discriminator="mode"),
+]
+_MODEL_POLICY_ADAPTER = TypeAdapter(ModelPolicySelection)
+
+
+class ModelPolicyResponse(BaseModel):
+    """Flat MCP response shape for configured and host-default model policies."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mode: Literal["configured", "host_default"]
+    provider: ModelProvider | None = None
+    triage_model: str | None = Field(default=None, min_length=1, max_length=128, pattern=MODEL_ID_PATTERN)
+    primary_model: str | None = Field(default=None, min_length=1, max_length=128, pattern=MODEL_ID_PATTERN)
+    deep_model: str | None = Field(default=None, min_length=1, max_length=128, pattern=MODEL_ID_PATTERN)
+    synthesis_model: str | None = Field(default=None, min_length=1, max_length=128, pattern=MODEL_ID_PATTERN)
+    triage_reasoning: ReasoningEffort | None = None
+    primary_reasoning: ReasoningEffort | None = None
+    deep_reasoning: ReasoningEffort | None = None
+    synthesis_reasoning: ReasoningEffort | None = None
+
+    @model_validator(mode="after")
+    def validate_policy_shape(self) -> Self:
+        configured_values = (
+            self.provider,
+            self.triage_model,
+            self.primary_model,
+            self.deep_model,
+            self.synthesis_model,
+            self.triage_reasoning,
+            self.primary_reasoning,
+            self.deep_reasoning,
+            self.synthesis_reasoning,
+        )
+        if self.mode == "host_default":
+            if any(value is not None for value in configured_values):
+                raise ValueError("host-default policy cannot include configured model values")
+            return self
+        if any(value is None for value in configured_values):
+            raise ValueError("configured policy requires provider, model IDs, and reasoning")
+
+        ModelSelection(
+            provider=self.provider,
+            triage_model=self.triage_model,
+            primary_model=self.primary_model,
+            deep_model=self.deep_model,
+            synthesis_model=self.synthesis_model,
+            triage_reasoning=self.triage_reasoning,
+            primary_reasoning=self.primary_reasoning,
+            deep_reasoning=self.deep_reasoning,
+            synthesis_reasoning=self.synthesis_reasoning,
+        )
+        return self
+
+    @model_serializer(mode="wrap")
+    def serialize_without_absent_values(self, handler) -> dict[str, object]:
+        if self.mode == "host_default":
+            return {"mode": self.mode}
+        return handler(self)
+
+    @classmethod
+    def from_selection(cls, selection: ModelPolicySelection) -> Self:
+        return cls.model_validate(selection.model_dump(mode="python"))
+
+
 DEFAULT_MODEL_SELECTION = ModelSelection(
     provider=ModelProvider.OPENAI,
     triage_model="gpt-6-luna",
@@ -215,21 +299,23 @@ DEFAULT_MODEL_SELECTION = ModelSelection(
 )
 
 
-def load_model_selection(path: Path) -> ModelSelection:
+def load_model_selection(path: Path) -> ModelPolicySelection:
     """Load a local selection, or return the safe default when it is absent."""
 
     if not path.exists() and not path.is_symlink():
-        return DEFAULT_MODEL_SELECTION
+        return HostDefaultModelSelection()
     if path.is_symlink() or not path.is_file():
         raise ValueError(f"model policy must be a regular file: {path}")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return ModelSelection.model_validate(payload)
+        if isinstance(payload, dict) and "mode" not in payload:
+            payload = {"mode": "configured", **payload}
+        return _MODEL_POLICY_ADAPTER.validate_python(payload)
     except (OSError, json.JSONDecodeError, TypeError, ValidationError) as exc:
         raise ValueError(f"invalid model policy: {path}") from exc
 
 
-def save_model_selection(path: Path, selection: ModelSelection) -> None:
+def save_model_selection(path: Path, selection: ModelPolicySelection) -> None:
     """Persist a selection atomically without storing credentials."""
 
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

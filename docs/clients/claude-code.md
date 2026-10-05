@@ -32,27 +32,15 @@ claude mcp add --transport stdio --scope user qa-orchestrator -- \
   qa-orchestrator-mcp
 ```
 
-Replace `<commit-sha>` with the full commit hash and use the same hash in the
-setup and server commands. See the [installation guide](../INSTALLATION.md)
-for details and the update procedure.
+Replace `<commit-sha>` with the full commit hash. If you later configure explicit models with `uvx`, use the same pinned ref for setup and the server. See the [installation guide](../INSTALLATION.md) for the update procedure.
 
-Configure the model policy once before connecting. With a checkout, run
-`uv run qa-orch setup` from the repository. Without a checkout, run:
-
-```bash
-uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-orch setup
-```
-
-Choose a provider and models available to your Claude Code environment. The
-wizard stores only the non-secret model policy locally; it does not install a
-model provider or grant access to one, and it never asks for API keys. Use the
-same pinned ref in the one-time setup command and the MCP command.
+No model setup is needed before first use. Without a saved policy, `host_default` uses the model and reasoning already configured in Claude Code. To use explicit per-stage settings, run `uv run qa-orch setup` from a checkout or the matching pinned `uvx` command; return to host settings with `qa-orch setup --host-default`. The wizard stores only non-secret settings and does not grant Claude Code access to a provider.
 
 Verify the connection with `claude mcp get qa-orchestrator`, `claude mcp list`, or `/mcp` inside Claude Code.
 
 ## Host-agent instructions
 
-For a project without `CLAUDE.md`, combine the shared host-agent instructions with the Claude Code-specific workflow. From the QA Orchestrator repository root, run:
+MCP initialization supplies concise advisory rules to clients that surface them. To keep the full evidence contract and Claude Code workflow in scope across tasks, optionally add persistent project instructions. From the QA Orchestrator repository root, combine:
 
 ```bash
 cat client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md \
@@ -62,8 +50,9 @@ cat client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md \
 
 The generic file defines the shared evidence and finding contract; the Claude
 file adds the client workflow. If `CLAUDE.md` already exists, merge both files
-into it without replacing existing project instructions. Registering the MCP
-server alone does not load host-agent rules.
+into it without replacing existing project instructions. MCP initialization
+also carries concise advisory rules for clients that surface them; persistent
+host rules keep the full contract in scope.
 
 If you installed with `uvx` and have no checkout, open both the [shared
 instructions](https://github.com/Rbkmen/qa-orchestrator/blob/main/client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md)

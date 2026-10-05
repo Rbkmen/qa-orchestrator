@@ -17,23 +17,27 @@ The primary host owns:
 - CodeGraph and source-MCP calls;
 - code/file changes and all writes to external systems.
 
-QA Orchestrator owns only deterministic profile routing, bounded orchestration state, and deep-review signal evaluation. The orchestrator does not accept evidence, prompts, or model outputs and does not perform autonomous writes.
+QA Orchestrator owns only deterministic profile routing, bounded orchestration state, and deep-review signal evaluation. The orchestrator does not accept evidence, prompts, or model outputs and does not perform autonomous writes. It validates the sequence the host reports; it cannot confirm the host performed each review or that host-reported risk signals reflect evidence.
+
+FastMCP sends concise advisory instructions during initialization. The canonical full host rules remain in `client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md`; initialization metadata does not enforce host behavior.
 
 ## Model policy
 
-The local console command `qa-orch setup` selects OpenAI or Anthropic and four
-model IDs. It also selects provider-specific reasoning/effort for triage,
-primary review, synthesis, and deep review: OpenAI uses `reasoning.effort`,
-while Anthropic uses `output_config.effort`. For OpenAI reasoning models
-that support it, send `none` explicitly to disable reasoning; omitting the
-parameter can enable the model default instead. For non-reasoning models such
-as GPT-4.1, omit the parameter. For Anthropic, `none` is a local sentinel
-meaning omit effort and use model defaults. `high` remains the default
-recommendation for deep escalation when the selected model supports it. The
-selected values are returned in each active session's `model_policy`; the
-orchestrator never calls the models and never stores API keys. The default
-remains OpenAI/Codex. Model IDs and reasoning are configured independently for
-each stage and returned in the session's `model_policy`.
+A missing model-policy file selects `host_default`. The session returns only
+`{"mode":"host_default"}`; the host uses its own configured model and reasoning
+for each stage. `qa-orch setup` is optional and writes an explicit `configured`
+policy with a provider, four model IDs, and provider-specific reasoning/effort.
+Use `qa-orch setup --host-default` to return to host mode. Legacy policy files
+without `mode` continue to mean `configured`.
+
+In `configured` mode, OpenAI uses `reasoning.effort` and Anthropic uses
+`output_config.effort`. For OpenAI reasoning models that support it, send `none`
+explicitly to disable reasoning; omitting the parameter can enable the model
+default instead. For non-reasoning models such as GPT-4.1, omit the parameter.
+For Anthropic, `none` is a local sentinel meaning omit effort and use model
+defaults. `high` remains the recommendation for deep escalation when supported.
+The orchestrator never calls models or stores API keys. Model IDs and reasoning
+are configured independently for each stage and returned in `model_policy`.
 
 | Stage | Selected model | Reasoning / effort | Responsibility |
 |---|---|---|---|
@@ -42,7 +46,7 @@ each stage and returned in the session's `model_policy`.
 | Deep escalation | configured `deep_model` | configured `deep_reasoning` (default `high`) | Optional read-only check for a complex or high-risk case |
 | Synthesis | configured `synthesis_model` | configured `synthesis_reasoning` (default `medium`) | Consolidate the result after host validation |
 
-The orchestrator returns only the next provider, model, reasoning policy, and transition constraints. `reasoning_capabilities_verified` is true only when the exact model ID has an explicit local catalog entry for that provider; false means the host must verify the selected effort with its provider. This flag does not check account access or live provider capabilities. Execution speed and latency preferences are controlled by the host user's settings; the orchestrator does not set or override them. The primary host runs the models in its own environment, validates findings, and makes the final decision. The orchestrator does not invoke or throttle a provider itself.
+In `configured` mode, the session returns the current stage's provider, model, reasoning policy, and transition constraints. In `host_default`, it returns no provider, model, or reasoning values; the host uses its own configuration. `reasoning_capabilities_verified` is true only when the exact model ID has an explicit local catalog entry for that provider; false means the host must verify the selected effort with its provider. This flag does not check account access or live provider capabilities. Execution speed and latency preferences are controlled by the host user's settings; the orchestrator does not set or override them. The primary host runs the models in its own environment, validates findings, and makes the final decision. The model-policy response is configuration metadata, not proof of model execution.
 
 ### Keeping the recommended model catalog current
 
@@ -50,11 +54,11 @@ The GPT-6 catalog source and last-review date live beside `MODEL_CATALOGS` in `s
 
 ## Orchestration flow
 
-1. The host calls `start_qa_orchestration(task_type)` and receives a `run_id`, the configured triage model and reasoning effort (default `max`), and the next action.
+1. The host calls `start_qa_orchestration(task_type)` and receives a `run_id`, the active model-policy mode, and the next action. `host_default` uses the host's configured model and reasoning; `configured` returns explicit per-stage settings.
 2. After triage, the host calls `advance_qa_orchestration` with one fixed bundle or one of the ten `ReviewAgent` profiles.
-3. For a bundle, the host runs the configured primary model once per profile in the returned order and passes the role identifier as `completed_profile` after each stage; the orchestrator does not skip roles or accept an arbitrary order.
-4. In the same transition that completes the last primary-review profile, the host must supply structured `risk_signals` (use an empty object when no signals apply); the orchestrator applies the fixed deep-review rules and either goes directly to configured synthesis or returns the configured deep model with its configured reasoning (default `high`). Do not send `risk_signals` on the later synthesis transition.
-5. After deep review, the host returns to the configured synthesis model.
+3. For a bundle, the host runs a primary-review stage once per profile in the returned order and passes each role as `completed_profile`. The orchestrator validates the sequence the host reports, but cannot confirm a review actually ran.
+4. In the same transition that reports the last primary-review profile, the host supplies evidence-based `risk_signals` (use an empty object when none apply). The orchestrator applies fixed deep-review rules to those host-reported signals; it cannot verify that they reflect evidence. It then advances to synthesis or optional deep review according to the deep-review assessment; model-policy mode determines which model policy is returned for the selected stage. Do not send `risk_signals` on the synthesis transition.
+5. After deep review, the host uses the returned synthesis policy or its own configured model in `host_default` mode.
 6. After synthesis, the state becomes `awaiting_host_outcome`; the host calls `finish_qa_orchestration` with the same `run_id` and a status of `completed`, `partial`, or `blocked`. The orchestrator moves the session to its final status. For an early stop, first pass `partial` or `blocked` to `advance_qa_orchestration`, then finish the session with that same status.
 
 `recommended_bundles` in the initial session is a task-type-based shortlist: ordinary reviews recommend `ordinary_mr`; widget reviews recommend `widget` and `widget_js`; epic, requirements, and QA-planning tasks recommend `requirements`; autotest implementation recommends `autotest` and `ordinary_mr`; `other` has no shortlist. These suggestions never restrict `allowed_bundles`; the host selects based on changed paths and confirmed stack.
@@ -240,12 +244,14 @@ The orchestrator must publish exactly:
 
 `read_only=true` and `host_owns_decisions=true` must be preserved in every orchestration state. Do not add a tool that generates text, accepts evidence, changes external state, selects a model for the host, or silently calls another agent.
 
-`get_qa_orchestration_model_policy` takes no arguments and returns the selection
-loaded by the current server for new sessions. It creates no session and does
-not reread disk or contact providers. After setup, restart the server connection
-before checking it. This reports configured policy, not host execution telemetry.
-For an existing recovered session, follow its returned `model_policy`; the next
-transition uses the restarted server's policy.
+`get_qa_orchestration_model_policy` takes no arguments and returns the tagged
+selection loaded by the current server for new sessions: `host_default` has no
+provider/model/reasoning fields; `configured` returns explicit per-stage values.
+It creates no session, rereads no disk, and contacts no provider. After changing
+a policy, restart the server connection before checking it. This is configuration
+metadata, not host execution telemetry. For an existing recovered session,
+follow its returned `model_policy`; a later transition uses the restarted
+server's policy.
 
 `list_qa_orchestrations` takes no arguments and returns brief content-free metadata
 for non-expired sessions retained by this server, including retained terminal

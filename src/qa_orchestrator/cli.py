@@ -13,6 +13,7 @@ from qa_orchestrator.model_policy import (
     DEFAULT_MODEL_SELECTION,
     MODEL_CATALOGS,
     REASONING_EFFORTS,
+    HostDefaultModelSelection,
     ModelCatalogEntry,
     ModelProvider,
     ModelSelection,
@@ -447,6 +448,11 @@ def _reasoning_value(
 
 def _setup(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(prog="qa-orch setup")
+    parser.add_argument(
+        "--host-default",
+        action="store_true",
+        help="use the model and reasoning configured by the MCP host",
+    )
     parser.add_argument("--provider", choices=[provider.value for provider, _ in PROVIDER_OPTIONS])
     for field, _ in ROLE_LABELS:
         parser.add_argument(f"--{field.replace('_', '-')}")
@@ -456,6 +462,21 @@ def _setup(argv: Sequence[str]) -> int:
             choices=REASONING_EFFORTS,
         )
     args = parser.parse_args(argv)
+    explicit_settings = [
+        args.provider,
+        *(getattr(args, field) for field, _ in ROLE_LABELS),
+        *(getattr(args, field) for field, _ in REASONING_ROLE_LABELS),
+    ]
+    if args.host_default:
+        if any(value is not None for value in explicit_settings):
+            raise ValueError("--host-default cannot be combined with explicit model settings")
+        settings = Settings.from_env()
+        save_model_selection(settings.model_policy_path, HostDefaultModelSelection())
+        print(
+            "Модельная политика использует модель и reasoning, выбранные хостом: "
+            f"{settings.model_policy_path}"
+        )
+        return 0
 
     provider_is_interactive = args.provider is None
     all_model_flags_supplied = all(getattr(args, field) is not None for field, _ in ROLE_LABELS)
@@ -484,7 +505,8 @@ def _setup(argv: Sequence[str]) -> int:
     current: ModelSelection | None = None
     if settings.model_policy_path.exists():
         try:
-            current = load_model_selection(settings.model_policy_path)
+            loaded = load_model_selection(settings.model_policy_path)
+            current = loaded if isinstance(loaded, ModelSelection) else None
         except ValueError as exc:
             print(
                 copy["unreadable_policy"].format(error=exc),
@@ -620,6 +642,7 @@ def _reload_config() -> int:
 def _help() -> int:
     print("Использование:")
     print("  qa-orch setup          язык -> провайдер -> модель -> reasoning/effort")
+    print("  qa-orch setup --host-default  использовать модель хоста")
     print("  qa-orch config show    показать текущую модельную политику")
     print("  qa-orch reload         перечитать и проверить модельную политику")
     print("  qa-orch                запустить MCP STDIO-сервер")

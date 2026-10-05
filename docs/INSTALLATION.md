@@ -2,7 +2,7 @@
 
 QA Orchestrator is a local MCP server that provides fixed QA routing and bounded orchestration state. It runs over MCP STDIO when the host client starts it; no separate background service, database, or API key is required by the server.
 
-The host client—not the orchestrator—runs the model stages, gathers evidence, and makes the final QA decision. Model access follows the host user's account and permissions.
+The host client—not the orchestrator—runs the model stages, gathers evidence, and makes the final QA decision. Model access follows the host user's account and permissions. The server also sends concise advisory instructions during MCP initialization; clients that surface them can use the core trust and model-mode rules automatically.
 
 ## Requirements
 
@@ -35,7 +35,6 @@ git clone https://github.com/Rbkmen/qa-orchestrator.git
 cd qa-orchestrator
 uv sync --locked
 uv run qa-orchestrator-doctor
-uv run qa-orch setup
 ```
 
 `uv sync --locked` creates the project environment using the committed lockfile, installs the server and its
@@ -49,10 +48,17 @@ and the platform-specific MCP launcher. It does not contact external services,
 create files, change the session store, or report a session count. Use `--json`
 in scripts.
 
-`qa-orch setup` opens the local console wizard. First choose Russian or English
-for this setup run; the language is not saved in `model-policy.json`. Then
-choose the AI environment (`OpenAI / Codex` or `Anthropic / Claude`) and models
-for triage, primary review, deep review, and synthesis. Each stage includes a
+### Optional: configure per-stage models
+
+A fresh install does not need model setup. With no policy file, the server uses
+`host_default`, and the host runs each stage using its own configured model and
+reasoning. To set or reset an explicit per-stage policy, run `qa-orch setup`;
+to return to host settings, run `qa-orch setup --host-default`.
+
+The `qa-orch setup` wizard first chooses Russian or English for that setup run;
+the language is not saved in `model-policy.json`. Then choose the AI environment
+(`OpenAI / Codex` or `Anthropic / Claude`) and models for triage, primary review,
+deep review, and synthesis. Each stage includes a
 short explanation of its role. Choose the provider-specific reasoning/effort
 for each model; the menu contains recommended model IDs and an option to enter
 another exact ID. The wizard does not contact provider APIs or confirm account
@@ -102,21 +108,18 @@ for current provider details. The compatibility entries for Claude Opus 4.6
 and Sonnet 4.6 allow `low`, `medium`, `high`, and `max`, but not `xhigh`; see
 the [Anthropic effort guide](https://platform.claude.com/docs/en/build-with-claude/effort).
 
-`config show` reads the saved file (or defaults if it is missing). `reload`
-validates it in a separate CLI process; it does not reload a connected server.
-After changing the policy, restart the client's MCP server connection and call
-`get_qa_orchestration_model_policy` with `{}`. That read-only MCP tool returns
-the in-memory provider, four model IDs, and their reasoning levels used for new
-sessions. It does not reread the file, start a session, contact the provider,
-or prove which model the host actually executed. Use host execution details
-for that last check.
+`config show` reads the saved file and reports `host_default` when no explicit
+policy exists. `reload` validates the file in a separate CLI process; it does
+not reload a connected server. After changing a policy, restart the client's
+MCP server connection and call `get_qa_orchestration_model_policy` with `{}`.
+That read-only tool returns the loaded mode and, only for `configured`, the
+per-stage settings. It does not reread disk, contact providers, or prove which
+model the host actually executed. Check host execution details for that.
 
-If no policy exists, the server uses `gpt-6-luna` / `max` for triage and
-`gpt-6-sol` with `medium`, `high`, and `medium` for primary review, deep review,
-and synthesis respectively. Accepting defaults in setup preserves an existing
-selection. The wizard
-colors providers, model IDs, and reasoning values; use `NO_COLOR=1` to disable
-colors or `FORCE_COLOR=1` to force them.
+Without a policy file, every stage uses `host_default`; the host's configured
+model and reasoning apply. Existing explicit policy files remain in `configured`
+mode until changed. The setup wizard colors providers, model IDs, and reasoning
+values; use `NO_COLOR=1` to disable colors or `FORCE_COLOR=1` to force them.
 
 ### Setup without prompts
 
@@ -137,14 +140,21 @@ This writes the local policy immediately. It does not change an already running
 server. For PowerShell, enter the command on one line or replace shell
 continuations with PowerShell backticks.
 
-### Alternative: use GitHub without a checkout
+### Recommended: use GitHub without a checkout
 
 `uvx` can run the commands directly from GitHub on all supported platforms.
-First, replace `<commit-sha>` below with the full commit hash you want to use, then
-save the model policy in your user configuration:
+Replace `<commit-sha>` with the full hash of the revision you want to use, then
+register the server in Codex:
 
 ```bash
-uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-orch setup
+codex mcp add qa-orchestrator -- uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-orchestrator-mcp
+```
+
+No model setup is needed for a fresh installation. To switch an existing
+explicit policy back to host settings, run:
+
+```bash
+uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-orch setup --host-default
 ```
 
 To inspect the saved policy or validate it again without a checkout, run:
@@ -154,13 +164,11 @@ uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-o
 uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-orch reload
 ```
 
-Then register the MCP command in the client as shown below. The
-`qa-orchestrator-mcp` command starts the STDIO server and should be launched
-by the MCP client, not run by itself as a setup command. The Codex guide
-includes the `uvx` registration command; the [Claude Code guide](clients/claude-code.md) includes
-its equivalent. For reproducible team setup, pin an immutable commit SHA
-instead of a moving branch. Use the exact same pinned URL in the one-time
-setup and the MCP server command shown above.
+The `qa-orchestrator-mcp` command starts the STDIO server and should be
+launched by the MCP client, not run by itself in a terminal. The [Codex guide](clients/codex.md)
+and [Claude Code guide](clients/claude-code.md) show client-specific registration.
+For reproducible team setup, pin an immutable commit SHA instead of a moving
+branch. Use the same pinned URL for the server and any optional setup command.
 
 `uvx` supports Git sources and pinned refs; see the [uv
 documentation](https://docs.astral.sh/uv/guides/tools/).
@@ -210,9 +218,9 @@ Each user must register the server in their own local Codex environment. Use
 either the platform's checkout entry point or the `uvx` command. MCP
 configuration is not shared automatically between machines.
 
-## 3. Add the host instructions
+## 3. Optional persistent host instructions
 
-Registering the MCP server makes its tools available; persistent instructions tell the host when and how to use them. Add this rule to the applicable Codex `AGENTS.md` or persistent instructions, replacing the placeholder with the path to that user's checkout:
+The server sends concise advisory instructions in the MCP initialization response; clients that surface initialization metadata receive the core model-mode and trust-boundary rules automatically. The full workflow and evidence contract remain in the canonical host rules. If you keep persistent Codex instructions, add a reference to that file; replace the placeholder below with the path to the user's checkout:
 
 ```text
 For implementation-aware QA reviews, read and follow the canonical QA
@@ -220,7 +228,7 @@ Orchestrator instructions at:
 <path-to-qa-orchestrator>/client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md
 ```
 
-If the target `AGENTS.md` already exists, merge the rule instead of replacing the file. The linked file is the canonical source for orchestration mechanics; keep workspace-specific routing and output requirements in the workspace rules.
+If the target `AGENTS.md` already exists, merge the reference instead of replacing the file. The linked file is the canonical source for orchestration mechanics; keep workspace-specific routing and output requirements in the workspace rules. Persistent instructions are optional for MCP registration and first use.
 
 If you installed with `uvx` and do not have a checkout, use the canonical
 [Codex host instructions on GitHub](https://github.com/Rbkmen/qa-orchestrator/blob/main/client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md)
@@ -254,7 +262,7 @@ access can still require network connectivity.
 
 ## Data and privacy
 
-Evidence, source code, logs, prompts, model responses, and final QA decisions stay with the host agent. Active orchestration state is bounded and held in process memory by default. To resume unfinished orchestration after a server restart, optionally set `QA_ORCHESTRATOR_SESSION_STORE_PATH` to a local SQLite file. That file holds only current structured session state; finalization deletes the session's row and keeps the database file. It does not contain task evidence, content, finalized outcomes, history, or statistics. Use one server process per store file. Without that setting, no session state is written to disk. The model policy is stored at `$HOME/.qa-orchestrator/model-policy.json` by default; set `QA_ORCHESTRATOR_DATA_DIR` or `QA_ORCHESTRATOR_MODEL_POLICY_PATH` to change that location. It contains provider, model IDs, and reasoning/effort settings, not credentials or task data.
+Evidence, source code, logs, prompts, model responses, and final QA decisions stay with the host agent. Active orchestration state is bounded and held in process memory by default. To resume unfinished orchestration after a server restart, optionally set `QA_ORCHESTRATOR_SESSION_STORE_PATH` to a local SQLite file. That file holds only current structured session state; finalization deletes the session's row and keeps the database file. It does not contain task evidence, content, finalized outcomes, history, or statistics. Use one server process per store file. Without that setting, no session state is written to disk. The model policy is stored at `$HOME/.qa-orchestrator/model-policy.json` by default; set `QA_ORCHESTRATOR_DATA_DIR` or `QA_ORCHESTRATOR_MODEL_POLICY_PATH` to change that location. A `configured` policy contains provider, model IDs, and reasoning/effort settings; `host_default` contains only its mode. Neither contains credentials or task data.
 
 ### Configuration overrides
 
@@ -298,13 +306,14 @@ The profile lookup tool is now named `prepare_qa_orchestration`. Replace
 `prepare_review_route` in any pinned host instructions or direct tool calls;
 the old MCP tool name is no longer published.
 
-For a no-checkout installation, choose the new commit SHA and use it in both
-the one-time setup command and the MCP server command. Rerun `qa-orch setup`
-from that commit, then update the existing MCP registration and restart the
-client. For Codex CLI, remove and re-add the entry:
+For a no-checkout installation, choose the new commit SHA and update the
+existing MCP registration, then restart the client. The saved model policy
+remains in effect across updates. Do not rerun `qa-orch setup` as part of a
+routine update; run it only if you want to configure explicit per-stage models.
+Use `qa-orch setup --host-default` to return to the host's model and reasoning
+defaults. For Codex CLI, remove and re-add the entry:
 
 ```bash
-uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-orch setup
 codex mcp remove qa-orchestrator
 codex mcp add qa-orchestrator -- uvx \
   --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' \
@@ -333,7 +342,7 @@ server command on the same commit.
 | Server is enabled but tools do not appear | Restart Codex and confirm the configured platform entry point exists. |
 | Models differ between the CLI and MCP | Confirm both use the same policy path. Restart the server connection, then call `get_qa_orchestration_model_policy` again. `reload` alone does not update the connected server. |
 | The host uses a different model | The MCP returns instructions, not execution telemetry. Verify model selection in the host; report unavailable stage settings explicitly. |
-| Invalid model policy or session store | Run `qa-orchestrator-doctor --json`. Correct the policy with setup; preserve a broken recovery store for diagnosis and configure a new store path if you need a fresh start. |
+| Invalid model policy or session store | Run `qa-orchestrator-doctor --json`. Correct a policy with `qa-orch setup` or return to host defaults with `qa-orch setup --host-default`; preserve a broken recovery store for diagnosis and configure a new store path if you need a fresh start. |
 | Server is missing or disconnected in Claude Code | Run `claude mcp list`, `claude mcp get qa-orchestrator`, or `/mcp`; verify the command and arguments in the client guide. |
 | `uvx` cannot fetch the GitHub source | Confirm `uv` and Git are installed and that this machine can reach GitHub; for a reproducible team setup, pin an immutable commit SHA. |
 | Python or dependency error | Confirm Python is 3.12+ and run `uv sync` from the repository root. |
