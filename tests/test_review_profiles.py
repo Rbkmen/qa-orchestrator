@@ -155,8 +155,8 @@ def test_review_bundle_catalog_has_the_approved_immutable_order():
         ),
         bundle_type.AUTOTEST: (
             ReviewAgent.CODE_REVIEWER,
-            ReviewAgent.PR_TEST_ANALYZER,
             ReviewAgent.TYPESCRIPT_REVIEWER,
+            ReviewAgent.PR_TEST_ANALYZER,
         ),
         bundle_type.REQUIREMENTS: (
             ReviewAgent.CODE_EXPLORER,

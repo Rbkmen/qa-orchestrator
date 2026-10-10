@@ -15,7 +15,7 @@ OpenAI recommends evaluating prompting guidance with the selected model and work
 
 | Change scope | Expected route | Check |
 |---|---|---|
-| Broad TypeScript test-automation change | `autotest` | Runs code review, test analysis, and TypeScript review. |
+| Broad TypeScript test-automation change | `autotest` | Runs code review, TypeScript review, and test analysis. |
 | Broad non-TypeScript test-automation change | `ordinary_mr` | Does not run an irrelevant TypeScript profile. |
 | Broad React + TypeScript widget change | `widget` | Includes React and TypeScript review. |
 | Broad JavaScript React widget change | `widget_js` | Includes React and general code review, without TypeScript review. |

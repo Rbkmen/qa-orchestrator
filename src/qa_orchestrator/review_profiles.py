@@ -215,8 +215,8 @@ REVIEW_BUNDLES: Mapping[ReviewBundle, tuple[ReviewAgent, ...]] = MappingProxyTyp
         ),
         ReviewBundle.AUTOTEST: (
             ReviewAgent.CODE_REVIEWER,
-            ReviewAgent.PR_TEST_ANALYZER,
             ReviewAgent.TYPESCRIPT_REVIEWER,
+            ReviewAgent.PR_TEST_ANALYZER,
         ),
         ReviewBundle.REQUIREMENTS: (
             ReviewAgent.CODE_EXPLORER,

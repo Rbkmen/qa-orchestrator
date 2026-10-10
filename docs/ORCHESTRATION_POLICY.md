@@ -173,7 +173,7 @@ flowchart LR
 | `python_backend` | `code_explorer` → `python_reviewer` → `pr_test_analyzer` |
 | `mobile` | `code_explorer` → `mobile_reviewer` → `pr_test_analyzer` |
 | `security` | `code_explorer` → `security_reviewer` → `silent_failure_hunter` |
-| `autotest` | `code_reviewer` → `pr_test_analyzer` → `typescript_reviewer` |
+| `autotest` | `code_reviewer` → `typescript_reviewer` → `pr_test_analyzer` |
 | `requirements` | `code_explorer` → `code_reviewer` |
 
 | Technical profile | Display name |
