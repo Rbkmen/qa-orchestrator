@@ -14,11 +14,11 @@ Suppose a diff adds an early return to `BudgetGuard#check!` when the limit is ab
 ```text
 Host → start_qa_orchestration({"task_type":"ordinary_review"})
 MCP  → {"run_id":"qar-7977ccfeb8ac487f9c83f756452cee1a","current_step":"triage","model_policy":{"mode":"host_default"}}
-Host → inspect Ruby diff; choose ruby_reviewer; call prepare_qa_orchestration({"agent_profile":"ruby_reviewer"})
+Host → inspect Ruby diff; choose ruby_reviewer
 Host → advance_qa_orchestration({"run_id":"qar-7977ccfeb8ac487f9c83f756452cee1a","completed_step":"triage","status":"completed","selected_profile":"ruby_reviewer"})
-MCP  → {"current_step":"primary_review","current_profile":"ruby_reviewer"}
+MCP  → primary_review; selected_review_routes returns the checklist and execution_groups=[["ruby_reviewer"]]
 Host → review against the returned checklist; then report completion and evidence-based signals
-Host → advance_qa_orchestration({"run_id":"qar-7977ccfeb8ac487f9c83f756452cee1a","completed_step":"primary_review","status":"completed","completed_profile":"ruby_reviewer","risk_signals":{}})
+Host → advance_qa_orchestration({"run_id":"qar-7977ccfeb8ac487f9c83f756452cee1a","completed_step":"primary_review","status":"completed","completed_profiles":["ruby_reviewer"],"risk_signals":{}})
 MCP  → {"current_step":"synthesis"}
 Host → advance_qa_orchestration({"run_id":"qar-7977ccfeb8ac487f9c83f756452cee1a","completed_step":"synthesis","status":"completed"})
 MCP  → {"current_step":"awaiting_host_outcome"}
@@ -33,7 +33,7 @@ Project instructions still guide the host. The orchestrator adds explicit sessio
 Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), Git, and Codex CLI/Desktop. Quick Start uses the reviewed server revision:
 
 ```bash
-codex mcp add qa-orchestrator -- uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@06b68cedbcdde7e3c7faa5f1c49833391e1ea315' qa-orchestrator-mcp
+codex mcp add qa-orchestrator -- uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@9c278d8be0362e79de39e1a3e530a96fab48e414' qa-orchestrator-mcp
 ```
 
 This registers the server without a checkout or model-setup wizard. With no saved policy, `model_policy` is `host_default`: use the model and reasoning configured by the MCP host. Existing explicit policies remain active; see the installation guide to switch one back to host defaults.
