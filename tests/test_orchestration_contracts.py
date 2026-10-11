@@ -137,6 +137,17 @@ def test_risk_signals_require_a_completed_profile():
         )
 
 
+def test_skip_synthesis_is_only_valid_after_a_completed_primary_review():
+    with pytest.raises(ValidationError, match="skip_synthesis"):
+        AdvanceQaOrchestrationRequest(
+            run_id="qar-0123456789abcdef0123456789abcdef",
+            completed_step=OrchestrationStep.TRIAGE,
+            status="completed",
+            selected_profile=ReviewAgent.CODE_REVIEWER,
+            skip_synthesis=True,
+        )
+
+
 def test_completed_primary_review_requires_completed_profile():
     with pytest.raises(ValidationError, match="completed_profile"):
         AdvanceQaOrchestrationRequest(

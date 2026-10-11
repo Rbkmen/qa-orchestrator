@@ -30,6 +30,10 @@ CLIENT_RULE_CONTRACT = {
     "user-controlled execution speed": USER_CONTROLLED_SPEED_PATTERNS,
     "risk signals": (r"\brisk_signals\b",),
     "completed profile": (r"\bcompleted_profile\b",),
+    "execution group schedule": (r"\bexecution_groups\b",),
+    "parallel profile launch": (r"same group.{0,120}concurrently",),
+    "sequential fallback": (r"sequential fallback",),
+    "ordered profile reporting": (r"report each profile.{0,120}fixed (?:route )?order",),
     "read-only boundary": (r"read_only=true",),
     "host-owned decisions": (r"host_owns_decisions=true",),
     "host-owned evidence": (
@@ -287,6 +291,18 @@ def test_policy_docs_tie_deep_review_to_risk_assessment():
     assert "according to the active model-policy mode" not in policy
 
 
+def test_review_instructions_reuse_evidence_and_escalate_only_actionable_gaps():
+    instructions = (
+        ROOT / "client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md"
+    ).read_text(encoding="utf-8")
+    policy = (ROOT / "docs/ORCHESTRATION_POLICY.md").read_text(encoding="utf-8")
+
+    assert "Inspect the full diff once" in instructions
+    assert "reopen only the source needed" in instructions
+    assert "CI, Stage, or runtime checks were not run" in policy
+    assert "carry the named unresolved question" in policy
+
+
 def test_readme_leads_with_pinned_uvx_and_a_short_ruby_example():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     quick_start = readme.split("## Quick start", 1)[1].split("\n## ", 1)[0]
@@ -335,7 +351,7 @@ def test_documentation_contains_no_retired_runtime_terms():
 
 
 @pytest.mark.asyncio
-async def test_launcher_exposes_nine_tools(monkeypatch, tmp_path):
+async def test_launcher_exposes_ten_tools(monkeypatch, tmp_path):
     virtual_env = str(Path(sys.executable).parent.parent)
     monkeypatch.setenv("VIRTUAL_ENV", virtual_env)
     monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
@@ -362,6 +378,10 @@ async def test_launcher_exposes_nine_tools(monkeypatch, tmp_path):
                 "prepare_qa_orchestration",
                 {"agent_profile": "code_explorer"},
             )
+            prepared_batch = await client.call_tool(
+                "prepare_qa_orchestration_bundle",
+                {"bundle": "ruby_backend"},
+            )
             listed = await client.call_tool("list_qa_orchestrations", {})
             catalog = await client.call_tool("get_qa_orchestration_catalog", {})
             started = await client.call_tool("start_qa_orchestration", {"task_type": "other"})
@@ -374,6 +394,7 @@ async def test_launcher_exposes_nine_tools(monkeypatch, tmp_path):
 
     assert names == {
         "prepare_qa_orchestration",
+        "prepare_qa_orchestration_bundle",
         "get_qa_orchestration_model_policy",
         "finish_qa_orchestration",
         "start_qa_orchestration",
@@ -384,6 +405,12 @@ async def test_launcher_exposes_nine_tools(monkeypatch, tmp_path):
         "delete_qa_orchestration",
     }
     assert prepared.structured_content["profile"] == "code_explorer"
+    assert prepared_batch.structured_content["bundle"] == "ruby_backend"
+    assert [route["profile"] for route in prepared_batch.structured_content["routes"]] == [
+        "code_explorer",
+        "ruby_reviewer",
+        "pr_test_analyzer",
+    ]
     assert deleted.structured_content == {
         "run_id": started.structured_content["run_id"], "deleted": True
     }

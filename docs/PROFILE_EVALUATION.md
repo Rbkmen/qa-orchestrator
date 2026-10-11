@@ -29,6 +29,18 @@ OpenAI recommends evaluating prompting guidance with the selected model and work
 | Narrow Python async or MCP-tool change | `python_reviewer` | Checks Python/MCP contracts without imposing a test framework. |
 | Narrow native permission or lifecycle change | `mobile_reviewer` | Checks affected platform behavior and keeps device verification separate. |
 
+## Parallel schedule smoke checks
+
+These checks validate host scheduling semantics, not model quality or elapsed-time claims:
+
+1. Read `execution_groups` from a bundle response and confirm flattening the groups exactly matches the returned route order.
+2. With stub workers controlled by a start/release barrier, confirm every profile in a multi-profile group starts before any is released, and the next group does not start until all current-group workers finish.
+3. Confirm completed profiles are reported with separate `advance_qa_orchestration` calls in fixed route order even if workers finish in a different order; never submit transitions concurrently.
+4. Disable worker support and confirm the same groups use the sequential fallback without changing profile order or checklists.
+5. Make one worker fail; confirm it is retried or run in the parent before the group is recorded, and an unresolved failure ends as `partial` or `blocked` rather than a false completion.
+
+The MCP server only publishes the schedule and validates reported transition order; it does not launch workers or verify concurrency. Run these checks in a client adapter or host that can expose worker-start and completion events.
+
 ## Synthetic profile cases
 
 ### 1. Evidence map only — `code_explorer`
@@ -141,7 +153,7 @@ These synthetic cases check the host's signal mapping and the orchestrator's fix
 
 | Evidence state | Signals | Expected route |
 |---|---|---|
-| Sensitive authorization change with a material permission contract unavailable | `high_risk_domain`, `evidence_uncertain` | Deep review: `high_risk_with_uncertainty`. |
+| Sensitive authorization change; primary review leaves a specific permission question that repository evidence could answer | `high_risk_domain`, `evidence_uncertain` | Deep review: `high_risk_with_uncertainty`; investigate only that question. |
 | One relevant cross-service boundary, with no other unresolved complexity | `cross_system_scope` | No deep review; one complexity signal is insufficient. |
 | Authoritative sources conflict about access control | `evidence_conflict`, `high_risk_domain` | Deep review: `critical_evidence_conflict`. |
 | Multiple systems are involved and the reported behavior cannot be reproduced | `cross_system_scope`, `non_reproducible` | Deep review: `multiple_complexity_signals`. |

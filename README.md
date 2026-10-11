@@ -42,7 +42,9 @@ The server sends concise advisory instructions during MCP initialization. The [c
 
 ## Choose a review path
 
-Use one profile for a routine, narrowly scoped, low-risk change. Use a fixed bundle for broad, cross-concern, or high-risk work. The host chooses from changed files and confirmed stack; `recommended_bundles` is a shortlist, not a risk score or restriction.
+Use one profile for a routine, narrowly scoped, low-risk change. Several changed files alone do not require a bundle. Use a fixed bundle for broad, cross-concern, or high-risk work. For a multi-profile bundle, fetch its checklists and `execution_groups` in one call with `prepare_qa_orchestration_bundle(bundle)`. Profiles in one group may run concurrently; wait for the group, then record its profiles one at a time in fixed order. Use sequential execution when the host cannot run workers. The host chooses from changed files and confirmed stack; `recommended_bundles` is a shortlist, not a risk score or restriction.
+
+For a single-profile review only, set `skip_synthesis=true` on the final primary-review transition when the profile reports no findings, no unresolved material questions, and all risk signals are false. This skips only the separate synthesis step: the host still validates and produces the final QA result. Keep synthesis for bundles and any review with findings, unresolved questions, or risk signals.
 
 See the [bundle and profile catalog](docs/ORCHESTRATION_POLICY.md#fixed-bundles-and-profile-names), [deterministic deep-review rules](docs/ORCHESTRATION_POLICY.md#deterministic-deep-review-decision), and [complete MCP tool contract](docs/ORCHESTRATION_POLICY.md#mcp-tools).
 

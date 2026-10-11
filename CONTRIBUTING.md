@@ -65,17 +65,18 @@ directory. Never use production session-store files in development tests.
 
 ## Change a contract deliberately
 
-The public surface has nine tools:
+The public surface has ten tools:
 
 1. `prepare_qa_orchestration` — profile metadata;
-2. `get_qa_orchestration_model_policy` — loaded server policy;
-3. `start_qa_orchestration` — create a session;
-4. `advance_qa_orchestration` — validated transition;
-5. `get_qa_orchestration` — current session state for recovery;
-6. `list_qa_orchestrations` — recover retained, non-expired session identifiers;
-7. `finish_qa_orchestration` — finalize the host-owned outcome;
-8. `get_qa_orchestration_catalog` — fixed profile and bundle discovery before triage;
-9. `delete_qa_orchestration` — explicitly discard one session from memory and recovery storage.
+2. `prepare_qa_orchestration_bundle` — ordered checklists for a selected fixed bundle;
+3. `get_qa_orchestration_model_policy` — loaded server policy;
+4. `start_qa_orchestration` — create a session;
+5. `advance_qa_orchestration` — validated transition;
+6. `get_qa_orchestration` — current session state for recovery;
+7. `list_qa_orchestrations` — recover retained, non-expired session identifiers;
+8. `finish_qa_orchestration` — finalize the host-owned outcome;
+9. `get_qa_orchestration_catalog` — fixed profile and bundle discovery before triage;
+10. `delete_qa_orchestration` — explicitly discard one session from memory and recovery storage.
 
 Update the affected types, state machine, service, and server together. Match
 the exact tool set, input/output schemas, annotations, descriptions, and real

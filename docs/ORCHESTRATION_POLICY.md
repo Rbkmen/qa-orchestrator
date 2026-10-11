@@ -42,7 +42,7 @@ are configured independently for each stage and returned in `model_policy`.
 | Stage | Selected model | Reasoning / effort | Responsibility |
 |---|---|---|---|
 | Triage | configured `triage_model` | configured `triage_reasoning` (default `max`) | Select a fixed review bundle or compatibility profile and identify evidence gaps |
-| Primary review | configured `primary_model` | configured `primary_reasoning` (default `medium`) | Perform sequential implementation-aware review of the selected profiles |
+| Primary review | configured `primary_model` | configured `primary_reasoning` (default `medium`) | Run the declared execution groups; parallelize independent profiles when the host supports it |
 | Deep escalation | configured `deep_model` | configured `deep_reasoning` (default `high`) | Optional read-only check for a complex or high-risk case |
 | Synthesis | configured `synthesis_model` | configured `synthesis_reasoning` (default `medium`) | Consolidate the result after host validation |
 
@@ -55,42 +55,59 @@ The GPT-6 catalog source and last-review date live beside `MODEL_CATALOGS` in `s
 ## Orchestration flow
 
 1. The host calls `start_qa_orchestration(task_type)` and receives a `run_id`, the active model-policy mode, and the next action. `host_default` uses the host's configured model and reasoning; `configured` returns explicit per-stage settings.
-2. After triage, the host calls `advance_qa_orchestration` with one fixed bundle or one of the ten `ReviewAgent` profiles.
-3. For a bundle, the host runs a primary-review stage once per profile in the returned order and passes each role as `completed_profile`. The orchestrator validates the sequence the host reports, but cannot confirm a review actually ran.
-4. In the same transition that reports the last primary-review profile, the host supplies evidence-based `risk_signals` (use an empty object when none apply). The orchestrator applies fixed deep-review rules to those host-reported signals; it cannot verify that they reflect evidence. It then advances to synthesis or optional deep review according to the deep-review assessment; model-policy mode determines which model policy is returned for the selected stage. Do not send `risk_signals` on the synthesis transition.
+2. After triage, the host calls `advance_qa_orchestration` with one fixed bundle or one of the ten `ReviewAgent` profiles. Use one profile for a narrow, single-concern, low-risk review; a higher file count alone does not require a bundle.
+3. For one profile, fetch its checklist with `prepare_qa_orchestration`; for a bundle, fetch all checklists and `execution_groups` once with `prepare_qa_orchestration_bundle(bundle)`. The ordered groups flatten to the returned route order. Run each group as a barrier: profiles in the same group may be reviewed concurrently when the host supports parallel workers; otherwise use the sequential fallback. Wait for all profiles in a group, then report each `completed_profile` one at a time in fixed route order. Never advance concurrent profiles in parallel. Retry a failed role or run it in the parent before reporting the group; if it remains incomplete, end with an honest `partial` or `blocked` outcome. The orchestrator validates the sequence the host reports, but cannot confirm a review actually ran or ran concurrently.
+4. In the same transition that reports the last primary-review profile, the host supplies evidence-based `risk_signals` (use an empty object when none apply). The orchestrator applies fixed deep-review rules to those host-reported signals; it cannot verify that they reflect evidence. The host advances according to the deep-review assessment. For a single-profile route only, it may also set `skip_synthesis=true` when that profile reports no findings, no unresolved material questions, and every risk signal is false. This host attestation skips only the separate synthesis stage; the host still validates and produces the final QA result. Bundles and any non-clean review continue through normal synthesis.
 5. After deep review, the host uses the returned synthesis policy or its own configured model in `host_default` mode.
-6. After synthesis, the state becomes `awaiting_host_outcome`; the host calls `finish_qa_orchestration` with the same `run_id` and a status of `completed`, `partial`, or `blocked`. The orchestrator moves the session to its final status. For an early stop, first pass `partial` or `blocked` to `advance_qa_orchestration`, then finish the session with that same status.
+6. After synthesis or the eligible clean single-profile fast path, the state becomes `awaiting_host_outcome`; the host completes its final QA validation and calls `finish_qa_orchestration` with the same `run_id` and a status of `completed`, `partial`, or `blocked`. The orchestrator moves the session to its final status. For an early stop, first pass `partial` or `blocked` to `advance_qa_orchestration`, then finish the session with that same status.
 
 `recommended_bundles` in the initial session is a task-type-based shortlist: ordinary reviews recommend `ordinary_mr`; widget reviews recommend `widget` and `widget_js`; epic, requirements, and QA-planning tasks recommend `requirements`; autotest implementation recommends `autotest` and `ordinary_mr`; `other` has no shortlist. These suggestions never restrict `allowed_bundles`; the host selects based on changed paths and confirmed stack.
 
 Allowed transitions:
 
 ```text
-Triage → Primary review[1] → ... → Primary review[N]
+Triage → execution group 1 → ... → execution group N
+         [profiles in a group may run concurrently]
+         [record completed profiles one at a time in route order]
+                         ↘ clean single-profile fast path → awaiting host outcome
                                       ↘ Deep review ↗
-                                   Final synthesis → awaiting host outcome
+                         Final synthesis → awaiting host outcome
 ```
 
 Transition identifiers are model-neutral, not model selectors: use the returned `model_policy` for each stage.
 
 Sessions are content-free and in memory by default, with a default TTL of `1800` seconds and a default limit of `100` active sessions. Successful transitions and finalization refresh the TTL; reads do not. Set `QA_ORCHESTRATOR_SESSION_STORE_PATH` to opt into a local SQLite file that restores unfinished structured state after a restart. It contains no evidence, prompts, source, logs, model responses, finalized outcomes, history, or statistics; finalization deletes the stored row. Use one server process per file. The shared cache is bounded, so older terminal sessions may be evicted when new sessions are created. Unknown runs, expired sessions, illegal or repeated transitions, and invalid signals are rejected without changing state. Without the optional store, the host starts a new session after a restart.
 
-Normal status flow for `ordinary_mr`:
+Normal execution schedule for `ordinary_mr`:
 
 ```text
-Triage → Ordinary MR Review
-Primary review → Faraday — Evidence Investigator
-Primary review → Code Reviewer
-Primary review → Test Analyzer
-Final synthesis
-Host → Final QA outcome
+Triage → Faraday — Evidence Investigator
+       → wait for its evidence map
+       → Code Reviewer ─┐
+       → Test Analyzer ─┴→ both may run concurrently
+       → wait for both; record Code Reviewer, then Test Analyzer
+       → Final synthesis
+       → Host final QA outcome
 ```
+
+The bundle tool returns these explicit waves as `execution_groups`; they are
+schedule metadata for the host, not model launches performed by the server.
+Workers receive the shared compact Evidence Packet, relevant deduplicated
+outputs from earlier groups (such as the evidence map), their own checklist,
+and the primary-review model/reasoning from `model_policy`. They do not make
+source-MCP or CodeGraph calls, writes, or final decisions; they return missing
+evidence needs to the parent. The primary host owns evidence retrieval, state
+transitions, candidate validation, synthesis, and the final decision. Parallel
+requests may increase concurrent token use even when elapsed time falls. The
+host's model and reasoning settings remain unchanged.
+
+Bundles always use synthesis. The clean single-profile fast path is available only when the host confirms no findings, no unresolved material questions, and no risk signals; the host still produces the complete final QA result.
 
 Deep read-only review appears only after the last primary-review profile and when the fixed signal rules match; the flow then continues to final synthesis.
 
 ### Adaptive profile selection
 
-The single-profile compatibility path is for narrow reviews. The triage stage should select one profile instead of a full bundle only when the review has one narrow concern, one repository, low risk, and a small changed surface:
+The single-profile compatibility path is for narrow reviews. The triage stage should select one profile instead of a full bundle when the review has one narrow concern, one repository, low risk, and a small related changed surface. File count alone does not define scope:
 
 | Scope | Selection |
 |---|---|
@@ -110,7 +127,7 @@ The `autotest` bundle includes `typescript_reviewer`; use it for broad TypeScrip
 
 ### Compact review context
 
-The host keeps one per-task Evidence Packet and gives each profile only the relevant sections. Evidence items use stable local references such as `E1`, and finding candidates use stable identifiers such as `F-01`. `code_explorer` returns an evidence map and unresolved links, not defect candidates. `code_reviewer` uses that map and reports only concrete candidates supported by the changed code and evidence. Test analysis reports coverage gaps; specialist profiles stay within their returned focus. A finding candidate includes evidence references, confidence, and a verification gap. Profiles do not repeat the full diff or raw logs, and synthesis receives deduplicated candidates and references rather than full transcripts. Routes return only the sections relevant to their profile: evidence map, finding candidates, coverage gaps, and unverified items are separate outputs.
+The host inspects the full diff once and keeps one per-task Evidence Packet with changed behavior, source locators, and verified facts. Give each profile only relevant sections; reopen source only to confirm a concrete candidate or resolve a named link. Evidence items use stable local references such as `E1`, and finding candidates use stable identifiers such as `F-01`. `code_explorer` returns an evidence map and unresolved links, not defect candidates. `code_reviewer` uses that map and reports only concrete candidates supported by the changed code and evidence. Test analysis reports coverage gaps; specialist profiles stay within their returned focus. A finding candidate includes evidence references, confidence, and a verification gap. Profiles do not repeat the full diff or raw logs, and synthesis receives deduplicated candidates and references rather than full transcripts. Routes return only the sections relevant to their profile: evidence map, finding candidates, coverage gaps, and unverified items are separate outputs.
 
 ### Deterministic deep-review decision
 
@@ -134,7 +151,9 @@ The orchestrator enters the optional deep-review branch when one of these rules 
 2. at least two complexity signals are true: `cross_system_scope`, `multiple_plausible_causes`, `non_reproducible`, or `high_blast_radius`;
 3. `evidence_conflict` is true and the conflict is high-impact because `high_risk_domain`, `cross_system_scope`, or `high_blast_radius` is also true.
 
-Map observed conditions to signals only when evidence supports them. Sensitive identity, security, payment, fraud, privacy, or access-control impact maps to `high_risk_domain`; a material missing verification source maps to `evidence_uncertain`; a relevant boundary crossing repositories, services, or systems maps to `cross_system_scope`; multiple plausible causes remaining after investigation map to `multiple_plausible_causes`; disagreement between relevant authoritative sources maps to `evidence_conflict`; an expected behavior that cannot be reproduced maps to `non_reproducible`; and broad impact across consumers or data maps to `high_blast_radius`. A profile's escalation text or an ordinary coverage gap alone does not set a signal. The host supplies the booleans and the fixed rules above determine whether deep review runs.
+Map observed conditions to signals only when evidence supports them. Sensitive identity, security, payment, fraud, privacy, or access-control impact maps to `high_risk_domain`; a specific unresolved material conclusion that a scoped read-only review could plausibly resolve maps to `evidence_uncertain`; a relevant boundary crossing repositories, services, or systems maps to `cross_system_scope`; multiple plausible causes remaining after investigation map to `multiple_plausible_causes`; disagreement between relevant authoritative sources maps to `evidence_conflict`; an expected behavior that cannot be reproduced maps to `non_reproducible`; and broad impact across consumers or data maps to `high_blast_radius`. Do not set `evidence_uncertain` solely because CI, Stage, or runtime checks were not run. Keep such gaps in the verification plan unless they leave a specific high-impact code or contract question the deep review can investigate. A profile's escalation text or an ordinary coverage gap alone does not set a signal. The host supplies the booleans and the fixed rules above determine whether deep review runs.
+
+When deep review is selected, carry the named unresolved question and its Evidence Packet references into the host's review context. Inspect only evidence needed to answer that question; do not repeat the full diff or primary profiles. If resolution requires unavailable runtime or external evidence, mark the question unverified and continue to synthesis.
 
 The returned `deep_assessment` contains `should_escalate`, matched fixed rules, fixed reason codes, and the complexity-signal count. No raw evidence is stored or sent to the orchestrator. `risk_signals` is the only input for deep-review assessment.
 
@@ -144,10 +163,12 @@ The returned `deep_assessment` contains `should_escalate`, matched fixed rules, 
 
 ```mermaid
 flowchart LR
-    Triage --> Evidence["Primary review: evidence investigation"]
-    Evidence --> Code["Primary review: code review"]
-    Code --> Tests["Primary review: test analysis"]
-    Tests --> Synthesis["Final synthesis"]
+    Triage --> Evidence["Group 1: evidence investigation"]
+    Evidence --> Code["Group 2: code review"]
+    Evidence --> Tests["Group 2: test analysis"]
+    Code --> Join{"Wait for group 2"}
+    Tests --> Join
+    Join --> Synthesis["Final synthesis"]
     Synthesis --> Outcome["Host records QA outcome"]
 ```
 
@@ -155,26 +176,28 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    Primary["Final primary-review profile"] --> Signals{"Fixed escalation rule matches?"}
+    Primary["Final primary-review profile"] --> Fast{"One profile, no findings or unresolved questions, no risk signals?"}
+    Fast -- Yes --> Outcome["Host validates and records QA outcome"]
+    Fast -- No --> Signals{"Fixed escalation rule matches?"}
     Signals -- No --> Synthesis["Final synthesis"]
     Signals -- Yes --> Deep["Optional read-only deep review"]
     Deep --> Synthesis
-    Synthesis --> Outcome["Host records QA outcome"]
+    Synthesis --> Outcome
 ```
 
 ## Fixed bundles and profile names
 
-| Bundle | Ordered profiles |
-|---|---|
-| `ordinary_mr` | `code_explorer` → `code_reviewer` → `pr_test_analyzer` |
-| `widget` | `code_explorer` → `react_reviewer` → `typescript_reviewer` → `pr_test_analyzer` |
-| `widget_js` | `code_explorer` → `code_reviewer` → `react_reviewer` → `pr_test_analyzer` |
-| `ruby_backend` | `code_explorer` → `ruby_reviewer` → `pr_test_analyzer` |
-| `python_backend` | `code_explorer` → `python_reviewer` → `pr_test_analyzer` |
-| `mobile` | `code_explorer` → `mobile_reviewer` → `pr_test_analyzer` |
-| `security` | `code_explorer` → `security_reviewer` → `silent_failure_hunter` |
-| `autotest` | `code_reviewer` → `typescript_reviewer` → `pr_test_analyzer` |
-| `requirements` | `code_explorer` → `code_reviewer` |
+| Bundle | Ordered profiles | Execution groups (each group is a barrier) |
+|---|---|---|
+| `ordinary_mr` | `code_explorer` → `code_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`code_reviewer`, `pr_test_analyzer`) |
+| `widget` | `code_explorer` → `react_reviewer` → `typescript_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`react_reviewer`, `typescript_reviewer`, `pr_test_analyzer`) |
+| `widget_js` | `code_explorer` → `code_reviewer` → `react_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`code_reviewer`, `react_reviewer`, `pr_test_analyzer`) |
+| `ruby_backend` | `code_explorer` → `ruby_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`ruby_reviewer`, `pr_test_analyzer`) |
+| `python_backend` | `code_explorer` → `python_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`python_reviewer`, `pr_test_analyzer`) |
+| `mobile` | `code_explorer` → `mobile_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`mobile_reviewer`, `pr_test_analyzer`) |
+| `security` | `code_explorer` → `security_reviewer` → `silent_failure_hunter` | (`code_explorer`) → (`security_reviewer`, `silent_failure_hunter`) |
+| `autotest` | `code_reviewer` → `typescript_reviewer` → `pr_test_analyzer` | (`code_reviewer`, `typescript_reviewer`, `pr_test_analyzer`) |
+| `requirements` | `code_explorer` → `code_reviewer` | (`code_explorer`) → (`code_reviewer`) |
 
 | Technical profile | Display name |
 |---|---|
@@ -233,6 +256,7 @@ only when the host intentionally discards that particular session.
 The orchestrator must publish exactly:
 
 - `prepare_qa_orchestration`;
+- `prepare_qa_orchestration_bundle`;
 - `get_qa_orchestration_model_policy`;
 - `get_qa_orchestration_catalog`;
 - `start_qa_orchestration`;
@@ -269,8 +293,10 @@ create one, change state or TTL, write storage, or contact providers. Catalog
 definitions come from the same fixed profile and bundle definitions used by
 preparation and triage. Choose a route from the changed files and confirmed
 stack; task-based recommendations do not restrict the choices. Use
-`prepare_qa_orchestration(agent_profile)` for a chosen profile's detailed
-checklist and `advance_qa_orchestration` to apply the chosen route at triage.
+`prepare_qa_orchestration(agent_profile)` for one profile's detailed checklist,
+or `prepare_qa_orchestration_bundle(bundle)` once for all profiles in a selected
+bundle, preserving route order. Use `advance_qa_orchestration` to
+apply the chosen route at triage.
 
 ## Persistence and safety
 

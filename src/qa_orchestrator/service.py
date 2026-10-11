@@ -6,7 +6,9 @@ from qa_orchestrator.contracts import (
     QaTaskOutcome,
     QaTaskType,
     ReviewAgent,
+    ReviewBundle,
     ReviewRoute,
+    ReviewRouteBatch,
 )
 from qa_orchestrator.model_policy import ModelPolicySelection, load_model_selection
 from qa_orchestrator.orchestration import (
@@ -16,7 +18,12 @@ from qa_orchestrator.orchestration import (
     QaOrchestrationSession,
     QaOrchestrator,
 )
-from qa_orchestrator.review_profiles import build_review_catalog, build_review_route
+from qa_orchestrator.review_profiles import (
+    build_review_catalog,
+    build_review_route,
+    bundle_execution_groups,
+    bundle_profiles,
+)
 from qa_orchestrator.session_store import SqliteSessionStore
 
 
@@ -46,6 +53,17 @@ class OrchestratorService:
         except (TypeError, ValueError) as exc:
             raise ValueError("unknown review agent profile") from exc
         return build_review_route(resolved_profile)
+
+    def prepare_review_bundle(self, bundle: ReviewBundle | str) -> ReviewRouteBatch:
+        try:
+            resolved_bundle = ReviewBundle(bundle)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("unknown review bundle") from exc
+        return ReviewRouteBatch(
+            bundle=resolved_bundle,
+            routes=[build_review_route(profile) for profile in bundle_profiles(resolved_bundle)],
+            execution_groups=[list(group) for group in bundle_execution_groups(resolved_bundle)],
+        )
 
     def get_qa_orchestration_model_policy(self) -> ModelPolicySelection:
         return self.orchestrator.model_selection

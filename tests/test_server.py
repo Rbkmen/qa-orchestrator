@@ -11,7 +11,7 @@ from qa_orchestrator.service import OrchestratorService
 
 
 @pytest.mark.asyncio
-async def test_server_exposes_nine_tools(tmp_path):
+async def test_server_exposes_ten_tools(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
@@ -19,6 +19,7 @@ async def test_server_exposes_nine_tools(tmp_path):
 
     assert set(tools) == {
         "prepare_qa_orchestration",
+        "prepare_qa_orchestration_bundle",
         "get_qa_orchestration_model_policy",
         "finish_qa_orchestration",
         "start_qa_orchestration",
@@ -43,6 +44,11 @@ async def test_server_initialization_includes_advisory_trust_boundary(tmp_path):
     assert "cannot confirm" in instructions.lower()
     assert "each review ran" in instructions.lower()
     assert "host_default" in instructions
+    assert "one profile" in instructions.lower()
+    assert "several changed files alone" in instructions.lower()
+    assert "execution_groups" in instructions
+    assert "concurrently" in instructions.lower()
+    assert "whether profiles ran concurrently" in instructions.lower()
 
 
 @pytest.mark.asyncio
@@ -56,6 +62,15 @@ async def test_advance_tool_documents_host_reported_transition_limits(tmp_path):
     assert "host-reported" in description
     assert "cannot confirm" in description
     assert "risk_signals reflect evidence" in description
+    assert "current_step" in description
+    assert "status=completed" in description
+    assert "never retry" in description.lower()
+    assert "if the session is unknown or expired" in description.lower()
+    completed_profile = tools["advance_qa_orchestration"].inputSchema["properties"][
+        "completed_profile"
+    ]["description"]
+    assert "fixed route order" in completed_profile
+    assert "never advance parallel profiles concurrently" in completed_profile
 
 
 @pytest.mark.asyncio
@@ -71,6 +86,8 @@ async def test_server_publishes_tool_descriptions(tmp_path):
             property_schema.get("description", "").strip()
             for property_schema in tool.inputSchema["properties"].values()
         ), name
+    assert "prepare_qa_orchestration_bundle;" in tools["prepare_qa_orchestration"].description
+    assert "do not repeat this lookup" in tools["prepare_qa_orchestration"].description
 
 
 @pytest.mark.asyncio
@@ -90,9 +107,24 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
         "deep_review",
         "synthesis",
     ]
+    assert {"run_id", "completed_step", "status"}.issubset(
+        tools["advance_qa_orchestration"].inputSchema["required"]
+    )
+    assert "skip_synthesis" in advance_properties
+    assert "no findings" in advance_properties["skip_synthesis"]["description"].lower()
+    batch_schema = tools["prepare_qa_orchestration_bundle"].inputSchema
+    assert set(batch_schema["properties"]["bundle"]["enum"]) == {
+        bundle.value for bundle in ReviewBundle
+    }
+    assert tools["prepare_qa_orchestration_bundle"].outputSchema is not None
+    groups_schema = tools["prepare_qa_orchestration_bundle"].outputSchema[
+        "properties"
+    ]["execution_groups"]
+    assert "concurrently" in groups_schema["description"].lower()
 
     for name in (
         "prepare_qa_orchestration",
+        "prepare_qa_orchestration_bundle",
         "get_qa_orchestration_model_policy",
         "get_qa_orchestration",
         "list_qa_orchestrations",
@@ -233,6 +265,37 @@ async def test_prepare_qa_orchestration_returns_selected_profile(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_prepare_qa_orchestration_bundle_returns_routes_and_execution_groups_without_session(
+    tmp_path,
+):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+
+    async with Client(build_server(service)) as client:
+        result = await client.call_tool(
+            "prepare_qa_orchestration_bundle",
+            {"bundle": "ruby_backend"},
+        )
+        sessions = await client.call_tool("list_qa_orchestrations", {})
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "prepare_qa_orchestration_bundle",
+                {"bundle": "custom"},
+            )
+
+    assert result.structured_content["bundle"] == "ruby_backend"
+    assert [route["profile"] for route in result.structured_content["routes"]] == [
+        "code_explorer",
+        "ruby_reviewer",
+        "pr_test_analyzer",
+    ]
+    assert result.structured_content["execution_groups"] == [
+        ["code_explorer"],
+        ["ruby_reviewer", "pr_test_analyzer"],
+    ]
+    assert sessions.structured_content["sessions"] == []
+
+
+@pytest.mark.asyncio
 async def test_catalog_discovers_profiles_and_ordered_bundles_without_a_session(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
     async with Client(build_server(service)) as client:
@@ -256,6 +319,18 @@ async def test_catalog_discovers_profiles_and_ordered_bundles_without_a_session(
     assert bundles["widget_js"]["profiles"] == [
         "code_explorer", "code_reviewer", "react_reviewer", "pr_test_analyzer"
     ]
+    assert bundles["ordinary_mr"]["execution_groups"] == [
+        ["code_explorer"],
+        ["code_reviewer", "pr_test_analyzer"],
+    ]
+    assert bundles["requirements"]["execution_groups"] == [
+        ["code_explorer"],
+        ["code_reviewer"],
+    ]
+    for entry in bundles.values():
+        assert [profile for group in entry["execution_groups"] for profile in group] == (
+            entry["profiles"]
+        )
     assert all(entry["when_to_use"] for entry in bundles.values())
     assert all(set(entry["profiles"]).issubset(profiles) for entry in bundles.values())
     assert catalog["recommended_bundles_by_task_type"] == {
@@ -597,6 +672,47 @@ async def test_orchestration_tools_complete_each_bundle(tmp_path, bundle: Review
     assert synthesis.structured_content["status"] == "awaiting_host_outcome"
     assert outcome.structured_content["status"] == "completed"
     assert "outcome_recorded" not in outcome.structured_content
+    assert final.structured_content["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_clean_single_profile_can_finalize_without_synthesis_tool_step(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+
+    async with Client(build_server(service)) as client:
+        started = await client.call_tool(
+            "start_qa_orchestration",
+            {"task_type": "ordinary_review"},
+        )
+        run_id = started.structured_content["run_id"]
+        await client.call_tool(
+            "advance_qa_orchestration",
+            {
+                "run_id": run_id,
+                "completed_step": "triage",
+                "status": "completed",
+                "selected_profile": "code_reviewer",
+            },
+        )
+        advanced = await client.call_tool(
+            "advance_qa_orchestration",
+            {
+                "run_id": run_id,
+                "completed_step": "primary_review",
+                "status": "completed",
+                "completed_profile": "code_reviewer",
+                "risk_signals": {},
+                "skip_synthesis": True,
+            },
+        )
+        final = await client.call_tool(
+            "finish_qa_orchestration",
+            {"run_id": run_id, "outcome": "completed"},
+        )
+
+    assert advanced.structured_content["status"] == "awaiting_host_outcome"
+    assert advanced.structured_content["current_step"] == "awaiting_host_outcome"
+    assert advanced.structured_content["model_policy"] is None
     assert final.structured_content["status"] == "completed"
 
 

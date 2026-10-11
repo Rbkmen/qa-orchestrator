@@ -84,7 +84,11 @@ class DeepReviewSignals(BaseModel):
     )
     evidence_uncertain: bool = Field(
         default=False,
-        description="A material conclusion depends on evidence that is missing or cannot be verified.",
+        description=(
+            "A specific material conclusion remains uncertain, and a scoped read-only review "
+            "could plausibly resolve it. Do not set solely because CI, Stage, or runtime checks "
+            "were not run."
+        ),
     )
     cross_system_scope: bool = Field(
         default=False,
@@ -319,6 +323,13 @@ class AdvanceQaOrchestrationRequest(BaseModel):
     selected_profile: ReviewAgent | None = None
     completed_profile: ReviewAgent | None = None
     risk_signals: DeepReviewSignals | None = None
+    skip_synthesis: bool = Field(
+        default=False,
+        description=(
+            "Host attestation for a clean single-profile result with no findings, no unresolved "
+            "material questions, and no risk signals. Defaults to the normal synthesis stage."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_transition_signal(self) -> "AdvanceQaOrchestrationRequest":
@@ -341,6 +352,11 @@ class AdvanceQaOrchestrationRequest(BaseModel):
             or self.status != "completed"
         ):
             raise ValueError("risk signals must be sent with the final primary-review profile")
+        if self.skip_synthesis and (
+            self.completed_step is not OrchestrationStep.PRIMARY_REVIEW
+            or self.status != "completed"
+        ):
+            raise ValueError("skip_synthesis may only follow a completed primary review")
         return self
 
 
@@ -460,6 +476,7 @@ class QaOrchestrator:
         selected_profile: ReviewAgent | None = None,
         completed_profile: ReviewAgent | None = None,
         risk_signals: DeepReviewSignals | None = None,
+        skip_synthesis: bool = False,
     ) -> QaOrchestrationSession:
         try:
             request = AdvanceQaOrchestrationRequest(
@@ -470,6 +487,7 @@ class QaOrchestrator:
                 selected_profile=selected_profile,
                 completed_profile=completed_profile,
                 risk_signals=risk_signals,
+                skip_synthesis=skip_synthesis,
             )
         except ValidationError as exc:
             raise OrchestrationError("invalid transition signal") from exc
@@ -632,6 +650,14 @@ class QaOrchestrator:
             if request.completed_profile is not expected_profile:
                 raise OrchestrationError("completed profile does not match current profile")
             is_last_profile = next_profile_index == len(session.review_profiles) - 1
+            if request.skip_synthesis and (
+                not is_last_profile
+                or session.selected_bundle is not None
+                or len(session.review_profiles) != 1
+            ):
+                raise OrchestrationError(
+                    "synthesis can be skipped only for a clean single-profile review"
+                )
             completed_profiles = [*session.completed_profiles, expected_profile]
             if not is_last_profile:
                 if request.risk_signals is not None:
@@ -652,6 +678,10 @@ class QaOrchestrator:
                 raise OrchestrationError(
                     "risk_signals are required for the final primary-review profile"
                 )
+            if request.skip_synthesis and any(request.risk_signals.model_dump().values()):
+                raise OrchestrationError(
+                    "synthesis can be skipped only for a clean single-profile review"
+                )
             assessment = assess_deep_review(request.risk_signals)
             if assessment.should_escalate:
                 return session.model_copy(
@@ -663,6 +693,21 @@ class QaOrchestrator:
                         "deep_reason_code": assessment.reason_codes[0],
                         "model_policy": self._model_policies[OrchestrationStep.DEEP_REVIEW],
                         "next_action": _NEXT_ACTIONS[OrchestrationStep.DEEP_REVIEW],
+                    }
+                )
+            if request.skip_synthesis:
+                return session.model_copy(
+                    update={
+                        "status": OrchestrationStatus.AWAITING_HOST_OUTCOME,
+                        "current_step": OrchestrationStep.AWAITING_HOST_OUTCOME,
+                        "current_profile": None,
+                        "completed_profiles": completed_profiles,
+                        "deep_assessment": assessment,
+                        "deep_reason_code": None,
+                        "model_policy": None,
+                        "next_action": _NEXT_ACTIONS[
+                            OrchestrationStep.AWAITING_HOST_OUTCOME
+                        ],
                     }
                 )
             return session.model_copy(

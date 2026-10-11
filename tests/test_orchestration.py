@@ -93,6 +93,94 @@ def test_normal_flow_skips_sol():
     )
 
 
+def test_clean_single_profile_can_skip_standalone_synthesis():
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review")
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_profile="code_reviewer",
+    )
+
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profile=ReviewAgent.CODE_REVIEWER,
+        risk_signals=DeepReviewSignals(),
+        skip_synthesis=True,
+    )
+
+    assert session.current_step is OrchestrationStep.AWAITING_HOST_OUTCOME
+    assert session.status is OrchestrationStatus.AWAITING_HOST_OUTCOME
+    assert session.model_policy is None
+    assert session.completed_profiles == [ReviewAgent.CODE_REVIEWER]
+    assert session.next_action == (
+        "Host submits the final QA outcome with finish_qa_orchestration."
+    )
+    assert orchestrator.finish(run_id=session.run_id, outcome="completed").status is (
+        OrchestrationStatus.COMPLETED
+    )
+
+
+def test_bundle_cannot_skip_synthesis():
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review")
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_bundle=ReviewBundle.REQUIREMENTS,
+    )
+
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profile=ReviewAgent.CODE_EXPLORER,
+    )
+    with pytest.raises(OrchestrationError, match="only for a clean single-profile review"):
+        orchestrator.advance(
+            run_id=session.run_id,
+            completed_step=OrchestrationStep.PRIMARY_REVIEW,
+            status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+            risk_signals=DeepReviewSignals(),
+            skip_synthesis=True,
+        )
+
+    current = orchestrator.get(session.run_id)
+    assert current.current_step is OrchestrationStep.PRIMARY_REVIEW
+    assert current.current_profile is ReviewAgent.CODE_REVIEWER
+    assert current.completed_profiles == [ReviewAgent.CODE_EXPLORER]
+
+
+def test_single_profile_with_any_risk_signal_cannot_skip_synthesis():
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review")
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_profile="code_reviewer",
+    )
+
+    with pytest.raises(OrchestrationError, match="only for a clean single-profile review"):
+        orchestrator.advance(
+            run_id=session.run_id,
+            completed_step=OrchestrationStep.PRIMARY_REVIEW,
+            status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+            risk_signals=DeepReviewSignals(high_risk_domain=True),
+            skip_synthesis=True,
+        )
+
+    current = orchestrator.get(session.run_id)
+    assert current.current_step is OrchestrationStep.PRIMARY_REVIEW
+    assert current.completed_profiles == []
+
+
 def test_final_host_outcome_completes_session_and_is_idempotent():
     orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
     session = orchestrator.start("ordinary_review")

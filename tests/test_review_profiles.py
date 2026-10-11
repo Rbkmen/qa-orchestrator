@@ -1,7 +1,7 @@
 import pytest
 
 from qa_orchestrator import contracts, review_profiles
-from qa_orchestrator.contracts import ReviewAgent, ReviewRoute
+from qa_orchestrator.contracts import ReviewAgent, ReviewBundle, ReviewRoute
 from qa_orchestrator.service import OrchestratorService
 
 
@@ -191,3 +191,69 @@ def test_catalog_responses_do_not_share_mutable_routing_definitions(tmp_path):
     ]
     assert fresh.recommended_bundles_by_task_type["ordinary_review"] == ["ordinary_mr"]
     assert fresh.profiles[0].focus != "changed by caller"
+
+
+def test_review_bundle_execution_groups_preserve_route_order_and_parallelize_independent_roles(
+    tmp_path,
+):
+    expected = {
+        ReviewBundle.ORDINARY_MR: (
+            (ReviewAgent.CODE_EXPLORER,),
+            (ReviewAgent.CODE_REVIEWER, ReviewAgent.PR_TEST_ANALYZER),
+        ),
+        ReviewBundle.WIDGET: (
+            (ReviewAgent.CODE_EXPLORER,),
+            (
+                ReviewAgent.REACT_REVIEWER,
+                ReviewAgent.TYPESCRIPT_REVIEWER,
+                ReviewAgent.PR_TEST_ANALYZER,
+            ),
+        ),
+        ReviewBundle.WIDGET_JS: (
+            (ReviewAgent.CODE_EXPLORER,),
+            (
+                ReviewAgent.CODE_REVIEWER,
+                ReviewAgent.REACT_REVIEWER,
+                ReviewAgent.PR_TEST_ANALYZER,
+            ),
+        ),
+        ReviewBundle.RUBY_BACKEND: (
+            (ReviewAgent.CODE_EXPLORER,),
+            (ReviewAgent.RUBY_REVIEWER, ReviewAgent.PR_TEST_ANALYZER),
+        ),
+        ReviewBundle.PYTHON_BACKEND: (
+            (ReviewAgent.CODE_EXPLORER,),
+            (ReviewAgent.PYTHON_REVIEWER, ReviewAgent.PR_TEST_ANALYZER),
+        ),
+        ReviewBundle.MOBILE: (
+            (ReviewAgent.CODE_EXPLORER,),
+            (ReviewAgent.MOBILE_REVIEWER, ReviewAgent.PR_TEST_ANALYZER),
+        ),
+        ReviewBundle.SECURITY: (
+            (ReviewAgent.CODE_EXPLORER,),
+            (ReviewAgent.SECURITY_REVIEWER, ReviewAgent.SILENT_FAILURE_HUNTER),
+        ),
+        ReviewBundle.AUTOTEST: (
+            (
+                ReviewAgent.CODE_REVIEWER,
+                ReviewAgent.TYPESCRIPT_REVIEWER,
+                ReviewAgent.PR_TEST_ANALYZER,
+            ),
+        ),
+        ReviewBundle.REQUIREMENTS: (
+            (ReviewAgent.CODE_EXPLORER,),
+            (ReviewAgent.CODE_REVIEWER,),
+        ),
+    }
+
+    for bundle, expected_groups in expected.items():
+        groups = review_profiles.bundle_execution_groups(bundle)
+        assert groups == expected_groups
+        assert tuple(profile for group in groups for profile in group) == (
+            review_profiles.REVIEW_BUNDLES[bundle]
+        )
+
+    catalog = OrchestratorService.from_settings(data_dir=tmp_path).get_qa_orchestration_catalog()
+    for bundle, expected_groups in expected.items():
+        summary = next(entry for entry in catalog.bundles if entry.bundle == bundle)
+        assert summary.execution_groups == [list(group) for group in expected_groups]

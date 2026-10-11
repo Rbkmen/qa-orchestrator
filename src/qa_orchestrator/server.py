@@ -11,6 +11,7 @@ from qa_orchestrator.contracts import (
     ReviewAgent,
     ReviewBundle,
     ReviewRoute,
+    ReviewRouteBatch,
 )
 from qa_orchestrator.model_policy import ModelPolicyResponse
 from qa_orchestrator.orchestration import (
@@ -59,9 +60,17 @@ CompletableStep = Literal["triage", "primary_review", "deep_review", "synthesis"
 
 SERVER_INSTRUCTIONS = (
     "These instructions are advisory; the host owns review decisions and model execution. "
-    "Follow the ordered review profiles and report completed_profile and risk_signals accurately. "
-    "The orchestrator validates the sequence the host reports; it cannot confirm each review ran "
-    "or verify that host-reported risk_signals reflect evidence. "
+    "For a narrow, single-concern, low-risk change, use one profile; use a bundle for broad, "
+    "cross-concern, or high-risk work. Several changed files alone do not require a bundle. "
+    "For a selected bundle, retrieve its checklists and execution_groups once with "
+    "prepare_qa_orchestration_bundle. Run groups in order; profiles in the same group may run "
+    "concurrently when the host supports parallel workers, otherwise run them sequentially. "
+    "Wait for the whole group, then report each completed_profile one at a time in the fixed profile order. "
+    "Skip the separate synthesis step only for a clean single-profile result; the host still owns and "
+    "produces the final QA outcome. "
+    "Follow the declared execution_groups and report completed_profile and risk_signals accurately. "
+    "The orchestrator validates the reported profile order; it cannot confirm each review ran, "
+    "whether profiles ran concurrently, or whether host-reported risk_signals reflect evidence. "
     "In host_default model-policy mode, use the model and reasoning configured by the host. "
     "Full workflow guidance remains in client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md."
 )
@@ -91,8 +100,9 @@ def build_server(service: OrchestratorService) -> FastMCP:
         Use before reviewing one scoped concern; no session is required.
         - Standalone review: use get_qa_orchestration_catalog() to match profile focus to
           changed files and confirmed stack.
-        - Session primary_review: pass the latest current_profile as agent_profile;
-          preserve review_profiles order for bundles.
+        - Session primary_review: use the latest current_profile as the profile ID.
+          For a bundle, fetch its checklists and execution_groups once with
+          prepare_qa_orchestration_bundle; do not repeat this lookup for each profile.
 
         This local lookup reads bundled definitions, without executing reviews or calling models.
         Use advance_qa_orchestration to apply a session route.
@@ -101,15 +111,41 @@ def build_server(service: OrchestratorService) -> FastMCP:
         """
         return service.prepare_review_route(agent_profile)
 
+    @mcp.tool(title="Read bundle review checklists", annotations=READ_ONLY_TOOL_ANNOTATIONS)
+    def prepare_qa_orchestration_bundle(
+        bundle: Annotated[
+            ReviewBundle,
+            Field(
+                description=(
+                    "Selected fixed multi-profile bundle. The tool returns every checklist and its "
+                    "ordered execution_groups. Profiles in the same group may run concurrently; "
+                    "for one profile, use prepare_qa_orchestration."
+                )
+            ),
+        ],
+    ) -> ReviewRouteBatch:
+        """Return every fixed ReviewRoute checklist and execution wave for one bundle.
+
+        Use once after choosing a multi-profile bundle, instead of calling
+        prepare_qa_orchestration separately for each profile. Run execution_groups in order;
+        profiles in one group are independent and may run concurrently when the host supports it.
+        After every profile in the group finishes, record their profiles one at a time in bundle
+        order with advance_qa_orchestration. For a single profile, use prepare_qa_orchestration.
+        This stateless lookup reads bundled definitions; it does not execute reviews, create a
+        session, or call models.
+        """
+        return service.prepare_review_bundle(bundle)
+
     @mcp.tool(title="Discover QA profiles and bundles", annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def get_qa_orchestration_catalog() -> QaOrchestrationCatalog:
-        """Read the static profile/bundle catalog: available specialists, review scopes, and ordered routes.
+        """Read the static profile/bundle catalog: specialists, review scopes, and execution schedules.
 
         Use before creating a session or choosing its triage route; no session or arguments required.
         Task-type recommendations are shortlists, not restrictions. Choose a bundle for broad work
         or a single profile for a narrow concern using changed files and confirmed stack.
 
-        - Detailed checklist: prepare_qa_orchestration(agent_profile).
+        - One-profile checklist: prepare_qa_orchestration(agent_profile).
+        - Bundle checklists and execution_groups: prepare_qa_orchestration_bundle(bundle).
         - Create a session: start_qa_orchestration; set its route: advance_qa_orchestration.
         - Session IDs: list_qa_orchestrations().
 
@@ -173,9 +209,9 @@ def build_server(service: OrchestratorService) -> FastMCP:
             CompletableStep,
             Field(
                 description=(
-                    "Active step returned in current_step and completed by this call: triage, "
-                    "primary_review, deep_review, or synthesis. When current_step is "
-                    "awaiting_host_outcome, call finish_qa_orchestration instead."
+                    "Required: copy the exact current_step from the latest session returned by start, "
+                    "advance, or get. Complete only triage, primary_review, deep_review, or synthesis. "
+                    "If current_step is awaiting_host_outcome, call finish_qa_orchestration instead."
                 )
             ),
         ],
@@ -183,8 +219,9 @@ def build_server(service: OrchestratorService) -> FastMCP:
             QaTaskOutcome,
             Field(
                 description=(
-                    "Use completed after the active step succeeds. Use partial or blocked to stop early; "
-                    "then finalize with the same outcome using finish_qa_orchestration."
+                    "Required on every call, including successful steps: use completed when the active "
+                    "step succeeds. Use partial or blocked only to stop early, then finalize with the "
+                    "same outcome using finish_qa_orchestration."
                 )
             ),
         ],
@@ -192,8 +229,9 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ReviewBundle | None,
             Field(
                 description=(
-                    "For completed triage, choose one allowed fixed bundle for a broad or cross-concern "
-                    "review. It is mutually exclusive with selected_profile; recommended_bundles is only a shortlist."
+                    "For completed triage, choose one fixed bundle only for broad, cross-concern, or high-risk "
+                    "work; several changed files alone do not require one. It is mutually exclusive with "
+                    "selected_profile; recommended_bundles is only a shortlist."
                 )
             ),
         ] = None,
@@ -201,7 +239,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ReviewAgent | None,
             Field(
                 description=(
-                    "For completed triage, choose one allowed profile for a narrow, low-risk review. "
+                    "For completed triage, default to one allowed profile for a narrow, single-concern, "
+                    "low-risk review. "
                     "It is mutually exclusive with selected_bundle."
                 )
             ),
@@ -210,8 +249,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ReviewAgent | None,
             Field(
                 description=(
-                    "After each successful primary-review step, submit exactly the current_profile "
-                    "returned by the previous advance_qa_orchestration call. Omit for other steps or an early stop."
+                    "After the complete execution_group has finished, submit exactly the current_profile "
+                    "returned by the latest advance_qa_orchestration call. Report one profile at a time "
+                    "in the fixed route order; never advance parallel profiles concurrently. Omit for "
+                    "other steps or an early stop."
                 )
             ),
         ] = None,
@@ -225,22 +266,41 @@ def build_server(service: OrchestratorService) -> FastMCP:
                 )
             ),
         ] = None,
+        skip_synthesis: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Optional clean-review fast path. Set true only after one selected profile reports "
+                    "no findings or unresolved material questions and every risk signal is false. "
+                    "The host still validates and reports the final QA result; the server trusts this "
+                    "host claim and cannot verify review content. Bundles, findings, unresolved questions, "
+                    "or any risk signal require the normal synthesis stage."
+                )
+            ),
+        ] = False,
     ) -> QaOrchestrationSession:
         """Record one active QA step's result; return updated state and next_action instructions for the host.
 
         For finalization, use finish_qa_orchestration at awaiting_host_outcome;
         after early stops, match the recorded outcome.
 
-        - Triage: select exactly one bundle or profile.
+        - Triage: select exactly one bundle or profile; default to one profile for narrow work.
+        - Every call requires run_id, completed_step, and status. Copy completed_step from the latest
+          session's current_step; use status=completed after a successful stage.
         - Primary review: follow profile order; the final profile requires risk_signals ({} if none).
+        - Clean single-profile fast path: set skip_synthesis=true only when that review has no findings,
+          no unresolved material questions, and no risk signals. This bypasses only the separate synthesis
+          step; the host still validates and produces the final QA report. The server cannot verify this claim.
+          Bundles, findings, unresolved questions, or any risk signal require the normal synthesis stage.
         - Trust boundary: completed_profile and risk_signals are host-reported. The server
           validates the reported sequence, but cannot confirm each review ran or that
           risk_signals reflect evidence.
         - Early stop: omit route selectors, completed_profile, and risk_signals.
         - Success saves state and refreshes expires_at.
         - Invalid/stale requests and unknown/expired run_ids fail without advancing.
-        - Non-idempotent: after a lost response, read get_qa_orchestration(run_id);
-          prior-step replay is rejected.
+        - Non-idempotent: never retry or replay an advance call blindly. After a lost response or
+          transition error, read get_qa_orchestration(run_id) and continue from its current_step;
+          if the session is unknown or expired, start a new session.
         """
         return service.advance_qa_orchestration(
             AdvanceQaOrchestrationRequest(
@@ -251,6 +311,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
                 selected_profile=selected_profile,
                 completed_profile=completed_profile,
                 risk_signals=risk_signals,
+                skip_synthesis=skip_synthesis,
             )
         )
 
@@ -314,8 +375,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
     ) -> QaOrchestrationSession:
         """Finalize the whole QA run's outcome; active step results belong to advance_qa_orchestration.
 
-        After synthesis, use the retained run_id at awaiting_host_outcome to choose completed,
-        partial, or blocked.
+        After normal synthesis or an eligible clean single-profile fast path, use the retained
+        run_id at awaiting_host_outcome to choose completed, partial, or blocked.
         After an early stop recorded by advance_qa_orchestration, outcome must match its partial/blocked
         status.
 

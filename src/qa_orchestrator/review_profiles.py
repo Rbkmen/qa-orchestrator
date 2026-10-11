@@ -225,6 +225,60 @@ REVIEW_BUNDLES: Mapping[ReviewBundle, tuple[ReviewAgent, ...]] = MappingProxyTyp
     }
 )
 
+_REVIEW_BUNDLE_EXECUTION_GROUPS: Mapping[
+    ReviewBundle, tuple[tuple[ReviewAgent, ...], ...]
+] = MappingProxyType(
+    {
+        ReviewBundle.ORDINARY_MR: (
+            (ReviewAgent.CODE_EXPLORER,),
+            (ReviewAgent.CODE_REVIEWER, ReviewAgent.PR_TEST_ANALYZER),
+        ),
+        ReviewBundle.WIDGET: (
+            (ReviewAgent.CODE_EXPLORER,),
+            (
+                ReviewAgent.REACT_REVIEWER,
+                ReviewAgent.TYPESCRIPT_REVIEWER,
+                ReviewAgent.PR_TEST_ANALYZER,
+            ),
+        ),
+        ReviewBundle.WIDGET_JS: (
+            (ReviewAgent.CODE_EXPLORER,),
+            (
+                ReviewAgent.CODE_REVIEWER,
+                ReviewAgent.REACT_REVIEWER,
+                ReviewAgent.PR_TEST_ANALYZER,
+            ),
+        ),
+        ReviewBundle.RUBY_BACKEND: (
+            (ReviewAgent.CODE_EXPLORER,),
+            (ReviewAgent.RUBY_REVIEWER, ReviewAgent.PR_TEST_ANALYZER),
+        ),
+        ReviewBundle.PYTHON_BACKEND: (
+            (ReviewAgent.CODE_EXPLORER,),
+            (ReviewAgent.PYTHON_REVIEWER, ReviewAgent.PR_TEST_ANALYZER),
+        ),
+        ReviewBundle.MOBILE: (
+            (ReviewAgent.CODE_EXPLORER,),
+            (ReviewAgent.MOBILE_REVIEWER, ReviewAgent.PR_TEST_ANALYZER),
+        ),
+        ReviewBundle.SECURITY: (
+            (ReviewAgent.CODE_EXPLORER,),
+            (ReviewAgent.SECURITY_REVIEWER, ReviewAgent.SILENT_FAILURE_HUNTER),
+        ),
+        ReviewBundle.AUTOTEST: (
+            (
+                ReviewAgent.CODE_REVIEWER,
+                ReviewAgent.TYPESCRIPT_REVIEWER,
+                ReviewAgent.PR_TEST_ANALYZER,
+            ),
+        ),
+        ReviewBundle.REQUIREMENTS: (
+            (ReviewAgent.CODE_EXPLORER,),
+            (ReviewAgent.CODE_REVIEWER,),
+        ),
+    }
+)
+
 RECOMMENDED_BUNDLES_BY_TASK_TYPE: Mapping[QaTaskType, tuple[ReviewBundle, ...]] = MappingProxyType(
     {
         "ordinary_review": (ReviewBundle.ORDINARY_MR,),
@@ -264,7 +318,10 @@ def build_review_catalog() -> QaOrchestrationCatalog:
         ],
         bundles=[
             ReviewBundleSummary(
-                bundle=bundle, when_to_use=_BUNDLE_USAGE[bundle], profiles=list(profiles)
+                bundle=bundle,
+                when_to_use=_BUNDLE_USAGE[bundle],
+                profiles=list(profiles),
+                execution_groups=[list(group) for group in bundle_execution_groups(bundle)],
             )
             for bundle, profiles in REVIEW_BUNDLES.items()
         ],
@@ -277,6 +334,12 @@ def build_review_catalog() -> QaOrchestrationCatalog:
 
 def bundle_profiles(bundle: ReviewBundle) -> tuple[ReviewAgent, ...]:
     return REVIEW_BUNDLES[bundle]
+
+
+def bundle_execution_groups(
+    bundle: ReviewBundle,
+) -> tuple[tuple[ReviewAgent, ...], ...]:
+    return _REVIEW_BUNDLE_EXECUTION_GROUPS[bundle]
 
 
 def recommended_bundles_for(task_type: QaTaskType) -> tuple[ReviewBundle, ...]:

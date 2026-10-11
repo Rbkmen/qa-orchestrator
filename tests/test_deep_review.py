@@ -14,6 +14,16 @@ def test_deep_review_signal_schema_explains_each_boolean():
     assert "many consumers" in properties["high_blast_radius"]["description"]
 
 
+def test_evidence_uncertainty_is_specific_and_actionable():
+    description = DeepReviewSignals.model_json_schema()["properties"][
+        "evidence_uncertain"
+    ]["description"]
+
+    assert "specific material conclusion" in description
+    assert "read-only review could plausibly resolve it" in description
+    assert "CI, Stage, or runtime checks were not run" in description
+
+
 def test_high_risk_with_uncertain_evidence_requires_deep_review():
     decision = assess_deep_review(
         DeepReviewSignals(high_risk_domain=True, evidence_uncertain=True)

@@ -66,6 +66,24 @@ class ReviewRoute(BaseModel):
     host_owns_decisions: Literal[True] = True
 
 
+class ReviewRouteBatch(BaseModel):
+    bundle: ReviewBundle = Field(description="Fixed bundle whose profile checklists are returned.")
+    routes: list[ReviewRoute] = Field(
+        description=(
+            "Detailed checklists in the fixed bundle's declared profile order. "
+            "Each route is a fixed, read-only checklist; it does not execute a review."
+        )
+    )
+    execution_groups: list[list[ReviewAgent]] = Field(
+        description=(
+            "Ordered execution waves whose flattened profile IDs match routes. Run the groups in order; "
+            "profiles in the same group are independent and may be reviewed concurrently by the host. "
+            "Wait for every profile in a group before reporting its profiles to the orchestrator, "
+            "and report them one at a time in the declared order."
+        )
+    )
+
+
 class ReviewProfileSummary(BaseModel):
     profile: ReviewAgent
     display_name: str = Field(min_length=1)
@@ -77,6 +95,12 @@ class ReviewBundleSummary(BaseModel):
     when_to_use: str = Field(min_length=1, description="Scope and stack suited to this bundle.")
     profiles: list[ReviewAgent] = Field(
         min_length=1, description="Ordered review profile identifiers; preserve this execution order."
+    )
+    execution_groups: list[list[ReviewAgent]] = Field(
+        description=(
+            "Ordered execution waves. Profiles in the same group are independent and may be reviewed "
+            "concurrently; finish each group before starting the next."
+        )
     )
 
 
