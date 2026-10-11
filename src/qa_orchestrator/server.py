@@ -21,7 +21,7 @@ from qa_orchestrator.orchestration import (
     QaOrchestrationList,
     QaOrchestrationSession,
 )
-from qa_orchestrator.service import OrchestratorService
+from qa_orchestrator.service import OrchestratorService, QaOrchestrationAdvanceResult
 
 READ_ONLY_TOOL_ANNOTATIONS = {
     "readOnlyHint": True,
@@ -62,13 +62,16 @@ SERVER_INSTRUCTIONS = (
     "These instructions are advisory; the host owns review decisions and model execution. "
     "For a narrow, single-concern, low-risk change, use one profile; use a bundle for broad, "
     "cross-concern, or high-risk work. Several changed files alone do not require a bundle. "
-    "For a selected bundle, retrieve its checklists and execution_groups once with "
-    "prepare_qa_orchestration_bundle. Run groups in order; profiles in the same group may run "
+    "After selecting a route at triage, use selected_review_routes from the advance response; it "
+    "contains the exact checklists and execution_groups, so no separate preparation call is needed. "
+    "The prepare tools remain available for standalone lookup or recovery. Run groups in order; profiles in the same group may run "
     "concurrently when the host supports parallel workers, otherwise run them sequentially. "
-    "Wait for the whole group, then report each completed_profile one at a time in the fixed profile order. "
+    "Wait for the whole group, then report its ordered completed_profiles together in one call. "
+    "The legacy completed_profile field remains available for one-at-a-time reporting. "
     "Skip the separate synthesis step only for a clean single-profile result; the host still owns and "
     "produces the final QA outcome. "
-    "Follow the declared execution_groups and report completed_profile and risk_signals accurately. "
+    "Follow the declared execution_groups and report completed_profiles (or the legacy "
+    "completed_profile field) and risk_signals accurately. "
     "The orchestrator validates the reported profile order; it cannot confirm each review ran, "
     "whether profiles ran concurrently, or whether host-reported risk_signals reflect evidence. "
     "In host_default model-policy mode, use the model and reasoning configured by the host. "
@@ -97,12 +100,13 @@ def build_server(service: OrchestratorService) -> FastMCP:
         """Return one specialist's fixed ReviewRoute checklist: profile, display_name, focus,
         required_sections, constraints, and escalation_signals.
 
-        Use before reviewing one scoped concern; no session is required.
+        Use before reviewing one scoped concern when no session is active, or to recover a checklist
+        when the triage response is unavailable; no session is required.
         - Standalone review: use get_qa_orchestration_catalog() to match profile focus to
           changed files and confirmed stack.
-        - Session primary_review: use the latest current_profile as the profile ID.
-          For a bundle, fetch its checklists and execution_groups once with
-          prepare_qa_orchestration_bundle; do not repeat this lookup for each profile.
+        - Session primary_review: use selected_review_routes returned by the successful triage
+          advance call. It contains every selected checklist and execution_group; do not make a
+          separate preparation call for the same session.
 
         This local lookup reads bundled definitions, without executing reviews or calling models.
         Use advance_qa_orchestration to apply a session route.
@@ -126,11 +130,13 @@ def build_server(service: OrchestratorService) -> FastMCP:
     ) -> ReviewRouteBatch:
         """Return every fixed ReviewRoute checklist and execution wave for one bundle.
 
-        Use once after choosing a multi-profile bundle, instead of calling
-        prepare_qa_orchestration separately for each profile. Run execution_groups in order;
+        Use for standalone bundle lookup or to recover checklists when the successful triage
+        response is unavailable. In a session, the triage advance response includes the selected
+        checklists and execution_groups. Run execution_groups in order;
         profiles in one group are independent and may run concurrently when the host supports it.
-        After every profile in the group finishes, record their profiles one at a time in bundle
-        order with advance_qa_orchestration. For a single profile, use prepare_qa_orchestration.
+        After every profile in the group finishes, record the complete group once in bundle order
+        with completed_profiles. Older hosts may continue using completed_profile one at a time.
+        For a single profile, use prepare_qa_orchestration.
         This stateless lookup reads bundled definitions; it does not execute reviews, create a
         session, or call models.
         """
@@ -144,8 +150,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
         Task-type recommendations are shortlists, not restrictions. Choose a bundle for broad work
         or a single profile for a narrow concern using changed files and confirmed stack.
 
-        - One-profile checklist: prepare_qa_orchestration(agent_profile).
-        - Bundle checklists and execution_groups: prepare_qa_orchestration_bundle(bundle).
+        - For a session, the successful triage response includes selected_review_routes with the
+          selected profile or bundle checklists and execution_groups.
+        - Standalone or recovery lookup: prepare_qa_orchestration(agent_profile) or
+          prepare_qa_orchestration_bundle(bundle).
         - Create a session: start_qa_orchestration; set its route: advance_qa_orchestration.
         - Session IDs: list_qa_orchestrations().
 
@@ -249,9 +257,22 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ReviewAgent | None,
             Field(
                 description=(
-                    "After the complete execution_group has finished, submit exactly the current_profile "
-                    "returned by the latest advance_qa_orchestration call. Report one profile at a time "
-                    "in the fixed route order; never advance parallel profiles concurrently. Omit for "
+                    "Legacy-compatible single-profile completion. After the complete execution_group "
+                    "has finished, submit exactly the current_profile returned by the latest "
+                    "advance_qa_orchestration call and follow fixed route order; never advance "
+                    "parallel profiles concurrently. Use completed_profiles to record a whole "
+                    "group in one call. Omit for other steps or an early stop."
+                )
+            ),
+        ] = None,
+        completed_profiles: Annotated[
+            list[ReviewAgent] | None,
+            Field(
+                description=(
+                    "After the whole next execution_group has finished, submit every profile in that "
+                    "group exactly once and in fixed route order. This records the group in one call. "
+                    "For a bundle, the list must match the next complete group; for one profile, "
+                    "submit a one-item list. Mutually exclusive with completed_profile. Omit for "
                     "other steps or an early stop."
                 )
             ),
@@ -278,8 +299,11 @@ def build_server(service: OrchestratorService) -> FastMCP:
                 )
             ),
         ] = False,
-    ) -> QaOrchestrationSession:
+    ) -> QaOrchestrationAdvanceResult:
         """Record one active QA step's result; return updated state and next_action instructions for the host.
+
+        After completed triage, the response also includes selected_review_routes with the exact
+        selected checklists and execution_groups, avoiding a separate preparation tool call.
 
         For finalization, use finish_qa_orchestration at awaiting_host_outcome;
         after early stops, match the recorded outcome.
@@ -287,15 +311,16 @@ def build_server(service: OrchestratorService) -> FastMCP:
         - Triage: select exactly one bundle or profile; default to one profile for narrow work.
         - Every call requires run_id, completed_step, and status. Copy completed_step from the latest
           session's current_step; use status=completed after a successful stage.
-        - Primary review: follow profile order; the final profile requires risk_signals ({} if none).
+        - Primary review: after a whole execution group finishes, report its ordered profiles together
+          with completed_profiles. Older hosts may continue reporting completed_profile one at a time.
+          The final group requires risk_signals ({} if none).
         - Clean single-profile fast path: set skip_synthesis=true only when that review has no findings,
           no unresolved material questions, and no risk signals. This bypasses only the separate synthesis
           step; the host still validates and produces the final QA report. The server cannot verify this claim.
           Bundles, findings, unresolved questions, or any risk signal require the normal synthesis stage.
-        - Trust boundary: completed_profile and risk_signals are host-reported. The server
-          validates the reported sequence, but cannot confirm each review ran or that
-          risk_signals reflect evidence.
-        - Early stop: omit route selectors, completed_profile, and risk_signals.
+        - Trust boundary: completion fields and risk_signals are host-reported. The server validates
+          the reported sequence, but cannot confirm each review ran or that risk_signals reflect evidence.
+        - Early stop: omit route selectors, completion fields, and risk_signals.
         - Success saves state and refreshes expires_at.
         - Invalid/stale requests and unknown/expired run_ids fail without advancing.
         - Non-idempotent: never retry or replay an advance call blindly. After a lost response or
@@ -310,6 +335,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
                 selected_bundle=selected_bundle,
                 selected_profile=selected_profile,
                 completed_profile=completed_profile,
+                completed_profiles=completed_profiles,
                 risk_signals=risk_signals,
                 skip_synthesis=skip_synthesis,
             )

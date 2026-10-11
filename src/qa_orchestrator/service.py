@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from pydantic import Field
+
 from qa_orchestrator.config import Settings
 from qa_orchestrator.contracts import (
     QaOrchestrationCatalog,
@@ -9,10 +11,12 @@ from qa_orchestrator.contracts import (
     ReviewBundle,
     ReviewRoute,
     ReviewRouteBatch,
+    ReviewRouteSelection,
 )
 from qa_orchestrator.model_policy import ModelPolicySelection, load_model_selection
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
+    OrchestrationStep,
     QaOrchestrationDeletion,
     QaOrchestrationList,
     QaOrchestrationSession,
@@ -25,6 +29,17 @@ from qa_orchestrator.review_profiles import (
     bundle_profiles,
 )
 from qa_orchestrator.session_store import SqliteSessionStore
+
+
+class QaOrchestrationAdvanceResult(QaOrchestrationSession):
+    selected_review_routes: ReviewRouteSelection | None = Field(
+        default=None,
+        description=(
+            "After a successful triage selection, the exact checklists and execution groups for "
+            "the selected route. Use this instead of a separate prepare call. This response-only "
+            "field is not stored in the session."
+        ),
+    )
 
 
 class OrchestratorService:
@@ -77,8 +92,29 @@ class OrchestratorService:
     def advance_qa_orchestration(
         self,
         request: AdvanceQaOrchestrationRequest,
-    ) -> QaOrchestrationSession:
-        return self.orchestrator.advance(**request.model_dump())
+    ) -> QaOrchestrationAdvanceResult:
+        selected_review_routes = None
+        if request.completed_step is OrchestrationStep.TRIAGE and request.status == "completed":
+            if request.selected_bundle is not None:
+                batch = self.prepare_review_bundle(request.selected_bundle)
+                selected_review_routes = ReviewRouteSelection(
+                    routes=batch.routes,
+                    execution_groups=batch.execution_groups,
+                )
+            else:
+                assert request.selected_profile is not None
+                route = self.prepare_review_route(request.selected_profile)
+                selected_review_routes = ReviewRouteSelection(
+                    routes=[route],
+                    execution_groups=[[route.profile]],
+                )
+        session = self.orchestrator.advance(**request.model_dump())
+        return QaOrchestrationAdvanceResult.model_validate(
+            {
+                **session.model_dump(),
+                "selected_review_routes": selected_review_routes,
+            }
+        )
 
     def get_qa_orchestration(self, run_id: str) -> QaOrchestrationSession:
         return self.orchestrator.get(run_id)

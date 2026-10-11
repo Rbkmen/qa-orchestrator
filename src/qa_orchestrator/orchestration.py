@@ -29,6 +29,7 @@ from qa_orchestrator.model_policy import (
 )
 from qa_orchestrator.review_profiles import (
     REVIEW_BUNDLES,
+    bundle_execution_groups,
     bundle_profiles,
     recommended_bundles_for,
 )
@@ -322,6 +323,7 @@ class AdvanceQaOrchestrationRequest(BaseModel):
     selected_bundle: ReviewBundle | None = None
     selected_profile: ReviewAgent | None = None
     completed_profile: ReviewAgent | None = None
+    completed_profiles: list[ReviewAgent] | None = None
     risk_signals: DeepReviewSignals | None = None
     skip_synthesis: bool = Field(
         default=False,
@@ -333,6 +335,14 @@ class AdvanceQaOrchestrationRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_transition_signal(self) -> "AdvanceQaOrchestrationRequest":
+        if self.completed_profiles is not None and not self.completed_profiles:
+            raise ValueError("completed_profiles must contain at least one profile")
+        if self.completed_profile is not None and self.completed_profiles is not None:
+            raise ValueError("completed_profile and completed_profiles are mutually exclusive")
+
+        has_completed_profiles = (
+            self.completed_profile is not None or self.completed_profiles is not None
+        )
         if self.completed_step is OrchestrationStep.TRIAGE and self.status == "completed":
             if (self.selected_bundle is None) == (self.selected_profile is None):
                 raise ValueError("exactly one selection is required after triage")
@@ -340,12 +350,18 @@ class AdvanceQaOrchestrationRequest(BaseModel):
             raise ValueError("selection may only be supplied after triage")
 
         if self.completed_step is OrchestrationStep.PRIMARY_REVIEW:
-            if self.status == "completed" and self.completed_profile is None:
-                raise ValueError("completed_profile is required after primary review")
-            if self.status != "completed" and self.completed_profile is not None:
-                raise ValueError("completed_profile requires a completed primary review")
-        elif self.completed_profile is not None:
-            raise ValueError("completed_profile may only be supplied after primary review")
+            if self.status == "completed" and not has_completed_profiles:
+                raise ValueError(
+                    "completed_profile or completed_profiles is required after primary review"
+                )
+            if self.status != "completed" and has_completed_profiles:
+                raise ValueError(
+                    "completed_profile or completed_profiles requires a completed primary review"
+                )
+        elif has_completed_profiles:
+            raise ValueError(
+                "completed_profile or completed_profiles may only be supplied after primary review"
+            )
 
         if self.risk_signals is not None and (
             self.completed_step is not OrchestrationStep.PRIMARY_REVIEW
@@ -475,6 +491,7 @@ class QaOrchestrator:
         selected_bundle: ReviewBundle | None = None,
         selected_profile: ReviewAgent | None = None,
         completed_profile: ReviewAgent | None = None,
+        completed_profiles: list[ReviewAgent] | None = None,
         risk_signals: DeepReviewSignals | None = None,
         skip_synthesis: bool = False,
     ) -> QaOrchestrationSession:
@@ -486,6 +503,7 @@ class QaOrchestrator:
                 selected_bundle=selected_bundle,
                 selected_profile=selected_profile,
                 completed_profile=completed_profile,
+                completed_profiles=completed_profiles,
                 risk_signals=risk_signals,
                 skip_synthesis=skip_synthesis,
             )
@@ -647,9 +665,33 @@ class QaOrchestrator:
             expected_profile = session.review_profiles[next_profile_index]
             if session.current_profile is not expected_profile:
                 raise OrchestrationError("current profile state is inconsistent")
-            if request.completed_profile is not expected_profile:
-                raise OrchestrationError("completed profile does not match current profile")
-            is_last_profile = next_profile_index == len(session.review_profiles) - 1
+            if request.completed_profiles is not None:
+                if session.selected_bundle is not None:
+                    groups = bundle_execution_groups(session.selected_bundle)
+                elif session.selected_profile is not None:
+                    groups = ((session.selected_profile,),)
+                else:
+                    raise OrchestrationError("missing selected profile for execution group")
+
+                completed_count = len(session.completed_profiles)
+                offset = 0
+                expected_group = None
+                for group in groups:
+                    if offset == completed_count:
+                        expected_group = group
+                        break
+                    offset += len(group)
+                if expected_group is None or tuple(request.completed_profiles) != expected_group:
+                    raise OrchestrationError("completed profiles do not match next execution group")
+                transition_profiles = list(expected_group)
+            else:
+                if request.completed_profile is not expected_profile:
+                    raise OrchestrationError("completed profile does not match current profile")
+                transition_profiles = [expected_profile]
+
+            is_last_profile = next_profile_index + len(transition_profiles) == len(
+                session.review_profiles
+            )
             if request.skip_synthesis and (
                 not is_last_profile
                 or session.selected_bundle is not None
@@ -658,7 +700,7 @@ class QaOrchestrator:
                 raise OrchestrationError(
                     "synthesis can be skipped only for a clean single-profile review"
                 )
-            completed_profiles = [*session.completed_profiles, expected_profile]
+            completed_profiles = [*session.completed_profiles, *transition_profiles]
             if not is_last_profile:
                 if request.risk_signals is not None:
                     raise OrchestrationError(

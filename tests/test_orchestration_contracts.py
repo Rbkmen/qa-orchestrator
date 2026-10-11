@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
-from qa_orchestrator.contracts import ReviewAgent, ReviewBundle
+from qa_orchestrator.contracts import ReviewAgent, ReviewBundle, ReviewRouteSelection
 from qa_orchestrator.orchestration import (
     MODEL_POLICIES,
     AdvanceQaOrchestrationRequest,
@@ -14,6 +14,40 @@ from qa_orchestrator.orchestration import (
     OrchestrationStep,
     QaOrchestrationSession,
 )
+from qa_orchestrator.review_profiles import build_review_route
+
+
+def test_review_route_selection_rejects_group_order_mismatch():
+    routes = [
+        build_review_route(ReviewAgent.CODE_EXPLORER),
+        build_review_route(ReviewAgent.CODE_REVIEWER),
+    ]
+
+    with pytest.raises(ValidationError, match="execution_groups must match route profiles"):
+        ReviewRouteSelection(
+            routes=routes,
+            execution_groups=[[ReviewAgent.CODE_REVIEWER], [ReviewAgent.CODE_EXPLORER]],
+        )
+
+
+@pytest.mark.parametrize(
+    ("routes", "execution_groups"),
+    [
+        (
+            [build_review_route(ReviewAgent.CODE_EXPLORER)],
+            [[], [ReviewAgent.CODE_EXPLORER]],
+        ),
+        (
+            [build_review_route(ReviewAgent.CODE_EXPLORER)] * 2,
+            [[ReviewAgent.CODE_EXPLORER, ReviewAgent.CODE_EXPLORER]],
+        ),
+    ],
+)
+def test_review_route_selection_rejects_empty_groups_and_duplicate_profiles(
+    routes, execution_groups
+):
+    with pytest.raises(ValidationError, match="execution_groups must match route profiles"):
+        ReviewRouteSelection(routes=routes, execution_groups=execution_groups)
 
 
 @pytest.mark.parametrize(
@@ -154,6 +188,39 @@ def test_completed_primary_review_requires_completed_profile():
             run_id="qar-0123456789abcdef0123456789abcdef",
             completed_step=OrchestrationStep.PRIMARY_REVIEW,
             status="completed",
+        )
+
+
+def test_completed_primary_review_accepts_a_group_of_completed_profiles():
+    request = AdvanceQaOrchestrationRequest(
+        run_id="qar-0123456789abcdef0123456789abcdef",
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profiles=[ReviewAgent.CODE_REVIEWER, ReviewAgent.PR_TEST_ANALYZER],
+        risk_signals=DeepReviewSignals(),
+    )
+
+    assert request.completed_profiles == [
+        ReviewAgent.CODE_REVIEWER,
+        ReviewAgent.PR_TEST_ANALYZER,
+    ]
+
+
+def test_completed_profiles_must_be_nonempty_and_exclusive_with_legacy_field():
+    base = {
+        "run_id": "qar-0123456789abcdef0123456789abcdef",
+        "completed_step": OrchestrationStep.PRIMARY_REVIEW,
+        "status": "completed",
+    }
+
+    with pytest.raises(ValidationError, match="at least one"):
+        AdvanceQaOrchestrationRequest(**base, completed_profiles=[])
+
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        AdvanceQaOrchestrationRequest(
+            **base,
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+            completed_profiles=[ReviewAgent.CODE_REVIEWER],
         )
 
 

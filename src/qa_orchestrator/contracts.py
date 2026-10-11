@@ -1,7 +1,7 @@
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 type QaTaskType = Literal[
     "ordinary_review",
@@ -66,22 +66,39 @@ class ReviewRoute(BaseModel):
     host_owns_decisions: Literal[True] = True
 
 
-class ReviewRouteBatch(BaseModel):
-    bundle: ReviewBundle = Field(description="Fixed bundle whose profile checklists are returned.")
+class ReviewRouteSelection(BaseModel):
     routes: list[ReviewRoute] = Field(
+        min_length=1,
         description=(
-            "Detailed checklists in the fixed bundle's declared profile order. "
+            "Detailed checklists in the selected route's declared profile order. "
             "Each route is a fixed, read-only checklist; it does not execute a review."
         )
     )
     execution_groups: list[list[ReviewAgent]] = Field(
+        min_length=1,
         description=(
-            "Ordered execution waves whose flattened profile IDs match routes. Run the groups in order; "
+            "Ordered execution waves whose flattened profile IDs exactly match routes. Run the groups in order; "
             "profiles in the same group are independent and may be reviewed concurrently by the host. "
-            "Wait for every profile in a group before reporting its profiles to the orchestrator, "
-            "and report them one at a time in the declared order."
+            "Wait for every profile in a group before reporting it with one completed_profiles call "
+            "in the declared order. Older hosts may report each completed_profile separately."
         )
     )
+
+    @model_validator(mode="after")
+    def validate_execution_group_order(self) -> "ReviewRouteSelection":
+        group_profiles = tuple(profile for group in self.execution_groups for profile in group)
+        route_profiles = tuple(route.profile for route in self.routes)
+        if (
+            any(not group for group in self.execution_groups)
+            or len(set(route_profiles)) != len(route_profiles)
+            or group_profiles != route_profiles
+        ):
+            raise ValueError("execution_groups must match route profiles in fixed order")
+        return self
+
+
+class ReviewRouteBatch(ReviewRouteSelection):
+    bundle: ReviewBundle = Field(description="Fixed bundle whose profile checklists are returned.")
 
 
 class ReviewProfileSummary(BaseModel):

@@ -22,7 +22,7 @@ USER_CONTROLLED_SPEED_PATTERNS = (
 )
 CLIENT_RULE_CONTRACT = {
     "orchestration entry": (r"\bstart_qa_orchestration\b",),
-    "route preparation": (r"\bprepare_qa_orchestration\b",),
+    "route checklist source": (r"\b(?:prepare_qa_orchestration|selected_review_routes)\b",),
     "state read": (r"\bget_qa_orchestration\b",),
     "orchestration finalization": (r"\bfinish_qa_orchestration\b",),
     "single route selection": (r"exactly one.*(?:bundle|profile)",),

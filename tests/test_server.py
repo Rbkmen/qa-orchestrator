@@ -5,7 +5,7 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from qa_orchestrator.contracts import ReviewAgent, ReviewBundle
-from qa_orchestrator.review_profiles import REVIEW_BUNDLES
+from qa_orchestrator.review_profiles import bundle_execution_groups
 from qa_orchestrator.server import build_server
 from qa_orchestrator.service import OrchestratorService
 
@@ -47,6 +47,9 @@ async def test_server_initialization_includes_advisory_trust_boundary(tmp_path):
     assert "one profile" in instructions.lower()
     assert "several changed files alone" in instructions.lower()
     assert "execution_groups" in instructions
+    assert "completed_profiles" in instructions
+    assert "selected_review_routes" in instructions
+    assert "one call" in instructions.lower()
     assert "concurrently" in instructions.lower()
     assert "whether profiles ran concurrently" in instructions.lower()
 
@@ -66,11 +69,17 @@ async def test_advance_tool_documents_host_reported_transition_limits(tmp_path):
     assert "status=completed" in description
     assert "never retry" in description.lower()
     assert "if the session is unknown or expired" in description.lower()
+    assert "selected_review_routes" in description
     completed_profile = tools["advance_qa_orchestration"].inputSchema["properties"][
         "completed_profile"
     ]["description"]
     assert "fixed route order" in completed_profile
     assert "never advance parallel profiles concurrently" in completed_profile
+    completed_profiles = tools["advance_qa_orchestration"].inputSchema["properties"][
+        "completed_profiles"
+    ]
+    assert any(option.get("type") == "array" for option in completed_profiles.get("anyOf", []))
+    assert "whole next execution_group" in completed_profiles["description"]
 
 
 @pytest.mark.asyncio
@@ -86,8 +95,10 @@ async def test_server_publishes_tool_descriptions(tmp_path):
             property_schema.get("description", "").strip()
             for property_schema in tool.inputSchema["properties"].values()
         ), name
-    assert "prepare_qa_orchestration_bundle;" in tools["prepare_qa_orchestration"].description
-    assert "do not repeat this lookup" in tools["prepare_qa_orchestration"].description
+    prepare_description = " ".join(tools["prepare_qa_orchestration"].description.split())
+    assert "selected_review_routes" in prepare_description
+    assert "do not make a separate preparation call" in prepare_description
+    assert "standalone bundle lookup" in tools["prepare_qa_orchestration_bundle"].description
 
 
 @pytest.mark.asyncio
@@ -112,6 +123,14 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     )
     assert "skip_synthesis" in advance_properties
     assert "no findings" in advance_properties["skip_synthesis"]["description"].lower()
+    advance_output = tools["advance_qa_orchestration"].outputSchema
+    assert advance_output is not None
+    selected_routes_schema = advance_output["properties"]["selected_review_routes"]
+    route_selection_schema = next(
+        item for item in selected_routes_schema["anyOf"] if item.get("type") != "null"
+    )
+    assert "routes" in route_selection_schema["properties"]
+    assert "execution_groups" in route_selection_schema["properties"]
     batch_schema = tools["prepare_qa_orchestration_bundle"].inputSchema
     assert set(batch_schema["properties"]["bundle"]["enum"]) == {
         bundle.value for bundle in ReviewBundle
@@ -616,6 +635,16 @@ async def test_orchestration_tools_advance_with_bundle_order(tmp_path):
     ]
     assert advanced.structured_content["current_profile"] == "code_explorer"
     assert advanced.structured_content["completed_profiles"] == []
+    selected_routes = advanced.structured_content["selected_review_routes"]
+    assert [route["profile"] for route in selected_routes["routes"]] == [
+        "code_explorer",
+        "code_reviewer",
+        "pr_test_analyzer",
+    ]
+    assert selected_routes["execution_groups"] == [
+        [profile.value for profile in group]
+        for group in bundle_execution_groups(ReviewBundle.ORDINARY_MR)
+    ]
 
 
 @pytest.mark.asyncio
@@ -639,18 +668,30 @@ async def test_orchestration_tools_complete_each_bundle(tmp_path, bundle: Review
             },
         )
 
-        profiles = REVIEW_BUNDLES[bundle]
-        for index, profile in enumerate(profiles):
+        groups = bundle_execution_groups(bundle)
+        selected_routes = current.structured_content["selected_review_routes"]
+        assert [route["profile"] for route in selected_routes["routes"]] == [
+            profile.value for group in groups for profile in group
+        ]
+        assert selected_routes["execution_groups"] == [
+            [profile.value for profile in group] for group in groups
+        ]
+        expected_routes = service.prepare_review_bundle(bundle).model_dump(mode="json")
+        expected_routes.pop("bundle")
+        assert selected_routes == expected_routes
+        primary_advance_calls = 0
+        for index, group in enumerate(groups):
             current = await client.call_tool(
                 "advance_qa_orchestration",
                 {
                     "run_id": run_id,
                     "completed_step": current.structured_content["current_step"],
                     "status": "completed",
-                    "completed_profile": profile.value,
-                    "risk_signals": {} if index == len(profiles) - 1 else None,
+                    "completed_profiles": [profile.value for profile in group],
+                    "risk_signals": {} if index == len(groups) - 1 else None,
                 },
             )
+            primary_advance_calls += 1
 
         synthesis = await client.call_tool(
             "advance_qa_orchestration",
@@ -673,6 +714,13 @@ async def test_orchestration_tools_complete_each_bundle(tmp_path, bundle: Review
     assert outcome.structured_content["status"] == "completed"
     assert "outcome_recorded" not in outcome.structured_content
     assert final.structured_content["status"] == "completed"
+    if bundle is ReviewBundle.ORDINARY_MR:
+        assert primary_advance_calls == 2
+        assert current.structured_content["completed_profiles"] == [
+            "code_explorer",
+            "code_reviewer",
+            "pr_test_analyzer",
+        ]
 
 
 @pytest.mark.asyncio
@@ -685,7 +733,7 @@ async def test_clean_single_profile_can_finalize_without_synthesis_tool_step(tmp
             {"task_type": "ordinary_review"},
         )
         run_id = started.structured_content["run_id"]
-        await client.call_tool(
+        triage = await client.call_tool(
             "advance_qa_orchestration",
             {
                 "run_id": run_id,
@@ -694,6 +742,13 @@ async def test_clean_single_profile_can_finalize_without_synthesis_tool_step(tmp
                 "selected_profile": "code_reviewer",
             },
         )
+        selected_routes = triage.structured_content["selected_review_routes"]
+        assert selected_routes == {
+            "routes": [
+                service.prepare_review_route(ReviewAgent.CODE_REVIEWER).model_dump(mode="json")
+            ],
+            "execution_groups": [["code_reviewer"]],
+        }
         advanced = await client.call_tool(
             "advance_qa_orchestration",
             {

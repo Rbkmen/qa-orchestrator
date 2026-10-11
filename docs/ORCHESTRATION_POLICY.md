@@ -56,8 +56,8 @@ The GPT-6 catalog source and last-review date live beside `MODEL_CATALOGS` in `s
 
 1. The host calls `start_qa_orchestration(task_type)` and receives a `run_id`, the active model-policy mode, and the next action. `host_default` uses the host's configured model and reasoning; `configured` returns explicit per-stage settings.
 2. After triage, the host calls `advance_qa_orchestration` with one fixed bundle or one of the ten `ReviewAgent` profiles. Use one profile for a narrow, single-concern, low-risk review; a higher file count alone does not require a bundle.
-3. For one profile, fetch its checklist with `prepare_qa_orchestration`; for a bundle, fetch all checklists and `execution_groups` once with `prepare_qa_orchestration_bundle(bundle)`. The ordered groups flatten to the returned route order. Run each group as a barrier: profiles in the same group may be reviewed concurrently when the host supports parallel workers; otherwise use the sequential fallback. Wait for all profiles in a group, then report each `completed_profile` one at a time in fixed route order. Never advance concurrent profiles in parallel. Retry a failed role or run it in the parent before reporting the group; if it remains incomplete, end with an honest `partial` or `blocked` outcome. The orchestrator validates the sequence the host reports, but cannot confirm a review actually ran or ran concurrently.
-4. In the same transition that reports the last primary-review profile, the host supplies evidence-based `risk_signals` (use an empty object when none apply). The orchestrator applies fixed deep-review rules to those host-reported signals; it cannot verify that they reflect evidence. The host advances according to the deep-review assessment. For a single-profile route only, it may also set `skip_synthesis=true` when that profile reports no findings, no unresolved material questions, and every risk signal is false. This host attestation skips only the separate synthesis stage; the host still validates and produces the final QA result. Bundles and any non-clean review continue through normal synthesis.
+3. Use `selected_review_routes` from the successful triage response; it includes the selected checklist(s) and `execution_groups`, whose flattened order matches the returned routes. The stateless preparation tools remain available for standalone lookup or recovery. Run each group as a barrier: profiles in the same group may be reviewed concurrently when the host supports parallel workers; otherwise use the sequential fallback. Wait for all profiles in a group, then report the full group once through `completed_profiles`, in fixed route order. Older hosts may keep using `completed_profile` one at a time. Never submit transition calls concurrently. Retry a failed role or run it in the parent before reporting the group; if it remains incomplete, end with an honest `partial` or `blocked` outcome. The orchestrator validates the sequence the host reports, but cannot confirm a review actually ran or ran concurrently.
+4. In the same transition that reports the final primary-review group, the host supplies evidence-based `risk_signals` (use an empty object when none apply). The orchestrator applies fixed deep-review rules to those host-reported signals; it cannot verify that they reflect evidence. The host advances according to the deep-review assessment. For a single-profile route only, it may also set `skip_synthesis=true` when that profile reports no findings, no unresolved material questions, and every risk signal is false. This host attestation skips only the separate synthesis stage; the host still validates and produces the final QA result. Bundles and any non-clean review continue through normal synthesis.
 5. After deep review, the host uses the returned synthesis policy or its own configured model in `host_default` mode.
 6. After synthesis or the eligible clean single-profile fast path, the state becomes `awaiting_host_outcome`; the host completes its final QA validation and calls `finish_qa_orchestration` with the same `run_id` and a status of `completed`, `partial`, or `blocked`. The orchestrator moves the session to its final status. For an early stop, first pass `partial` or `blocked` to `advance_qa_orchestration`, then finish the session with that same status.
 
@@ -68,7 +68,7 @@ Allowed transitions:
 ```text
 Triage → execution group 1 → ... → execution group N
          [profiles in a group may run concurrently]
-         [record completed profiles one at a time in route order]
+         [record each complete group once in route order]
                          ↘ clean single-profile fast path → awaiting host outcome
                                       ↘ Deep review ↗
                          Final synthesis → awaiting host outcome
@@ -85,12 +85,13 @@ Triage → Faraday — Evidence Investigator
        → wait for its evidence map
        → Code Reviewer ─┐
        → Test Analyzer ─┴→ both may run concurrently
-       → wait for both; record Code Reviewer, then Test Analyzer
+       → wait for both; record both with one `completed_profiles` call
        → Final synthesis
        → Host final QA outcome
 ```
 
-The bundle tool returns these explicit waves as `execution_groups`; they are
+The triage response and stateless bundle tool return these explicit waves as
+`execution_groups`; they are
 schedule metadata for the host, not model launches performed by the server.
 Workers receive the shared compact Evidence Packet, relevant deduplicated
 outputs from earlier groups (such as the evidence map), their own checklist,
@@ -292,11 +293,11 @@ and task-type recommendation shortlists. It requires no session and does not
 create one, change state or TTL, write storage, or contact providers. Catalog
 definitions come from the same fixed profile and bundle definitions used by
 preparation and triage. Choose a route from the changed files and confirmed
-stack; task-based recommendations do not restrict the choices. Use
-`prepare_qa_orchestration(agent_profile)` for one profile's detailed checklist,
-or `prepare_qa_orchestration_bundle(bundle)` once for all profiles in a selected
-bundle, preserving route order. Use `advance_qa_orchestration` to
-apply the chosen route at triage.
+stack; task-based recommendations do not restrict the choices. The successful
+`advance_qa_orchestration` triage response includes `selected_review_routes`
+with the selected checklist(s) and ordered groups. Use
+`prepare_qa_orchestration(agent_profile)` or
+`prepare_qa_orchestration_bundle(bundle)` for standalone lookup or recovery.
 
 ## Persistence and safety
 

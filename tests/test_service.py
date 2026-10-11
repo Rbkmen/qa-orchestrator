@@ -8,7 +8,7 @@ from qa_orchestrator.orchestration import (
     OrchestrationStatus,
     OrchestrationStep,
 )
-from qa_orchestrator.review_profiles import REVIEW_BUNDLES
+from qa_orchestrator.review_profiles import REVIEW_BUNDLES, bundle_execution_groups
 from qa_orchestrator.service import OrchestratorService
 
 
@@ -82,6 +82,53 @@ def test_service_advances_with_a_fixed_bundle(tmp_path):
 
     assert advanced.selected_bundle is ReviewBundle.ORDINARY_MR
     assert advanced.review_profiles == list(REVIEW_BUNDLES[ReviewBundle.ORDINARY_MR])
+    assert [route.profile for route in advanced.selected_review_routes.routes] == list(
+        REVIEW_BUNDLES[ReviewBundle.ORDINARY_MR]
+    )
+    assert advanced.selected_review_routes.execution_groups == [
+        list(group) for group in bundle_execution_groups(ReviewBundle.ORDINARY_MR)
+    ]
+
+
+def test_service_returns_single_profile_checklist_with_triage_selection(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review")
+
+    advanced = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=OrchestrationStep.TRIAGE,
+            status="completed",
+            selected_profile=ReviewAgent.PYTHON_REVIEWER,
+        )
+    )
+
+    assert [route.profile for route in advanced.selected_review_routes.routes] == [
+        ReviewAgent.PYTHON_REVIEWER
+    ]
+    assert advanced.selected_review_routes.execution_groups == [[ReviewAgent.PYTHON_REVIEWER]]
+    assert not hasattr(service.get_qa_orchestration(started.run_id), "selected_review_routes")
+
+
+def test_service_prepares_triage_routes_before_advancing_session(tmp_path, monkeypatch):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review")
+
+    def fail_route_preparation(bundle):
+        raise ValueError("route definitions are invalid")
+
+    monkeypatch.setattr(service, "prepare_review_bundle", fail_route_preparation)
+    with pytest.raises(ValueError, match="route definitions are invalid"):
+        service.advance_qa_orchestration(
+            AdvanceQaOrchestrationRequest(
+                run_id=started.run_id,
+                completed_step=OrchestrationStep.TRIAGE,
+                status="completed",
+                selected_bundle=ReviewBundle.ORDINARY_MR,
+            )
+        )
+
+    assert service.get_qa_orchestration(started.run_id).current_step is OrchestrationStep.TRIAGE
 
 
 

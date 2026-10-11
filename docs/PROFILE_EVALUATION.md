@@ -35,7 +35,7 @@ These checks validate host scheduling semantics, not model quality or elapsed-ti
 
 1. Read `execution_groups` from a bundle response and confirm flattening the groups exactly matches the returned route order.
 2. With stub workers controlled by a start/release barrier, confirm every profile in a multi-profile group starts before any is released, and the next group does not start until all current-group workers finish.
-3. Confirm completed profiles are reported with separate `advance_qa_orchestration` calls in fixed route order even if workers finish in a different order; never submit transitions concurrently.
+3. Confirm a completed execution group is reported with one `advance_qa_orchestration` call in fixed route order even if workers finish in a different order; never submit transitions concurrently. Legacy one-profile calls remain accepted.
 4. Disable worker support and confirm the same groups use the sequential fallback without changing profile order or checklists.
 5. Make one worker fail; confirm it is retried or run in the parent before the group is recorded, and an unresolved failure ends as `partial` or `blocked` rather than a false completion.
 

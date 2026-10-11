@@ -13,7 +13,10 @@ from qa_orchestrator.orchestration import (
     OrchestrationStep,
     QaOrchestrator,
 )
-from qa_orchestrator.review_profiles import REVIEW_BUNDLES
+from qa_orchestrator.review_profiles import (
+    REVIEW_BUNDLES,
+    bundle_execution_groups,
+)
 
 
 def test_delete_frees_capacity_and_concurrent_repeats_are_idempotent():
@@ -516,6 +519,154 @@ def test_bundle_requires_each_profile_in_fixed_order_before_synthesis():
     assert session.current_step is OrchestrationStep.SYNTHESIS
     assert session.current_profile is None
     assert session.completed_profiles == list(REVIEW_BUNDLES[ReviewBundle.ORDINARY_MR])
+
+
+@pytest.mark.parametrize("bundle", list(ReviewBundle))
+def test_each_execution_group_can_be_recorded_with_one_transition(bundle: ReviewBundle):
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review")
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_bundle=bundle,
+    )
+
+    groups = bundle_execution_groups(bundle)
+    transition_calls = 0
+    for index, group in enumerate(groups):
+        session = orchestrator.advance(
+            run_id=session.run_id,
+            completed_step=OrchestrationStep.PRIMARY_REVIEW,
+            status="completed",
+            completed_profiles=list(group),
+            risk_signals=(DeepReviewSignals() if index == len(groups) - 1 else None),
+        )
+        transition_calls += 1
+
+    assert transition_calls == len(groups)
+    if any(len(group) > 1 for group in groups):
+        assert transition_calls < len(REVIEW_BUNDLES[bundle])
+    assert session.completed_profiles == list(REVIEW_BUNDLES[bundle])
+    assert session.current_step is OrchestrationStep.SYNTHESIS
+
+
+@pytest.mark.parametrize(
+    "completed_profiles",
+    [
+        [ReviewAgent.CODE_REVIEWER],
+        [ReviewAgent.PR_TEST_ANALYZER, ReviewAgent.CODE_REVIEWER],
+        [ReviewAgent.CODE_EXPLORER, ReviewAgent.CODE_REVIEWER],
+    ],
+)
+def test_group_transition_rejects_incomplete_or_wrong_profiles_without_mutation(
+    completed_profiles: list[ReviewAgent],
+):
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review")
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_bundle=ReviewBundle.ORDINARY_MR,
+    )
+
+    with pytest.raises(OrchestrationError, match="next execution group"):
+        orchestrator.advance(
+            run_id=session.run_id,
+            completed_step=OrchestrationStep.PRIMARY_REVIEW,
+            status="completed",
+            completed_profiles=completed_profiles,
+        )
+
+    unchanged = orchestrator.get(session.run_id)
+    assert unchanged.current_profile is ReviewAgent.CODE_EXPLORER
+    assert unchanged.completed_profiles == []
+
+
+def test_group_transition_cannot_ack_only_the_remaining_suffix_of_a_group():
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review")
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_bundle=ReviewBundle.ORDINARY_MR,
+    )
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profile=ReviewAgent.CODE_EXPLORER,
+    )
+
+    with pytest.raises(OrchestrationError, match="next execution group"):
+        orchestrator.advance(
+            run_id=session.run_id,
+            completed_step=OrchestrationStep.PRIMARY_REVIEW,
+            status="completed",
+            completed_profiles=[ReviewAgent.PR_TEST_ANALYZER],
+            risk_signals=DeepReviewSignals(),
+        )
+
+    unchanged = orchestrator.get(session.run_id)
+    assert unchanged.current_profile is ReviewAgent.CODE_REVIEWER
+    assert unchanged.completed_profiles == [ReviewAgent.CODE_EXPLORER]
+
+
+def test_group_transition_requires_risk_signals_for_the_final_group():
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review")
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_bundle=ReviewBundle.ORDINARY_MR,
+    )
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profiles=[ReviewAgent.CODE_EXPLORER],
+    )
+
+    with pytest.raises(OrchestrationError, match="risk_signals are required"):
+        orchestrator.advance(
+            run_id=session.run_id,
+            completed_step=OrchestrationStep.PRIMARY_REVIEW,
+            status="completed",
+            completed_profiles=[
+                ReviewAgent.CODE_REVIEWER,
+                ReviewAgent.PR_TEST_ANALYZER,
+            ],
+        )
+
+    unchanged = orchestrator.get(session.run_id)
+    assert unchanged.current_profile is ReviewAgent.CODE_REVIEWER
+    assert unchanged.completed_profiles == [ReviewAgent.CODE_EXPLORER]
+
+
+def test_clean_single_profile_batch_can_use_existing_fast_path():
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review")
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_profile=ReviewAgent.CODE_REVIEWER,
+    )
+
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profiles=[ReviewAgent.CODE_REVIEWER],
+        risk_signals=DeepReviewSignals(),
+        skip_synthesis=True,
+    )
+
+    assert session.current_step is OrchestrationStep.AWAITING_HOST_OUTCOME
+    assert session.completed_profiles == [ReviewAgent.CODE_REVIEWER]
 
 
 @pytest.mark.parametrize("bundle", list(ReviewBundle))
