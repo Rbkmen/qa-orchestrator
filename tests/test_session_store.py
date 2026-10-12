@@ -6,9 +6,10 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from qa_orchestrator.contracts import ReviewAgent
+from qa_orchestrator.contracts import ReviewAgent, ReviewBundle
 from qa_orchestrator.model_policy import ModelProvider, ModelSelection
 from qa_orchestrator.orchestration import (
+    DeepReviewSignals,
     OrchestrationError,
     OrchestrationStep,
     QaOrchestrator,
@@ -57,6 +58,98 @@ def test_unfinished_session_survives_restart_and_transition_refreshes_ttl(tmp_pa
     restored = _orchestrator(store, clock).get(started.run_id)
 
     assert restored.model_dump() == advanced.model_dump()
+
+
+def test_python_backend_session_resumes_remaining_group_after_schedule_change(tmp_path):
+    store = SqliteSessionStore(tmp_path / "sessions.sqlite3")
+    clock = FakeClock()
+    first_process = _orchestrator(store, clock)
+    started = first_process.start("ordinary_review")
+    selected = first_process.advance(
+        run_id=started.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_bundle=ReviewBundle.PYTHON_BACKEND,
+    )
+    partially_completed = first_process.advance(
+        run_id=selected.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profile=ReviewAgent.CODE_EXPLORER,
+    )
+
+    restored = _orchestrator(store, clock)
+    assert restored.get(started.run_id) == partially_completed
+
+    completed = restored.advance(
+        run_id=started.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profiles=[
+            ReviewAgent.PYTHON_REVIEWER,
+            ReviewAgent.PR_TEST_ANALYZER,
+        ],
+        risk_signals=DeepReviewSignals(),
+    )
+
+    assert completed.current_step is OrchestrationStep.SYNTHESIS
+    assert completed.completed_profiles == [
+        ReviewAgent.CODE_EXPLORER,
+        ReviewAgent.PYTHON_REVIEWER,
+        ReviewAgent.PR_TEST_ANALYZER,
+    ]
+
+
+@pytest.mark.parametrize(
+    "remaining_profiles",
+    [
+        pytest.param(
+            [
+                ReviewAgent.CODE_EXPLORER,
+                ReviewAgent.PYTHON_REVIEWER,
+                ReviewAgent.PR_TEST_ANALYZER,
+            ],
+            id="repeats-completed-prefix",
+        ),
+        pytest.param(
+            [ReviewAgent.PR_TEST_ANALYZER, ReviewAgent.PYTHON_REVIEWER],
+            id="wrong-order",
+        ),
+        pytest.param([ReviewAgent.PYTHON_REVIEWER], id="incomplete-suffix"),
+    ],
+)
+def test_python_backend_session_rejects_invalid_remaining_group_after_restore(
+    tmp_path,
+    remaining_profiles,
+):
+    store = SqliteSessionStore(tmp_path / "sessions.sqlite3")
+    clock = FakeClock()
+    first_process = _orchestrator(store, clock)
+    started = first_process.start("ordinary_review")
+    selected = first_process.advance(
+        run_id=started.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_bundle=ReviewBundle.PYTHON_BACKEND,
+    )
+    partially_completed = first_process.advance(
+        run_id=selected.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profile=ReviewAgent.CODE_EXPLORER,
+    )
+    restored = _orchestrator(store, clock)
+
+    with pytest.raises(OrchestrationError, match="next execution group"):
+        restored.advance(
+            run_id=started.run_id,
+            completed_step=OrchestrationStep.PRIMARY_REVIEW,
+            status="completed",
+            completed_profiles=remaining_profiles,
+            risk_signals=DeepReviewSignals(),
+        )
+
+    assert restored.get(started.run_id) == partially_completed
 
 
 

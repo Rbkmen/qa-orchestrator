@@ -342,6 +342,9 @@ async def test_catalog_discovers_profiles_and_ordered_bundles_without_a_session(
         ["code_explorer"],
         ["code_reviewer", "pr_test_analyzer"],
     ]
+    assert bundles["python_backend"]["execution_groups"] == [
+        ["code_explorer", "python_reviewer", "pr_test_analyzer"],
+    ]
     assert bundles["requirements"]["execution_groups"] == [
         ["code_explorer"],
         ["code_reviewer"],

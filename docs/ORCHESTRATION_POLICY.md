@@ -194,7 +194,7 @@ flowchart LR
 | `widget` | `code_explorer` → `react_reviewer` → `typescript_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`react_reviewer`, `typescript_reviewer`, `pr_test_analyzer`) |
 | `widget_js` | `code_explorer` → `code_reviewer` → `react_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`code_reviewer`, `react_reviewer`, `pr_test_analyzer`) |
 | `ruby_backend` | `code_explorer` → `ruby_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`ruby_reviewer`, `pr_test_analyzer`) |
-| `python_backend` | `code_explorer` → `python_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`python_reviewer`, `pr_test_analyzer`) |
+| `python_backend` | `code_explorer` → `python_reviewer` → `pr_test_analyzer` | (`code_explorer`, `python_reviewer`, `pr_test_analyzer`) |
 | `mobile` | `code_explorer` → `mobile_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`mobile_reviewer`, `pr_test_analyzer`) |
 | `security` | `code_explorer` → `security_reviewer` → `silent_failure_hunter` | (`code_explorer`) → (`security_reviewer`, `silent_failure_hunter`) |
 | `autotest` | `code_reviewer` → `typescript_reviewer` → `pr_test_analyzer` | (`code_reviewer`, `typescript_reviewer`, `pr_test_analyzer`) |

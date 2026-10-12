@@ -41,6 +41,12 @@ These checks validate host scheduling semantics, not model quality or elapsed-ti
 
 The MCP server only publishes the schedule and validates reported transition order; it does not launch workers or verify concurrency. Run these checks in a client adapter or host that can expose worker-start and completion events.
 
+### Python backend parallel-start experiment
+
+`python_backend` starts `code_explorer`, `python_reviewer`, and `pr_test_analyzer` in one execution group. This removes the explorer barrier from the critical path, but the specialist reviewers cannot use the explorer's evidence map at dispatch time. The parent must prepare a complete compact Evidence Packet before starting the group and reconcile all outputs before synthesis.
+
+The schedule is a speed experiment, not a measured model-quality result. On representative Python/MCP changes, compare it with the former two-wave schedule using the same model, reasoning, Evidence Packet, and checklist versions. Record total elapsed time, each profile's elapsed time, worker start skew, barrier wait, checked and unique valid finding candidates, missed candidates found by the other schedule, and token use. Validate every candidate against source before scoring it. Keep raw model responses out of the repo; summarize aggregate results only. Retain the parallel schedule only if the time reduction is material and review quality stays acceptable.
+
 ## Synthetic profile cases
 
 ### 1. Evidence map only — `code_explorer`

@@ -677,8 +677,8 @@ class QaOrchestrator:
                 offset = 0
                 expected_group = None
                 for group in groups:
-                    if offset == completed_count:
-                        expected_group = group
+                    if offset <= completed_count < offset + len(group):
+                        expected_group = group[completed_count - offset :]
                         break
                     offset += len(group)
                 if expected_group is None or tuple(request.completed_profiles) != expected_group:

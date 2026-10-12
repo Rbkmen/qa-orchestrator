@@ -222,8 +222,11 @@ def test_review_bundle_execution_groups_preserve_route_order_and_parallelize_ind
             (ReviewAgent.RUBY_REVIEWER, ReviewAgent.PR_TEST_ANALYZER),
         ),
         ReviewBundle.PYTHON_BACKEND: (
-            (ReviewAgent.CODE_EXPLORER,),
-            (ReviewAgent.PYTHON_REVIEWER, ReviewAgent.PR_TEST_ANALYZER),
+            (
+                ReviewAgent.CODE_EXPLORER,
+                ReviewAgent.PYTHON_REVIEWER,
+                ReviewAgent.PR_TEST_ANALYZER,
+            ),
         ),
         ReviewBundle.MOBILE: (
             (ReviewAgent.CODE_EXPLORER,),
