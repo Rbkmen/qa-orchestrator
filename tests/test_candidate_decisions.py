@@ -95,3 +95,50 @@ def test_decision_sources_and_final_links_are_unique_and_explicit(reviewed_candi
             rationale="Runtime is unavailable.",
             evidence_refs=("E1",),
         )
+
+
+@pytest.mark.parametrize("outcome", ("partial", "blocked"))
+def test_early_stop_can_attach_its_first_final_report(
+    outcome,
+    bound_review_context,
+    review_finding_candidate,
+    make_profile_review_report,
+    make_final_review_report,
+):
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review", bound_review_context)
+    orchestrator.advance(
+        run_id=session.run_id,
+        completed_step="triage",
+        status="completed",
+        selected_bundle="autotest",
+    )
+    orchestrator.advance(
+        run_id=session.run_id,
+        completed_step="primary_review",
+        status="completed",
+        completed_profile="code_reviewer",
+        profile_reports=[
+            make_profile_review_report(
+                ReviewAgent.CODE_REVIEWER, findings=(review_finding_candidate,)
+            )
+        ],
+    )
+    stopped = orchestrator.advance(
+        run_id=session.run_id, completed_step="primary_review", status=outcome
+    )
+    final = make_final_review_report(
+        (ReviewAgent.CODE_REVIEWER,),
+        findings=((review_finding_candidate, (ReviewAgent.CODE_REVIEWER,)),),
+    )
+    finished = orchestrator.finish(
+        run_id=session.run_id,
+        outcome=outcome,
+        final_review_report=final,
+        expected_revision=stopped.revision,
+    )
+    assert finished.final_review_report == final
+    assert (
+        orchestrator.finish(run_id=session.run_id, outcome=outcome, final_review_report=final)
+        == finished
+    )

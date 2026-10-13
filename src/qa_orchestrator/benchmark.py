@@ -8,7 +8,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from qa_orchestrator.contracts import GitObjectId, ReviewFindingCandidate, Sha256Digest
 
@@ -41,6 +41,11 @@ class BenchmarkCase(BaseModel):
     diff_sha256: Sha256Digest
     gold: tuple[GoldFinding, ...] = Field(max_length=1000)
     gold_complete: bool = False
+
+    @field_validator("base_sha", "head_sha", "diff_sha256")
+    @classmethod
+    def normalize_hashes(cls, value: str) -> str:
+        return value.lower()
 
     @model_validator(mode="after")
     def unique_gold(self) -> "BenchmarkCase":
@@ -75,6 +80,7 @@ class CandidateAdjudication(BaseModel):
     candidate_id: str
     verdict: Literal["matched", "valid_unlisted", "false_positive", "duplicate", "unverified"]
     gold_id: str | None = None
+    additional_gold_ids: tuple[str, ...] = Field(default=(), max_length=100)
     rationale: str = Field(min_length=1, max_length=5000)
     evidence_valid: bool | None = None
     location_valid: bool | None = None
@@ -83,6 +89,11 @@ class CandidateAdjudication(BaseModel):
     def match_requires_gold(self) -> "CandidateAdjudication":
         if (self.verdict in {"matched", "duplicate"}) != (self.gold_id is not None):
             raise ValueError("only matched and duplicate verdicts require gold_id")
+        if self.additional_gold_ids and self.verdict != "matched":
+            raise ValueError("additional gold matches require a matched verdict")
+        all_gold = (self.gold_id, *self.additional_gold_ids)
+        if len(set(all_gold)) != len(all_gold):
+            raise ValueError("gold matches must be unique within an adjudication")
         return self
 
 
@@ -107,6 +118,18 @@ class BenchmarkRun(BaseModel):
     adjudicator: str = Field(min_length=1, max_length=256)
     adjudications: tuple[CandidateAdjudication, ...] = Field(default=(), max_length=1000)
 
+    @field_validator(
+        "base_sha",
+        "head_sha",
+        "diff_sha256",
+        "evidence_packet_sha256",
+        "checklist_sha256",
+        "host_instructions_sha256",
+    )
+    @classmethod
+    def normalize_hashes(cls, value: str) -> str:
+        return value.lower()
+
     @model_validator(mode="after")
     def all_candidates_adjudicated(self) -> "BenchmarkRun":
         candidate_ids = [candidate.candidate_id for candidate in self.candidates]
@@ -115,7 +138,12 @@ class BenchmarkRun(BaseModel):
             raise ValueError("benchmark candidate IDs must be unique")
         if len(set(decision_ids)) != len(decision_ids) or set(candidate_ids) != set(decision_ids):
             raise ValueError("exactly one adjudication is required for every candidate")
-        matched = [d.gold_id for d in self.adjudications if d.verdict == "matched"]
+        matched = [
+            gold_id
+            for d in self.adjudications
+            if d.verdict == "matched"
+            for gold_id in (d.gold_id, *d.additional_gold_ids)
+        ]
         if len(set(matched)) != len(matched):
             raise ValueError("a gold finding can be matched only once per run")
         return self
@@ -158,9 +186,18 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
         ):
             raise ValueError("benchmark run does not match a pinned dataset case")
         gold = {finding.gold_id: finding for finding in case.gold}
-        if any(d.gold_id is not None and d.gold_id not in gold for d in run.adjudications):
+        if any(
+            gold_id is not None and gold_id not in gold
+            for d in run.adjudications
+            for gold_id in (d.gold_id, *d.additional_gold_ids)
+        ):
             raise ValueError("adjudication cites an unknown gold finding")
-        matched = {d.gold_id for d in run.adjudications if d.verdict == "matched"}
+        matched = {
+            gold_id
+            for d in run.adjudications
+            if d.verdict == "matched"
+            for gold_id in (d.gold_id, *d.additional_gold_ids)
+        }
         if any(d.verdict == "duplicate" and d.gold_id not in matched for d in run.adjudications):
             raise ValueError("duplicate verdict requires a matched original finding")
         valid = sum(d.verdict in {"matched", "valid_unlisted"} for d in run.adjudications)

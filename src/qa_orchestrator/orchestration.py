@@ -969,16 +969,23 @@ class QaOrchestrator:
             if session.status in _TERMINAL_SESSION_STATUSES:
                 if session.status is not final_status:
                     raise OrchestrationError("conflicting final outcome")
+                final_action = _FINALIZED_TERMINAL_ACTIONS[final_status]
+                already_finalized = session.next_action == final_action
                 if (
                     validated_report is not None
                     and validated_report != session.final_review_report
+                    and (already_finalized or session.final_review_report is not None)
                 ):
                     raise OrchestrationError("conflicting final review report")
-                final_action = _FINALIZED_TERMINAL_ACTIONS[final_status]
-                if session.next_action == final_action:
+                if already_finalized:
                     return self._copy(session)
-                updated = session.model_copy(update={"next_action": final_action,
-                                                     "revision": session.revision + 1})
+                updated = session.model_copy(
+                    update={
+                        "next_action": final_action,
+                        "final_review_report": validated_report,
+                        "revision": session.revision + 1,
+                    }
+                )
                 updated = self._refresh_expiry(updated, now)
                 self._save_session(
                     updated,

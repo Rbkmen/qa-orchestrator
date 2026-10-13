@@ -190,3 +190,31 @@ def test_reviewbench_import_rejects_malformed_input_before_git(tmp_path, monkeyp
     )
     with pytest.raises(ValueError, match="invalid ReviewBench"):
         import_reviewbench(source, tmp_path)
+
+
+def test_explicit_grouped_matches_get_credit_without_double_counting(benchmark_inputs):
+    dataset, results = benchmark_inputs
+    results["runs"][0]["adjudications"][0]["additional_gold_ids"] = ["G-2"]
+    score = score_benchmark(
+        BenchmarkDataset.model_validate(dataset), BenchmarkResults.model_validate(results)
+    )
+    assert score["runs"][0]["matched_gold"] == 2
+    assert score["runs"][0]["recall"] == 1
+    results["runs"][0]["adjudications"][2].update(verdict="matched", gold_id="G-2")
+    with pytest.raises(ValidationError, match="only once"):
+        BenchmarkResults.model_validate(results)
+
+
+def test_digest_case_does_not_change_snapshot_or_configuration_identity(benchmark_inputs):
+    dataset, results = benchmark_inputs
+    dataset["cases"][0].update(head_sha="a" * 40, diff_sha256="b" * 64)
+    results["runs"][0].update(head_sha="A" * 40, diff_sha256="B" * 64, checklist_sha256="C" * 64)
+    second = deepcopy(results["runs"][0])
+    second.update(
+        run_id="run-2", head_sha="a" * 40, diff_sha256="b" * 64, checklist_sha256="c" * 64
+    )
+    results["runs"].append(second)
+    score = score_benchmark(
+        BenchmarkDataset.model_validate(dataset), BenchmarkResults.model_validate(results)
+    )
+    assert score["configurations"]["baseline"]["runs"] == 2
