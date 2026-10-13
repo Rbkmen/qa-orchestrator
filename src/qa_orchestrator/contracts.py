@@ -139,6 +139,7 @@ class ProfileExecutionMetrics(BaseModel):
     completed_at: AwareDatetime
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
+    attempt_count: int = Field(default=1, ge=1, le=4)
 
     @model_validator(mode="after")
     def validate_execution_interval(self) -> "ProfileExecutionMetrics":

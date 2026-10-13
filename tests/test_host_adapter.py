@@ -1,0 +1,213 @@
+import asyncio
+from datetime import UTC, datetime
+
+import pytest
+
+from qa_orchestrator.contracts import ProfileExecutionMetrics, ProfileReviewReport, ReviewAgent
+from qa_orchestrator.host import HostExecutionPolicy, HostReviewAdapter, RetryableProfileError
+from qa_orchestrator.orchestration import AdvanceQaOrchestrationRequest, DeepReviewSignals
+from qa_orchestrator.service import OrchestratorService
+
+
+@pytest.fixture
+def host_session(tmp_path, bound_review_context):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+
+    def start(*, bundle=None, profile=None):
+        session = service.start_qa_orchestration("ordinary_review", bound_review_context)
+        service.advance_qa_orchestration(
+            AdvanceQaOrchestrationRequest(
+                run_id=session.run_id,
+                completed_step="triage",
+                status="completed",
+                selected_bundle=bundle,
+                selected_profile=profile,
+            )
+        )
+        return service, session.run_id
+
+    return start
+
+
+def report(profile):
+    return ProfileReviewReport(profile=profile, scope="Pinned source inspected.")
+
+
+async def test_wave_barriers_and_fixed_order_are_enforced(host_session):
+    service, run_id = host_session(bundle="ordinary_mr")
+    explorer_started, release_explorer, release_second = (asyncio.Event() for _ in range(3))
+    second_started = {
+        p: asyncio.Event() for p in (ReviewAgent.CODE_REVIEWER, ReviewAgent.PR_TEST_ANALYZER)
+    }
+
+    async def execute(job):
+        if job.profile == ReviewAgent.CODE_EXPLORER:
+            explorer_started.set()
+            await release_explorer.wait()
+        else:
+            assert job.previous_reports[0].profile == ReviewAgent.CODE_EXPLORER
+            second_started[job.profile].set()
+            await release_second.wait()
+        return report(job.profile)
+
+    task = asyncio.create_task(
+        HostReviewAdapter(service).run_primary_review(
+            run_id, execute, lambda reports: DeepReviewSignals()
+        )
+    )
+    await asyncio.wait_for(explorer_started.wait(), 1)
+    assert not any(event.is_set() for event in second_started.values())
+    release_explorer.set()
+    await asyncio.wait_for(asyncio.gather(*(e.wait() for e in second_started.values())), 1)
+    assert service.get_qa_orchestration(run_id).completed_profiles == [ReviewAgent.CODE_EXPLORER]
+    release_second.set()
+    result = await task
+    assert result.session.current_step == "synthesis"
+    assert result.session.completed_profiles == [
+        ReviewAgent.CODE_EXPLORER,
+        ReviewAgent.CODE_REVIEWER,
+        ReviewAgent.PR_TEST_ANALYZER,
+    ]
+    assert all(r.execution_metrics for r in result.session.profile_reports)
+
+
+async def test_host_concurrency_limit_bounds_the_python_single_wave(host_session):
+    service, run_id = host_session(bundle="python_backend")
+    active = peak = 0
+
+    async def execute(job):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return report(job.profile)
+
+    result = await HostReviewAdapter(
+        service, HostExecutionPolicy(max_concurrency=2)
+    ).run_primary_review(run_id, execute, lambda reports: DeepReviewSignals())
+    assert peak == 2
+    assert len(result.session.completed_profiles) == 3
+
+
+async def test_only_explicit_transient_failures_retry_and_retry_tokens_stay_unknown(host_session):
+    service, run_id = host_session(profile="python_reviewer")
+    attempts = []
+
+    async def execute(job):
+        attempts.append(job.attempt)
+        if job.attempt == 1:
+            raise RetryableProfileError()
+        return ProfileReviewReport(
+            profile=job.profile,
+            scope="Reviewed source.",
+            execution_metrics=ProfileExecutionMetrics(
+                started_at=datetime.now(UTC),
+                completed_at=datetime.now(UTC),
+                input_tokens=100,
+                output_tokens=20,
+            ),
+        )
+
+    adapter = HostReviewAdapter(service, HostExecutionPolicy(retry_delay_seconds=0))
+    result = await adapter.run_primary_review(run_id, execute, lambda reports: DeepReviewSignals())
+    assert attempts == [1, 2]
+    metrics = result.session.profile_reports[0].execution_metrics
+    assert metrics.attempt_count == 2
+    assert metrics.input_tokens is None
+
+
+async def test_permanent_failure_stops_partial_without_recording_a_false_group(host_session):
+    service, run_id = host_session(bundle="python_backend")
+    calls = []
+
+    async def execute(job):
+        calls.append(job.profile)
+        if job.profile == ReviewAgent.PYTHON_REVIEWER:
+            raise ValueError("private provider body")
+        return report(job.profile)
+
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, execute, lambda reports: DeepReviewSignals()
+    )
+    assert result.session.status == "partial"
+    assert result.session.completed_profiles == []
+    assert len(result.unsaved_reports) == 2
+    assert result.failures[0].reason == "executor_error"
+    assert len(calls) == 3
+
+
+async def test_run_timeout_cancels_and_drains_workers(host_session):
+    service, run_id = host_session(bundle="python_backend")
+    stopped = []
+
+    async def execute(job):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.append(job.profile)
+
+    adapter = HostReviewAdapter(service, HostExecutionPolicy(run_timeout_seconds=0.02))
+    result = await adapter.run_primary_review(run_id, execute, lambda reports: DeepReviewSignals())
+    assert result.session.status == "partial"
+    assert result.failures[0].reason == "run_timeout"
+    assert len(stopped) == 3
+
+
+async def test_invalid_evidence_does_not_advance_the_group(host_session):
+    service, run_id = host_session(profile="code_reviewer")
+
+    async def execute(job):
+        return ProfileReviewReport(
+            profile=job.profile,
+            scope="Reviewed source.",
+            unverified=({"text": "Unknown source", "evidence_refs": ("E9",)},),
+        )
+
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, execute, lambda reports: DeepReviewSignals()
+    )
+    assert result.session.status == "partial"
+    assert result.session.completed_profiles == []
+    assert len(result.unsaved_reports) == 1
+
+
+async def test_profile_timeout_is_bounded_and_does_not_complete_a_profile(host_session):
+    service, run_id = host_session(profile="python_reviewer")
+    calls = []
+
+    async def execute(job):
+        calls.append(job.attempt)
+        await asyncio.Event().wait()
+
+    policy = HostExecutionPolicy(profile_timeout_seconds=0.01, retry_delay_seconds=0)
+    result = await HostReviewAdapter(service, policy).run_primary_review(
+        run_id, execute, lambda reports: DeepReviewSignals()
+    )
+    assert calls == [1, 2]
+    assert result.failures[0].reason == "profile_timeout"
+    assert result.session.completed_profiles == []
+
+
+async def test_cancelling_the_host_cancels_workers_and_records_partial(host_session):
+    service, run_id = host_session(profile="python_reviewer")
+    started, stopped = asyncio.Event(), asyncio.Event()
+
+    async def execute(job):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    task = asyncio.create_task(
+        HostReviewAdapter(service).run_primary_review(
+            run_id, execute, lambda reports: DeepReviewSignals()
+        )
+    )
+    await asyncio.wait_for(started.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert stopped.is_set()
+    assert service.get_qa_orchestration(run_id).status == "partial"
