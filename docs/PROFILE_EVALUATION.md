@@ -56,6 +56,8 @@ The MCP server only publishes the schedule and validates reported transition ord
 
 ## Representative quality and speed benchmark
 
+Use the [local benchmark runner](BENCHMARK.md) to import pinned ReviewBench references and score explicit adjudications. It keeps missing cases and unknown token usage visible and does not perform automatic semantic judging.
+
 Use a fixed set of real, completed changes with human-adjudicated expected findings. Keep the same source snapshot, Evidence Packet, host instructions, profile checklists, model, and reasoning for each schedule under comparison. Match findings by the underlying failure mode, not wording; have a reviewer confirm evidence before counting a match.
 
 Record per case:

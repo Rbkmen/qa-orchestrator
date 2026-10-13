@@ -645,6 +645,7 @@ def _help() -> int:
     print("  qa-orch setup --host-default  использовать модель хоста")
     print("  qa-orch config show    показать текущую модельную политику")
     print("  qa-orch reload         перечитать и проверить модельную политику")
+    print("  qa-orch benchmark      импортировать и оценить локальный benchmark")
     print("  qa-orch                запустить MCP STDIO-сервер")
     return 0
 
@@ -657,6 +658,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args[0] == "setup":
             return _setup(args[1:])
+        if args[0] == "benchmark":
+            from qa_orchestrator.benchmark import benchmark_main
+
+            return benchmark_main(args[1:])
         if args[:2] == ["config", "show"]:
             return _show_config()
         if args in (["reload"], ["config", "reload"]):
@@ -669,6 +674,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 130
     except ValueError as exc:
         print(f"Ошибка настройки: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"Ошибка доступа к файлу: {exc.strerror}", file=sys.stderr)
         return 2
 
 
