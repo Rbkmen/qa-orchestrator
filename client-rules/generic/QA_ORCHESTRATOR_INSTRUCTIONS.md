@@ -134,6 +134,8 @@ On the final primary-review role, set `risk_signals` from the evidence state. Ma
 
 ## Finalize an orchestration
 
+For retry-safe transitions, send a unique `request_id` together with the latest `expected_revision`. Retry only the exact same payload with that key. A recognized retry returns current retained state without another transition or TTL refresh; that state may include later progress. New stale revisions and changed payloads under the same key fail. Legacy unkeyed transitions still require a state read after a lost response. During long host work, call `renew_qa_orchestration` before `expires_at`; renewal changes only the active lease and cannot revive expired/terminal sessions.
+
 - After synthesis, or after an eligible clean single-profile fast path, call `finish_qa_orchestration` once with the session `run_id`
   and the host-owned final outcome (`completed`, `partial`, or `blocked`). For
   an early stop, pass the same `partial` or `blocked` outcome already sent to
@@ -145,7 +147,7 @@ On the final primary-review role, set `risk_signals` from the evidence state. Ma
   orchestrated. Repeating the same outcome is idempotent; a conflicting final
   outcome is rejected.
 
-The orchestrator publishes exactly ten tools: `prepare_qa_orchestration`, `prepare_qa_orchestration_bundle`, `get_qa_orchestration_catalog`, `get_qa_orchestration_model_policy`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `list_qa_orchestrations`, `finish_qa_orchestration`, and `delete_qa_orchestration`.
+The orchestrator publishes exactly eleven tools: `prepare_qa_orchestration`, `prepare_qa_orchestration_bundle`, `get_qa_orchestration_catalog`, `get_qa_orchestration_model_policy`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `renew_qa_orchestration`, `list_qa_orchestrations`, `finish_qa_orchestration`, and `delete_qa_orchestration`.
 
 Use `delete_qa_orchestration(run_id)` only when the user explicitly wants to discard
 that session; never as automatic cleanup or a substitute for normal finalization.

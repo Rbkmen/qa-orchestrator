@@ -28,6 +28,7 @@ async def test_server_exposes_ten_tools(tmp_path):
         "list_qa_orchestrations",
         "get_qa_orchestration_catalog",
         "delete_qa_orchestration",
+        "renew_qa_orchestration",
     }
 
 
@@ -196,8 +197,29 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
         "outcome",
         "run_id",
         "final_review_report",
+        "expected_revision",
     }
     assert deletion.inputSchema["properties"]["run_id"]["pattern"] == run_id_schema["pattern"]
+
+
+@pytest.mark.asyncio
+async def test_tools_support_keyed_retries_and_active_lease_renewal(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    async with Client(build_server(service)) as client:
+        started = await client.call_tool("start_qa_orchestration", {"task_type": "ordinary_review"})
+        payload = {
+            "run_id": started.structured_content["run_id"], "completed_step": "triage",
+            "status": "completed", "selected_profile": "python_reviewer",
+            "request_id": "triage-1", "expected_revision": 0,
+        }
+        first = await client.call_tool("advance_qa_orchestration", payload)
+        renewed = await client.call_tool("renew_qa_orchestration", {
+            "run_id": payload["run_id"], "expected_revision": 1,
+        })
+        replay = await client.call_tool("advance_qa_orchestration", payload)
+    assert first.structured_content["revision"] == renewed.structured_content["revision"] == 1
+    assert replay.structured_content["expires_at"] == renewed.structured_content["expires_at"]
+    assert replay.structured_content["revision"] == 1
 
 
 @pytest.mark.asyncio

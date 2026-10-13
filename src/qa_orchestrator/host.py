@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -16,6 +17,7 @@ from qa_orchestrator.contracts import (
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
     DeepReviewSignals,
+    OrchestrationError,
     OrchestrationStatus,
     OrchestrationStep,
     QaOrchestrationSession,
@@ -31,6 +33,7 @@ class HostExecutionPolicy(BaseModel):
     run_timeout_seconds: float = Field(default=1800, gt=0, le=86400)
     max_retries: int = Field(default=1, ge=0, le=3)
     retry_delay_seconds: float = Field(default=0.5, ge=0, le=30)
+    heartbeat_interval_seconds: float = Field(default=30, gt=0, le=600)
 
 
 class RetryableProfileError(Exception):
@@ -148,6 +151,10 @@ class HostReviewAdapter:
         unsaved: tuple[ProfileReviewReport, ...] = ()
         failures: tuple[HostProfileFailure, ...] = ()
         tasks: list[asyncio.Task] = []
+        lease_seconds = (session.expires_at - datetime.now(UTC)).total_seconds()
+        interval = min(self.policy.heartbeat_interval_seconds, max(lease_seconds / 3, 0.01))
+        heartbeat = asyncio.create_task(self._renew_lease(run_id, interval))
+        wave: asyncio.Future | None = None
         try:
             async with asyncio.timeout(self.policy.run_timeout_seconds):
                 offset = 0
@@ -163,7 +170,15 @@ class HostReviewAdapter:
                         )
                         for profile in remaining
                     ]
-                    outputs = await asyncio.gather(*tasks)
+                    wave = asyncio.gather(*tasks)
+                    done, _ = await asyncio.wait(
+                        (wave, heartbeat), return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if heartbeat in done:
+                        failures = (HostProfileFailure(None, "lease_error"),)
+                        await heartbeat
+                        break
+                    outputs = await wave
                     unsaved = tuple(x for x in outputs if isinstance(x, ProfileReviewReport))
                     failures = tuple(x for x in outputs if isinstance(x, HostProfileFailure))
                     if failures:
@@ -174,7 +189,7 @@ class HostReviewAdapter:
                     signals = (
                         assess_risk(tuple(session.profile_reports) + unsaved) if is_last else None
                     )
-                    session = self.service.advance_qa_orchestration(
+                    session = self._submit_transition(
                         AdvanceQaOrchestrationRequest(
                             run_id=run_id,
                             completed_step="primary_review",
@@ -182,22 +197,35 @@ class HostReviewAdapter:
                             completed_profiles=remaining,
                             profile_reports=list(unsaved),
                             risk_signals=signals,
+                            request_id=f"host-{uuid4().hex}",
+                            expected_revision=session.revision,
                         )
                     )
                     unsaved = ()
         except TimeoutError:
             failures = (HostProfileFailure(None, "run_timeout"),)
         except asyncio.CancelledError:
-            self._stop_partial(run_id)
+            try:
+                self._stop_partial(run_id, session.revision)
+            except OrchestrationError:
+                # Cancellation must not mutate a session advanced by another host.
+                pass
             raise
         except Exception:  # noqa: BLE001 -- isolate host assessment and report submission failures
-            failures = (HostProfileFailure(None, "report_or_assessment_error"),)
+            if not failures:
+                failures = (HostProfileFailure(None, "report_or_assessment_error"),)
         finally:
+            heartbeat.cancel()
+            if wave is not None and not wave.done():
+                wave.cancel()
             for task in tasks:
                 if not task.done():
                     task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(heartbeat, return_exceptions=True)
+            if wave is not None:
+                await asyncio.gather(wave, return_exceptions=True)
             if failures and not unsaved:
                 unsaved = tuple(
                     task.result()
@@ -207,17 +235,38 @@ class HostReviewAdapter:
                     and isinstance(task.result(), ProfileReviewReport)
                 )
         if failures:
-            session = self._stop_partial(run_id)
+            session = self._stop_partial(run_id, session.revision)
         return HostExecutionResult(session, unsaved, failures, started_at, datetime.now(UTC))
 
-    def _stop_partial(self, run_id: str) -> QaOrchestrationSession:
+    def _submit_transition(self, request: AdvanceQaOrchestrationRequest) -> QaOrchestrationSession:
+        for attempt in range(self.policy.max_retries + 1):
+            try:
+                return self.service.advance_qa_orchestration(request)
+            except (ConnectionError, TimeoutError):
+                if attempt == self.policy.max_retries:
+                    raise
+        raise AssertionError("unreachable transition state")
+
+    async def _renew_lease(self, run_id: str, interval: float) -> None:
+        while True:
+            await asyncio.sleep(interval)
+            current = self.service.get_qa_orchestration(run_id)
+            try:
+                self.service.renew_qa_orchestration(run_id, current.revision)
+            except OrchestrationError as exc:
+                if str(exc) != "stale session revision":
+                    raise
+
+    def _stop_partial(self, run_id: str, expected_revision: int) -> QaOrchestrationSession:
         current = self.service.get_qa_orchestration(run_id)
         if current.status is OrchestrationStatus.ACTIVE:
-            return self.service.advance_qa_orchestration(
+            return self._submit_transition(
                 AdvanceQaOrchestrationRequest(
                     run_id=run_id,
                     completed_step=current.current_step,
                     status="partial",
+                    request_id=f"host-stop-{uuid4().hex}",
+                    expected_revision=expected_revision,
                 )
             )
         return current

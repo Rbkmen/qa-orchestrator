@@ -250,6 +250,12 @@ Use the narrowest profile that matches the task:
 
 Every review must separate confirmed findings from hypotheses and unverified runtime or release facts. An empty or unknown profile is rejected before a route is built.
 
+## Retry-safe transitions and active leases
+
+Sessions expose a workflow `revision`. Each accepted transition and first finalization increments it. Pass `expected_revision` to reject a new stale write; pass it with a unique `request_id` to make an advance retry safe. The server retains bounded request hashes and applied revisions with recovery state. The exact same keyed payload returns current state without repeating work or refreshing TTL, including after restart when the same store is configured. Changed payloads under an existing key fail. A replay can return later progress, so follow the returned current step/revision. Unkeyed callers keep the legacy behavior.
+
+`renew_qa_orchestration(run_id, expected_revision)` refreshes an active session's lease without changing its workflow revision, reports, or request receipts. Renew before expiry while a host worker runs. Awaiting-host-outcome sessions are also active; terminal and expired sessions cannot be revived. The host adapter renews during work, uses versioned keyed submissions, and retries transport timeouts/lost connections with the same payload. A stale host cannot mark another host's progressed session partial.
+
 ## Final outcome
 
 `finish_qa_orchestration` accepts `run_id`, the host-owned final outcome, and an optional `final_review_report`. A completed context-bound review requires the report. In-memory sessions remain bounded by TTL and capacity; when local persistence is configured, sessions with structured review artifacts remain recoverable after restart until TTL expiry, capacity eviction, or explicit deletion. Legacy sessions without reports keep the previous behavior and are removed from the recovery store at finalization. Repeating the same outcome and report is idempotent; a conflicting outcome or report is rejected.
@@ -282,6 +288,7 @@ The orchestrator must publish exactly:
 - `list_qa_orchestrations`;
 - `finish_qa_orchestration`;
 - `delete_qa_orchestration`.
+- `renew_qa_orchestration`.
 
 `read_only=true` and `host_owns_decisions=true` must be preserved in every orchestration state. Do not add a tool that generates text, accepts evidence, changes external state, selects a model for the host, or silently calls another agent.
 

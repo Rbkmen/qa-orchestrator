@@ -125,6 +125,11 @@ class OrchestratorService:
     def get_qa_orchestration(self, run_id: str) -> QaOrchestrationSession:
         return self.orchestrator.get(run_id)
 
+    def renew_qa_orchestration(
+        self, run_id: str, expected_revision: int | None = None,
+    ) -> QaOrchestrationSession:
+        return self.orchestrator.renew(run_id, expected_revision)
+
     def list_qa_orchestrations(self) -> QaOrchestrationList:
         return self.orchestrator.list_sessions()
 
@@ -137,9 +142,11 @@ class OrchestratorService:
         run_id: str,
         outcome: QaTaskOutcome,
         final_review_report: FinalReviewReport | None = None,
+        expected_revision: int | None = None,
     ) -> QaOrchestrationSession:
         return self.orchestrator.finish(
             run_id=run_id,
             outcome=outcome,
             final_review_report=final_review_report,
+            expected_revision=expected_revision,
         )

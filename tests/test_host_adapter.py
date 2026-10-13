@@ -5,7 +5,11 @@ import pytest
 
 from qa_orchestrator.contracts import ProfileExecutionMetrics, ProfileReviewReport, ReviewAgent
 from qa_orchestrator.host import HostExecutionPolicy, HostReviewAdapter, RetryableProfileError
-from qa_orchestrator.orchestration import AdvanceQaOrchestrationRequest, DeepReviewSignals
+from qa_orchestrator.orchestration import (
+    AdvanceQaOrchestrationRequest,
+    DeepReviewSignals,
+    OrchestrationError,
+)
 from qa_orchestrator.service import OrchestratorService
 
 
@@ -211,3 +215,87 @@ async def test_cancelling_the_host_cancels_workers_and_records_partial(host_sess
         await task
     assert stopped.is_set()
     assert service.get_qa_orchestration(run_id).status == "partial"
+
+
+async def test_lost_transition_response_is_retried_with_the_same_key(host_session, monkeypatch):
+    service, run_id = host_session(profile="python_reviewer")
+    advance = service.advance_qa_orchestration
+    calls = []
+
+    def lose_first_response(request):
+        calls.append(request.request_id)
+        result = advance(request)
+        if len(calls) == 1:
+            raise TimeoutError("response lost after commit")
+        return result
+
+    monkeypatch.setattr(service, "advance_qa_orchestration", lose_first_response)
+
+    async def execute(job):
+        return report(job.profile)
+
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, execute, lambda reports: DeepReviewSignals()
+    )
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert result.session.revision == 2
+    assert result.session.completed_profiles == [ReviewAgent.PYTHON_REVIEWER]
+
+
+async def test_a_stale_host_does_not_stop_a_session_advanced_by_another_host(host_session):
+    service, run_id = host_session(profile="python_reviewer")
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow(job):
+        started.set()
+        await release.wait()
+        return report(job.profile)
+
+    async def fast(job):
+        return report(job.profile)
+
+    older = asyncio.create_task(
+        HostReviewAdapter(service).run_primary_review(
+            run_id, slow, lambda reports: DeepReviewSignals()
+        )
+    )
+    await asyncio.wait_for(started.wait(), 1)
+    newer = await HostReviewAdapter(service).run_primary_review(
+        run_id, fast, lambda reports: DeepReviewSignals()
+    )
+    release.set()
+    with pytest.raises(OrchestrationError, match="stale session revision"):
+        await older
+    assert (
+        service.get_qa_orchestration(run_id).current_step
+        == newer.session.current_step
+        == "synthesis"
+    )
+
+
+async def test_heartbeat_keeps_a_long_profile_alive(host_session):
+    from qa_orchestrator.orchestration import QaOrchestrator
+
+    service, _ = host_session(profile="python_reviewer")
+    context = service.orchestrator.list_sessions().sessions[0]
+    review_context = service.get_qa_orchestration(context.run_id).review_context
+    service.orchestrator = QaOrchestrator(ttl_seconds=1, max_sessions=10)
+    session = service.start_qa_orchestration("ordinary_review", review_context)
+    service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=session.run_id,
+            completed_step="triage",
+            status="completed",
+            selected_profile="python_reviewer",
+        )
+    )
+
+    async def execute(job):
+        await asyncio.sleep(1.05)
+        return report(job.profile)
+
+    policy = HostExecutionPolicy(heartbeat_interval_seconds=0.1)
+    result = await HostReviewAdapter(service, policy).run_primary_review(
+        session.run_id, execute, lambda reports: DeepReviewSignals()
+    )
+    assert result.session.current_step == "synthesis"

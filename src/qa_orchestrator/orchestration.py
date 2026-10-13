@@ -1,3 +1,5 @@
+import hashlib
+import json
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -304,10 +306,23 @@ def build_model_policies(selection: ModelPolicySelection) -> MappingProxyType:
 MODEL_POLICIES = build_model_policies(DEFAULT_MODEL_SELECTION)
 
 
+class QaTransitionReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    request_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    request_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    applied_revision: int = Field(ge=1)
+
+
 class QaOrchestrationSession(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     run_id: str = Field(pattern=r"^qar-[0-9a-f]{32}$")
+    revision: int = Field(default=0, ge=0, description="Workflow revision for conditional writes.")
+    transition_receipts: list[QaTransitionReceipt] = Field(
+        default_factory=list, max_length=128,
+        description="Bounded request hashes for safe replay; no raw transition payloads are stored."
+    )
     task_type: QaTaskType
     status: OrchestrationStatus
     current_step: OrchestrationStep
@@ -337,6 +352,10 @@ class QaOrchestrationSession(BaseModel):
 
     @model_validator(mode="after")
     def validate_review_artifacts(self) -> "QaOrchestrationSession":
+        if len({r.request_id for r in self.transition_receipts}) != len(self.transition_receipts):
+            raise ValueError("transition receipt request IDs must be unique")
+        if any(r.applied_revision > self.revision for r in self.transition_receipts):
+            raise ValueError("transition receipts cannot exceed the session revision")
         if self.review_context is None and (self.profile_reports or self.final_review_report):
             raise ValueError("review artifacts require a bound review context")
         if self.profile_reports and tuple(report.profile for report in self.profile_reports) != tuple(
@@ -405,6 +424,8 @@ class AdvanceQaOrchestrationRequest(BaseModel):
     run_id: str = Field(pattern=r"^qar-[0-9a-f]{32}$")
     completed_step: OrchestrationStep
     status: QaTaskOutcome
+    request_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+    expected_revision: int | None = Field(default=None, ge=0, strict=True)
     selected_bundle: ReviewBundle | None = None
     selected_profile: ReviewAgent | None = None
     completed_profile: ReviewAgent | None = None
@@ -423,6 +444,8 @@ class AdvanceQaOrchestrationRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_transition_signal(self) -> "AdvanceQaOrchestrationRequest":
+        if self.request_id is not None and self.expected_revision is None:
+            raise ValueError("request_id requires expected_revision")
         if self.completed_profiles is not None and not self.completed_profiles:
             raise ValueError("completed_profiles must contain at least one profile")
         if self.completed_profile is not None and self.completed_profiles is not None:
@@ -472,6 +495,13 @@ class AdvanceQaOrchestrationRequest(BaseModel):
         ):
             raise ValueError("skip_synthesis may only follow a completed primary review")
         return self
+
+
+class RenewQaOrchestrationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str = Field(pattern=r"^qar-[0-9a-f]{32}$")
+    expected_revision: int | None = Field(default=None, ge=0, strict=True)
 
 
 class OrchestrationError(ValueError):
@@ -607,6 +637,8 @@ class QaOrchestrator:
         run_id: str,
         completed_step: OrchestrationStep,
         status: QaTaskOutcome,
+        request_id: str | None = None,
+        expected_revision: int | None = None,
         selected_bundle: ReviewBundle | None = None,
         selected_profile: ReviewAgent | None = None,
         completed_profile: ReviewAgent | None = None,
@@ -620,6 +652,8 @@ class QaOrchestrator:
                 run_id=run_id,
                 completed_step=completed_step,
                 status=status,
+                request_id=request_id,
+                expected_revision=expected_revision,
                 selected_bundle=selected_bundle,
                 selected_profile=selected_profile,
                 completed_profile=completed_profile,
@@ -635,6 +669,20 @@ class QaOrchestrator:
             now = self._clock()
             self._purge_expired(now, keep_run_id=request.run_id)
             session = self._require_session(request.run_id, now)
+            request_sha256 = hashlib.sha256(json.dumps(
+                request.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")).hexdigest()
+            if request.request_id is not None:
+                receipt = next((r for r in session.transition_receipts
+                                if r.request_id == request.request_id), None)
+                if receipt is not None:
+                    if receipt.request_sha256 != request_sha256:
+                        raise OrchestrationError("request_id reused with a different transition")
+                    return self._copy(session)
+                if len(session.transition_receipts) >= 128:
+                    raise OrchestrationError("transition receipt limit")
+            if request.expected_revision is not None and request.expected_revision != session.revision:
+                raise OrchestrationError("stale session revision")
             if session.status is not OrchestrationStatus.ACTIVE:
                 raise OrchestrationError("terminal session")
             if request.completed_step is not session.current_step:
@@ -651,6 +699,7 @@ class QaOrchestrator:
                     ),
                     now,
                 )
+                updated = self._record_transition(session, updated, request, request_sha256)
                 self._save_session(updated)
                 return self._copy(updated)
 
@@ -662,6 +711,37 @@ class QaOrchestrator:
                 raise OrchestrationError("changed profile after triage")
 
             updated = self._refresh_expiry(self._completed_transition(session, request), now)
+            updated = self._record_transition(session, updated, request, request_sha256)
+            self._save_session(updated)
+            return self._copy(updated)
+
+    @staticmethod
+    def _record_transition(
+        previous: QaOrchestrationSession, updated: QaOrchestrationSession,
+        request: AdvanceQaOrchestrationRequest, request_sha256: str,
+    ) -> QaOrchestrationSession:
+        revision = previous.revision + 1
+        receipts = list(previous.transition_receipts)
+        if request.request_id is not None:
+            receipts.append(QaTransitionReceipt(request_id=request.request_id,
+                                               request_sha256=request_sha256,
+                                               applied_revision=revision))
+        return updated.model_copy(update={"revision": revision, "transition_receipts": receipts})
+
+    def renew(self, run_id: str, expected_revision: int | None = None) -> QaOrchestrationSession:
+        """Refresh only an active lease; workflow revision and reports stay unchanged."""
+        try:
+            request = RenewQaOrchestrationRequest(run_id=run_id, expected_revision=expected_revision)
+        except ValidationError as exc:
+            raise OrchestrationError("invalid lease renewal") from exc
+        with self._lock:
+            now = self._clock()
+            session = self._require_session(request.run_id, now)
+            if session.status not in _ACTIVE_SESSION_STATUSES:
+                raise OrchestrationError("only active sessions can be renewed")
+            if request.expected_revision is not None and request.expected_revision != session.revision:
+                raise OrchestrationError("stale session revision")
+            updated = self._refresh_expiry(session, now)
             self._save_session(updated)
             return self._copy(updated)
 
@@ -726,8 +806,11 @@ class QaOrchestrator:
         run_id: str,
         outcome: QaTaskOutcome,
         final_review_report: FinalReviewReport | None = None,
+        expected_revision: int | None = None,
     ) -> QaOrchestrationSession:
         """Record the host-owned outcome and, when supplied, its structured review report."""
+        if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
+            raise OrchestrationError("invalid expected revision")
         try:
             final_status = OrchestrationStatus(outcome)
         except ValueError as exc:
@@ -759,6 +842,9 @@ class QaOrchestrator:
                 and validated_report is not None
                 and validated_report == session.final_review_report
             )
+            if (expected_revision is not None and expected_revision != session.revision
+                and not is_idempotent_legacy_replay):
+                raise OrchestrationError("stale session revision")
             if (
                 validated_report is not None
                 and any(
@@ -886,7 +972,8 @@ class QaOrchestrator:
                 final_action = _FINALIZED_TERMINAL_ACTIONS[final_status]
                 if session.next_action == final_action:
                     return self._copy(session)
-                updated = session.model_copy(update={"next_action": final_action})
+                updated = session.model_copy(update={"next_action": final_action,
+                                                     "revision": session.revision + 1})
                 updated = self._refresh_expiry(updated, now)
                 self._save_session(
                     updated,
@@ -911,6 +998,7 @@ class QaOrchestrator:
                 session.model_copy(
                     update={
                         "status": final_status,
+                        "revision": session.revision + 1,
                         "final_review_report": validated_report,
                         "model_policy": None,
                         "next_action": _FINALIZED_TERMINAL_ACTIONS[final_status],

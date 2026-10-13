@@ -331,6 +331,21 @@ def build_server(service: OrchestratorService) -> FastMCP:
                 )
             ),
         ] = False,
+        request_id: Annotated[
+            str | None,
+            Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", description=(
+                "Optional unique transition key. Requires expected_revision. Retrying the exact "
+                "same payload returns current retained state without repeating the transition; "
+                "reusing the key with another payload is rejected."
+            )),
+        ] = None,
+        expected_revision: Annotated[
+            int | None,
+            Field(ge=0, strict=True, description=(
+                "Optional workflow revision from the latest session. A new transition is rejected "
+                "if stale; a recognized request_id replay remains safe."
+            )),
+        ] = None,
     ) -> QaOrchestrationAdvanceResult:
         """Record one active QA step's result; return updated state and next_action instructions for the host.
 
@@ -359,7 +374,9 @@ def build_server(service: OrchestratorService) -> FastMCP:
         - Early stop: omit route selectors, completion fields, and risk_signals.
         - Success saves state and refreshes expires_at.
         - Invalid/stale requests and unknown/expired run_ids fail without advancing.
-        - Non-idempotent: never retry or replay an advance call blindly. After a lost response or
+        - With request_id and expected_revision, exact retries return current retained state without
+          another transition or TTL refresh. Conflicting payloads and new stale revisions fail.
+        - Legacy calls without request_id are non-idempotent: never retry them blindly. After a lost response or
           transition error, read get_qa_orchestration(run_id) and continue from its current_step;
           if the session is unknown or expired, start a new session.
         """
@@ -375,8 +392,26 @@ def build_server(service: OrchestratorService) -> FastMCP:
                 profile_reports=profile_reports,
                 risk_signals=risk_signals,
                 skip_synthesis=skip_synthesis,
+                request_id=request_id,
+                expected_revision=expected_revision,
             )
         )
+
+    @mcp.tool(title="Renew active QA session lease", annotations=STATE_TOOL_ANNOTATIONS)
+    def renew_qa_orchestration(
+        run_id: RunId,
+        expected_revision: Annotated[
+            int | None,
+            Field(ge=0, strict=True, description="Optional current workflow revision; stale renewals fail."),
+        ] = None,
+    ) -> QaOrchestrationSession:
+        """Extend an active session's TTL while host review work is running.
+
+        Renew before expires_at. This changes only the lease, without advancing a profile or
+        workflow revision. Active primary/deep/synthesis and awaiting-host-outcome sessions may be
+        renewed; terminal or expired sessions cannot be revived. No worker or model is launched.
+        """
+        return service.renew_qa_orchestration(run_id, expected_revision)
 
     @mcp.tool(title="Inspect one QA session", annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def get_qa_orchestration(run_id: RunId) -> QaOrchestrationSession:
@@ -448,6 +483,13 @@ def build_server(service: OrchestratorService) -> FastMCP:
                 )
             ),
         ] = None,
+        expected_revision: Annotated[
+            int | None,
+            Field(ge=0, strict=True, description=(
+                "Optional current workflow revision for a new finalization. The same retained "
+                "outcome/report can still be replayed idempotently."
+            )),
+        ] = None,
     ) -> QaOrchestrationSession:
         """Finalize the QA run and store its structured report when the session is review-bound.
 
@@ -472,6 +514,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
             outcome=outcome,
             run_id=run_id,
             final_review_report=final_review_report,
+            expected_revision=expected_revision,
         )
 
     return mcp
