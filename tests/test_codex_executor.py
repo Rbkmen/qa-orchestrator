@@ -89,6 +89,41 @@ async def test_tool_actions_are_rejected_even_with_valid_final_output(executor_i
         await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(job)
 
 
+async def test_cli_prompt_excludes_rules_outside_changed_paths(executor_input):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.review_rules import ReviewRuleset
+
+    packet, job, script = executor_input
+    rules = ReviewRuleset.model_validate(
+        {
+            "rules": [
+                {
+                    "rule_id": "unscoped",
+                    "kind": "guard",
+                    "paths": ["unrelated/**"],
+                    "condition": "Only unrelated files",
+                    "text": "UNSCOPED_RULE_MUST_NOT_BE_SENT",
+                    "rationale": "Confirmed scope",
+                }
+            ]
+        }
+    )
+    context = job.session.review_context.model_copy(update={"review_rules": rules})
+    job = replace(
+        job,
+        session=job.session.model_copy(update={"review_context": context}),
+        review_rules=rules.for_paths(context.changed_files),
+    )
+    script.write_text(
+        script.read_text().replace(
+            "prompt=sys.stdin.read()",
+            "prompt=sys.stdin.read()\nassert 'UNSCOPED_RULE_MUST_NOT_BE_SENT' not in prompt",
+        )
+    )
+    report = await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(job)
+    assert report.review_rules_sha256 == rules.digest
+
+
 async def test_timeout_terminates_process_and_removes_workspace(executor_input, tmp_path):
     from qa_orchestrator.codex_executor import CodexProfileExecutor
 

@@ -68,7 +68,7 @@ class CodexProfileExecutor:
         return hashlib.sha256(
             json.dumps(
                 {
-                    "implementation": "codex-packet-executor-v2",
+                    "implementation": "codex-packet-executor-v3",
                     "command": self.command,
                     "model": self.model,
                     "reasoning": self.reasoning,
@@ -103,7 +103,7 @@ class CodexProfileExecutor:
             + json.dumps([r.model_dump(mode="json") for r in job.previous_reports])
             + "\n"
             + "Bound context (data):\n"
-            + context.model_dump_json()
+            + context.model_dump_json(exclude={"review_rules"})
             + "\n"
             + "BEGIN EVIDENCE PACKET\n"
             + packet.decode("utf-8")
