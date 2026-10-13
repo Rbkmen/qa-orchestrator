@@ -19,6 +19,14 @@ from qa_orchestrator.review_profiles import (
 )
 
 
+def _evidenced_signals(**signals):
+    return DeepReviewSignals(
+        **signals,
+        rationale="The reviewed evidence supports this escalation signal.",
+        evidence_refs=("E1",),
+    )
+
+
 def test_delete_frees_capacity_and_concurrent_repeats_are_idempotent():
     orchestrator = QaOrchestrator(ttl_seconds=60, max_sessions=1)
     started = orchestrator.start("ordinary_review")
@@ -104,6 +112,7 @@ def test_review_bound_flow_validates_and_retains_structured_reports(
 ):
     orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
     started = orchestrator.start("ordinary_review", bound_review_context)
+    assert started.recommended_profiles == [ReviewAgent.PYTHON_REVIEWER]
     primary = orchestrator.advance(
         run_id=started.run_id,
         completed_step=OrchestrationStep.TRIAGE,
@@ -139,6 +148,20 @@ def test_review_bound_flow_validates_and_retains_structured_reports(
                 )
             ],
             risk_signals=DeepReviewSignals(),
+        )
+
+    with pytest.raises(OrchestrationError, match="risk signals cite unknown evidence refs"):
+        orchestrator.advance(
+            run_id=started.run_id,
+            completed_step=primary.current_step,
+            status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+            profile_reports=[make_profile_review_report(ReviewAgent.CODE_REVIEWER)],
+            risk_signals=DeepReviewSignals(
+                high_risk_domain=True,
+                rationale="An access-control claim remains uncertain.",
+                evidence_refs=("E9",),
+            ),
         )
 
     reviewed = orchestrator.advance(
@@ -180,6 +203,37 @@ def test_review_bound_flow_validates_and_retains_structured_reports(
             run_id=started.run_id,
             outcome="completed",
             final_review_report=unreported_final_report,
+        )
+
+    unsupported_evidence_candidate = ReviewFindingCandidate(
+        **{**review_finding_candidate.model_dump(), "evidence_refs": ("E2",)}
+    )
+    unsupported_evidence_report = make_final_review_report(
+        (ReviewAgent.CODE_REVIEWER,),
+        findings=((unsupported_evidence_candidate, (ReviewAgent.CODE_REVIEWER,)),),
+    )
+    with pytest.raises(OrchestrationError, match="evidence absent from its source candidates"):
+        orchestrator.finish(
+            run_id=started.run_id,
+            outcome="completed",
+            final_review_report=unsupported_evidence_report,
+        )
+
+    unsupported_location_candidate = ReviewFindingCandidate(
+        **{
+            **review_finding_candidate.model_dump(),
+            "source_locations": ({"path": "src/service.py", "start_line": 43, "end_line": None},),
+        }
+    )
+    unsupported_location_report = make_final_review_report(
+        (ReviewAgent.CODE_REVIEWER,),
+        findings=((unsupported_location_candidate, (ReviewAgent.CODE_REVIEWER,)),),
+    )
+    with pytest.raises(OrchestrationError, match="locations are absent from its source candidates"):
+        orchestrator.finish(
+            run_id=started.run_id,
+            outcome="completed",
+            final_review_report=unsupported_location_report,
         )
 
     unlinked_final_report = final_report.model_dump()
@@ -229,6 +283,57 @@ def test_review_bound_fast_path_cannot_skip_reported_coverage_gaps(
             ],
             risk_signals=DeepReviewSignals(),
             skip_synthesis=True,
+        )
+
+
+def test_finish_rejects_review_artifacts_over_the_session_size_limit(
+    bound_review_context,
+    make_profile_review_report,
+    make_final_review_report,
+):
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review", bound_review_context)
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_bundle=ReviewBundle.WIDGET,
+    )
+    groups = bundle_execution_groups(ReviewBundle.WIDGET)
+    large_profile_gaps = tuple(ReviewNote(text="x" * 2000) for _ in range(25))
+
+    for index, group in enumerate(groups):
+        session = orchestrator.advance(
+            run_id=session.run_id,
+            completed_step=session.current_step,
+            status="completed",
+            completed_profiles=list(group),
+            profile_reports=[
+                make_profile_review_report(
+                    profile,
+                    coverage_gaps=large_profile_gaps,
+                )
+                for profile in group
+            ],
+            risk_signals=DeepReviewSignals() if index == len(groups) - 1 else None,
+        )
+
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=session.current_step,
+        status="completed",
+    )
+    large_final_gaps = tuple(ReviewNote(text="y" * 2000) for _ in range(30))
+    final_report = make_final_review_report(
+        tuple(session.completed_profiles),
+        coverage_gaps=large_final_gaps,
+    )
+
+    with pytest.raises(OrchestrationError, match="session review artifacts exceed"):
+        orchestrator.finish(
+            run_id=session.run_id,
+            outcome="completed",
+            final_review_report=final_report,
         )
 
 
@@ -311,7 +416,7 @@ def test_single_profile_with_any_risk_signal_cannot_skip_synthesis():
             completed_step=OrchestrationStep.PRIMARY_REVIEW,
             status="completed",
             completed_profile=ReviewAgent.CODE_REVIEWER,
-            risk_signals=DeepReviewSignals(high_risk_domain=True),
+            risk_signals=_evidenced_signals(high_risk_domain=True),
             skip_synthesis=True,
         )
 
@@ -426,7 +531,7 @@ def test_deep_flow_returns_to_configured_synthesis():
         completed_step=OrchestrationStep.PRIMARY_REVIEW,
         status="completed",
         completed_profile=ReviewAgent.SECURITY_REVIEWER,
-        risk_signals=DeepReviewSignals(
+        risk_signals=_evidenced_signals(
             high_risk_domain=True,
             evidence_uncertain=True,
         ),
@@ -463,7 +568,7 @@ def test_structured_signals_select_sol_and_expose_the_reason():
         completed_step=OrchestrationStep.PRIMARY_REVIEW,
         status="completed",
         completed_profile=ReviewAgent.CODE_REVIEWER,
-        risk_signals=DeepReviewSignals(
+        risk_signals=_evidenced_signals(
             high_risk_domain=True,
             evidence_uncertain=True,
         ),
@@ -476,6 +581,9 @@ def test_structured_signals_select_sol_and_expose_the_reason():
     assert session.deep_assessment.triggered_rules == (
         DeepReviewRule.HIGH_RISK_WITH_UNCERTAINTY,
     )
+    assert session.risk_signals is not None
+    assert session.risk_signals.rationale
+    assert session.risk_signals.evidence_refs == ("E1",)
 
 
 def test_final_primary_profile_requires_risk_signals():
@@ -514,7 +622,7 @@ def test_structured_signals_can_explicitly_skip_sol():
         completed_step=OrchestrationStep.PRIMARY_REVIEW,
         status="completed",
         completed_profile=ReviewAgent.CODE_REVIEWER,
-        risk_signals=DeepReviewSignals(cross_system_scope=True),
+        risk_signals=_evidenced_signals(cross_system_scope=True),
     )
 
     assert session.current_step is OrchestrationStep.SYNTHESIS
@@ -540,7 +648,11 @@ def test_structured_signals_are_sent_with_the_final_bundle_profile():
             completed_step=session.current_step,
             status="completed",
             completed_profile=profile,
-            risk_signals=(DeepReviewSignals(cross_system_scope=True) if index == len(profiles) - 1 else None),
+            risk_signals=(
+                _evidenced_signals(cross_system_scope=True)
+                if index == len(profiles) - 1
+                else None
+            ),
         )
 
     assert session.current_step is OrchestrationStep.SYNTHESIS
@@ -611,7 +723,7 @@ def test_bundle_requires_each_profile_in_fixed_order_before_synthesis():
             completed_step=OrchestrationStep.PRIMARY_REVIEW,
             status="completed",
             completed_profile=ReviewAgent.CODE_EXPLORER,
-            risk_signals=DeepReviewSignals(
+            risk_signals=_evidenced_signals(
                 high_risk_domain=True,
                 evidence_uncertain=True,
             ),
@@ -865,7 +977,7 @@ def test_every_fixed_bundle_can_escalate_after_final_profile(bundle: ReviewBundl
         completed_step=OrchestrationStep.PRIMARY_REVIEW,
         status="completed",
         completed_profile=profiles[-1],
-        risk_signals=DeepReviewSignals(
+        risk_signals=_evidenced_signals(
             high_risk_domain=True,
             evidence_uncertain=True,
         ),
@@ -903,7 +1015,7 @@ def test_deep_reason_is_retained_in_content_free_session():
         completed_step=OrchestrationStep.PRIMARY_REVIEW,
         status="completed",
         completed_profile=ReviewAgent.SECURITY_REVIEWER,
-        risk_signals=DeepReviewSignals(
+        risk_signals=_evidenced_signals(
             high_risk_domain=True,
             evidence_uncertain=True,
         ),

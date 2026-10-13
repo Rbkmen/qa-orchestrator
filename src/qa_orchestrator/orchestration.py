@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from threading import RLock
@@ -18,6 +18,7 @@ from pydantic import (
 )
 
 from qa_orchestrator.contracts import (
+    EvidenceRefId,
     FinalReviewReport,
     ProfileReviewReport,
     QaTaskOutcome,
@@ -40,6 +41,7 @@ from qa_orchestrator.review_profiles import (
     bundle_execution_groups,
     bundle_profiles,
     recommended_bundles_for,
+    recommended_profiles_for_changed_files,
 )
 from qa_orchestrator.session_store import SqliteSessionStore
 
@@ -83,7 +85,7 @@ class DeepReviewRule(StrEnum):
 
 
 class DeepReviewSignals(BaseModel):
-    """Content-free, host-supplied signals used for deterministic escalation."""
+    """Host-supplied escalation signals with the rationale and refs that support them."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -119,6 +121,43 @@ class DeepReviewSignals(BaseModel):
         default=False,
         description="The change could affect many consumers, services, or data records.",
     )
+    rationale: str | None = Field(
+        default=None,
+        max_length=2000,
+        description="Short explanation for the enabled signals; required when any signal is true.",
+    )
+    evidence_refs: tuple[EvidenceRefId, ...] = Field(
+        default=(),
+        max_length=32,
+        description="Evidence Packet references supporting the enabled signals.",
+    )
+
+    @model_validator(mode="after")
+    def validate_signal_evidence(self) -> "DeepReviewSignals":
+        signal_values = self.model_dump(exclude={"rationale", "evidence_refs"})
+        any_signal = any(signal_values.values())
+        if any_signal and (
+            not self.rationale or not self.rationale.strip() or not self.evidence_refs
+        ):
+            raise ValueError("enabled risk signals require rationale and evidence_refs")
+        if not any_signal and (self.rationale is not None or self.evidence_refs):
+            raise ValueError("rationale and evidence_refs require an enabled risk signal")
+        if len(set(self.evidence_refs)) != len(self.evidence_refs):
+            raise ValueError("risk signal evidence_refs must be unique")
+        return self
+
+
+_MAX_SESSION_REVIEW_ARTIFACT_BYTES = 256 * 1024
+
+
+def _review_artifact_payload_size(
+    profile_reports: Sequence[ProfileReviewReport],
+    final_review_report: FinalReviewReport | None,
+) -> int:
+    size = sum(len(report.model_dump_json().encode("utf-8")) for report in profile_reports)
+    if final_review_report is not None:
+        size += len(final_review_report.model_dump_json().encode("utf-8"))
+    return size
 
 
 class DeepReviewAssessment(BaseModel):
@@ -275,14 +314,19 @@ class QaOrchestrationSession(BaseModel):
     allowed_profiles: list[ReviewAgent] = Field(default_factory=lambda: list(ReviewAgent))
     allowed_bundles: list[ReviewBundle] = Field(default_factory=lambda: list(REVIEW_BUNDLES))
     recommended_bundles: list[ReviewBundle] = Field(default_factory=list)
+    recommended_profiles: list[ReviewAgent] = Field(
+        default_factory=list,
+        description="File-type-based profile hints only; the host selects the route.",
+    )
     selected_bundle: ReviewBundle | None = None
     selected_profile: ReviewAgent | None = None
     review_context: ReviewContext | None = None
     review_profiles: list[ReviewAgent] = Field(default_factory=list)
     current_profile: ReviewAgent | None = None
     completed_profiles: list[ReviewAgent] = Field(default_factory=list)
-    profile_reports: list[ProfileReviewReport] = Field(default_factory=list)
+    profile_reports: list[ProfileReviewReport] = Field(default_factory=list, max_length=10)
     final_review_report: FinalReviewReport | None = None
+    risk_signals: DeepReviewSignals | None = None
     deep_assessment: DeepReviewAssessment | None = None
     deep_reason_code: OrchestrationReason | None = None
     model_policy: StageModelPolicy | None = None
@@ -310,6 +354,11 @@ class QaOrchestrationSession(BaseModel):
             and self.final_review_report is None
         ):
             raise ValueError("completed review-bound sessions require a final review report")
+        if (
+            _review_artifact_payload_size(self.profile_reports, self.final_review_report)
+            > _MAX_SESSION_REVIEW_ARTIFACT_BYTES
+        ):
+            raise ValueError("session review artifacts exceed the maximum serialized size")
         return self
 
 
@@ -360,7 +409,9 @@ class AdvanceQaOrchestrationRequest(BaseModel):
     selected_profile: ReviewAgent | None = None
     completed_profile: ReviewAgent | None = None
     completed_profiles: list[ReviewAgent] | None = None
-    profile_reports: list[ProfileReviewReport] | None = Field(default=None, min_length=1)
+    profile_reports: list[ProfileReviewReport] | None = Field(
+        default=None, min_length=1, max_length=10
+    )
     risk_signals: DeepReviewSignals | None = None
     skip_synthesis: bool = Field(
         default=False,
@@ -535,6 +586,13 @@ class QaOrchestrator:
                 allowed_profiles=list(ReviewAgent),
                 allowed_bundles=list(REVIEW_BUNDLES),
                 recommended_bundles=list(recommended_bundles_for(validated_task_type)),
+                recommended_profiles=list(
+                    recommended_profiles_for_changed_files(
+                        validated_review_context.changed_files
+                        if validated_review_context is not None
+                        else ()
+                    )
+                ),
                 review_context=validated_review_context,
                 model_policy=self._model_policies[OrchestrationStep.TRIAGE],
                 next_action=_NEXT_ACTIONS[OrchestrationStep.TRIAGE],
@@ -735,7 +793,7 @@ class QaOrchestrator:
                 if unknown_refs:
                     raise OrchestrationError("final review report cites unknown evidence refs")
                 reported_candidates = {
-                    (report.profile, candidate.candidate_id)
+                    (report.profile, candidate.candidate_id): candidate
                     for report in session.profile_reports
                     for candidate in report.finding_candidates
                 }
@@ -748,6 +806,35 @@ class QaOrchestrator:
                     raise OrchestrationError(
                         "final finding source candidates do not match profile reports"
                     )
+                for finding in validated_report.finding_candidates:
+                    if is_idempotent_legacy_replay and not finding.source_candidates:
+                        continue
+                    source_findings = [
+                        reported_candidates[(source.profile, source.candidate_id)]
+                        for source in finding.source_candidates
+                    ]
+                    source_evidence_refs = {
+                        reference
+                        for source_finding in source_findings
+                        for reference in source_finding.evidence_refs
+                    }
+                    if not set(finding.evidence_refs).issubset(source_evidence_refs):
+                        raise OrchestrationError(
+                            "final finding cites evidence absent from its source candidates"
+                        )
+                    source_locations = {
+                        (location.path, location.start_line, location.end_line)
+                        for source_finding in source_findings
+                        for location in source_finding.source_locations
+                    }
+                    final_locations = {
+                        (location.path, location.start_line, location.end_line)
+                        for location in finding.source_locations
+                    }
+                    if not final_locations.issubset(source_locations):
+                        raise OrchestrationError(
+                            "final finding locations are absent from its source candidates"
+                        )
                 if any(
                     not set(finding.source_profiles).issubset(validated_report.profiles_reviewed)
                     for finding in validated_report.finding_candidates
@@ -945,6 +1032,12 @@ class QaOrchestrator:
                 raise OrchestrationError(
                     "risk_signals are required for the final primary-review profile"
                 )
+            if session.review_context is not None:
+                unknown_signal_refs = set(request.risk_signals.evidence_refs) - set(
+                    session.review_context.evidence_refs
+                )
+                if unknown_signal_refs:
+                    raise OrchestrationError("risk signals cite unknown evidence refs")
             if request.skip_synthesis and any(request.risk_signals.model_dump().values()):
                 raise OrchestrationError(
                     "synthesis can be skipped only for a clean single-profile review"
@@ -957,6 +1050,7 @@ class QaOrchestrator:
                         "current_profile": None,
                         "completed_profiles": completed_profiles,
                         "profile_reports": profile_reports,
+                        "risk_signals": request.risk_signals,
                         "deep_assessment": assessment,
                         "deep_reason_code": assessment.reason_codes[0],
                         "model_policy": self._model_policies[OrchestrationStep.DEEP_REVIEW],
@@ -971,6 +1065,7 @@ class QaOrchestrator:
                         "current_profile": None,
                         "completed_profiles": completed_profiles,
                         "profile_reports": profile_reports,
+                        "risk_signals": request.risk_signals,
                         "deep_assessment": assessment,
                         "deep_reason_code": None,
                         "model_policy": None,
@@ -985,6 +1080,7 @@ class QaOrchestrator:
                     "current_profile": None,
                     "completed_profiles": completed_profiles,
                     "profile_reports": profile_reports,
+                    "risk_signals": request.risk_signals,
                     "deep_assessment": assessment,
                     "deep_reason_code": None,
                     "model_policy": self._model_policies[OrchestrationStep.SYNTHESIS],
@@ -1061,6 +1157,11 @@ class QaOrchestrator:
         *,
         persist: bool = True,
     ) -> None:
+        if (
+            _review_artifact_payload_size(session.profile_reports, session.final_review_report)
+            > _MAX_SESSION_REVIEW_ARTIFACT_BYTES
+        ):
+            raise OrchestrationError("session review artifacts exceed the maximum serialized size")
         if self._session_store is not None and persist:
             self._session_store.save(session)
         elif self._session_store is not None:

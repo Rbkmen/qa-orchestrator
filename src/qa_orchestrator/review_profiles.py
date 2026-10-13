@@ -1,5 +1,6 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from types import MappingProxyType
 
 from qa_orchestrator.contracts import (
@@ -15,6 +16,7 @@ from qa_orchestrator.contracts import (
 COMMON_CONSTRAINTS = (
     "Use only the evidence gathered by the host agent.",
     "Cite stable Evidence Packet references for every finding candidate.",
+    "For code findings, include source locations; state the affected area and concrete impact when evidence supports them.",
     "Keep possible defects separate from coverage gaps; leave confirmation and final decisions to the host.",
     "Do not decide severity, priority, root cause, release readiness, or merge readiness.",
     "Do not perform external writes.",
@@ -347,6 +349,52 @@ def bundle_execution_groups(
 
 def recommended_bundles_for(task_type: QaTaskType) -> tuple[ReviewBundle, ...]:
     return RECOMMENDED_BUNDLES_BY_TASK_TYPE[task_type]
+
+
+def recommended_profiles_for_changed_files(
+    changed_files: tuple[str, ...],
+) -> tuple[ReviewAgent, ...]:
+    """Return stack-specific profile hints from paths without selecting a review route."""
+    suggested: set[ReviewAgent] = set()
+    for changed_file in changed_files:
+        normalized_path = changed_file.replace("\\", "/").lower()
+        path = PurePosixPath(normalized_path)
+        filename = path.name
+        suffix = path.suffix
+        segments = set(path.parts)
+
+        if (
+            {"test", "tests", "__tests__"} & segments
+            or filename.startswith("test_")
+            or ".test." in filename
+            or ".spec." in filename
+            or filename.endswith(("_test.py", "_test.rb"))
+        ):
+            suggested.add(ReviewAgent.PR_TEST_ANALYZER)
+        if suffix in {".ts", ".tsx"}:
+            suggested.add(ReviewAgent.TYPESCRIPT_REVIEWER)
+        if suffix in {".tsx", ".jsx"}:
+            suggested.add(ReviewAgent.REACT_REVIEWER)
+        if suffix == ".rb":
+            suggested.add(ReviewAgent.RUBY_REVIEWER)
+        if suffix == ".py":
+            suggested.add(ReviewAgent.PYTHON_REVIEWER)
+        if {"android", "ios", "mobile", "mobile-apps", "react-native"} & segments or suffix in {
+            ".swift",
+            ".m",
+            ".mm",
+        }:
+            suggested.add(ReviewAgent.MOBILE_REVIEWER)
+
+    order = (
+        ReviewAgent.TYPESCRIPT_REVIEWER,
+        ReviewAgent.REACT_REVIEWER,
+        ReviewAgent.RUBY_REVIEWER,
+        ReviewAgent.PYTHON_REVIEWER,
+        ReviewAgent.MOBILE_REVIEWER,
+        ReviewAgent.PR_TEST_ANALYZER,
+    )
+    return tuple(profile for profile in order if profile in suggested)
 
 
 def build_review_route(agent_profile: ReviewAgent) -> ReviewRoute:

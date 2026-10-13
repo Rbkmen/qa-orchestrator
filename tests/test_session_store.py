@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from qa_orchestrator.contracts import ReviewAgent, ReviewBundle
+from qa_orchestrator.contracts import ProfileExecutionMetrics, ReviewAgent, ReviewBundle
 from qa_orchestrator.model_policy import ModelProvider, ModelSelection
 from qa_orchestrator.orchestration import (
     DeepReviewSignals,
@@ -77,6 +77,12 @@ def test_completed_review_artifacts_survive_restart_until_normal_expiry(
         status="completed",
         selected_profile=ReviewAgent.CODE_REVIEWER,
     )
+    execution_metrics = ProfileExecutionMetrics(
+        started_at=clock(),
+        completed_at=clock() + timedelta(seconds=4),
+        input_tokens=900,
+        output_tokens=160,
+    )
     reviewed = first_process.advance(
         run_id=started.run_id,
         completed_step=selected.current_step,
@@ -86,6 +92,7 @@ def test_completed_review_artifacts_survive_restart_until_normal_expiry(
             make_profile_review_report(
                 ReviewAgent.CODE_REVIEWER,
                 findings=(review_finding_candidate,),
+                execution_metrics=execution_metrics,
             )
         ],
         risk_signals=DeepReviewSignals(),
@@ -111,6 +118,7 @@ def test_completed_review_artifacts_survive_restart_until_normal_expiry(
     restored = _orchestrator(store, clock)
 
     assert restored.get(started.run_id) == finished
+    assert restored.get(started.run_id).profile_reports[0].execution_metrics == execution_metrics
     listed = restored.list_sessions().sessions[0]
     assert listed.review_repository == bound_review_context.repository
     assert listed.review_head_sha == bound_review_context.head_sha

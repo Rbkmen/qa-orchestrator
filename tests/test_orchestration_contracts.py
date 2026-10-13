@@ -4,10 +4,14 @@ import pytest
 from pydantic import ValidationError
 
 from qa_orchestrator.contracts import (
+    FinalReviewReport,
+    ProfileExecutionMetrics,
     ProfileReviewReport,
     ReviewAgent,
     ReviewBundle,
     ReviewContext,
+    ReviewFindingLocation,
+    ReviewNote,
     ReviewRouteSelection,
 )
 from qa_orchestrator.orchestration import (
@@ -148,6 +152,99 @@ def test_review_context_bounds_paths_and_rejects_repository_credentials(bound_re
             ReviewContext(**{**context, "repository": repository})
 
 
+def test_finding_locations_require_a_valid_line_range():
+    assert ReviewFindingLocation(path="src/service.py", start_line=10, end_line=12)
+
+    with pytest.raises(ValidationError, match="end_line must be greater than or equal"):
+        ReviewFindingLocation(path="src/service.py", start_line=12, end_line=10)
+
+    with pytest.raises(ValidationError):
+        ReviewFindingLocation(path="src/service.py", start_line=0)
+
+
+def test_profile_execution_metrics_require_an_ordered_aware_interval():
+    started_at = datetime.now(UTC)
+    metrics = ProfileExecutionMetrics(
+        started_at=started_at,
+        completed_at=started_at + timedelta(seconds=2),
+        input_tokens=120,
+        output_tokens=45,
+    )
+    assert metrics.output_tokens == 45
+
+    with pytest.raises(ValidationError, match="completed_at must be at or after"):
+        ProfileExecutionMetrics(
+            started_at=started_at,
+            completed_at=started_at - timedelta(seconds=1),
+        )
+
+    with pytest.raises(ValidationError):
+        ProfileExecutionMetrics(
+            started_at=started_at,
+            completed_at=started_at + timedelta(seconds=1),
+            input_tokens=-1,
+        )
+
+
+def test_profile_and_final_reports_have_serialized_size_limits():
+    large_notes = tuple(ReviewNote(text="x" * 2000) for _ in range(40))
+
+    with pytest.raises(ValidationError, match="profile report exceeds"):
+        ProfileReviewReport(
+            profile=ReviewAgent.CODE_REVIEWER,
+            scope="Reviewed the change.",
+            coverage_gaps=large_notes,
+        )
+
+    with pytest.raises(ValidationError, match="final review report exceeds"):
+        FinalReviewReport(
+            summary="Synthesis completed.",
+            profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+            unverified=large_notes,
+        )
+
+
+def test_session_has_an_aggregate_review_artifact_size_limit(bound_review_context):
+    notes = tuple(ReviewNote(text="x" * 2000) for _ in range(26))
+    profiles = tuple(ReviewAgent)
+    reports = [
+        ProfileReviewReport(profile=profile, scope="Reviewed the change.", coverage_gaps=notes)
+        for profile in profiles
+    ]
+
+    with pytest.raises(ValidationError, match="session review artifacts exceed"):
+        QaOrchestrationSession(
+            run_id="qar-0123456789abcdef0123456789abcdef",
+            task_type="ordinary_review",
+            status=OrchestrationStatus.ACTIVE,
+            current_step=OrchestrationStep.PRIMARY_REVIEW,
+            completed_profiles=list(profiles),
+            profile_reports=reports,
+            review_context=bound_review_context,
+            next_action="Host continues review.",
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+
+
+def test_enabled_risk_signals_require_rationale_and_evidence_refs():
+    with pytest.raises(ValidationError, match="enabled risk signals require"):
+        DeepReviewSignals(cross_system_scope=True)
+
+    signals = DeepReviewSignals(
+        cross_system_scope=True,
+        rationale="The changed contract crosses two services.",
+        evidence_refs=("E1",),
+    )
+    assert signals.cross_system_scope is True
+
+    with pytest.raises(ValidationError, match="risk signal evidence_refs must be unique"):
+        DeepReviewSignals(
+            evidence_conflict=True,
+            rationale="Two authoritative contracts disagree.",
+            evidence_refs=("E1", "E1"),
+        )
+
+
 def test_profile_reports_keep_explorer_and_test_analyzer_within_their_scope(
     review_finding_candidate,
 ):
@@ -209,7 +306,12 @@ def test_legacy_manual_escalation_fields_are_rejected():
 
 
 def test_risk_signals_are_final_primary_review_only():
-    signals = DeepReviewSignals(high_risk_domain=True, evidence_uncertain=True)
+    signals = DeepReviewSignals(
+        high_risk_domain=True,
+        evidence_uncertain=True,
+        rationale="A permission conclusion remains uncertain.",
+        evidence_refs=("E1",),
+    )
 
     with pytest.raises(ValidationError, match="final primary-review profile"):
         AdvanceQaOrchestrationRequest(
@@ -235,7 +337,11 @@ def test_risk_signals_require_a_completed_profile():
             run_id="qar-0123456789abcdef0123456789abcdef",
             completed_step=OrchestrationStep.PRIMARY_REVIEW,
             status="completed",
-            risk_signals=DeepReviewSignals(cross_system_scope=True),
+            risk_signals=DeepReviewSignals(
+                cross_system_scope=True,
+                rationale="The changed behavior crosses services.",
+                evidence_refs=("E1",),
+            ),
         )
 
 

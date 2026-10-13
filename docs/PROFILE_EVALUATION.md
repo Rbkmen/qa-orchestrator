@@ -1,6 +1,6 @@
 # Profile and Bundle Evaluation
 
-This is a small, synthetic smoke pack for checking role boundaries and bundle selection. It is not a model benchmark and does not collect task statistics. Run it locally with the model configuration you intend to use; do not save model responses or per-run scores.
+This is a small, synthetic smoke pack for checking role boundaries and bundle selection. It is not a model benchmark, and the MCP server does not collect host execution statistics. Bound profile reports can carry optional host-reported timing and token counts; they are not independently verified. Run smoke cases locally with the model configuration you intend to use; do not save raw model responses or per-run scores in the repository.
 
 ## How to use it
 
@@ -29,6 +29,19 @@ OpenAI recommends evaluating prompting guidance with the selected model and work
 | Narrow Python async or MCP-tool change | `python_reviewer` | Checks Python/MCP contracts without imposing a test framework. |
 | Narrow native permission or lifecycle change | `mobile_reviewer` | Checks affected platform behavior and keeps device verification separate. |
 
+## Changed-file profile hints
+
+When `review_context.changed_files` is supplied, `start_qa_orchestration` returns `recommended_profiles` based on recognizable file extensions and test paths. The list is a shortlist only; it does not select a route, infer risk, or replace the bundle recommendation.
+
+| Changed paths | Expected hint |
+|---|---|
+| `src/service.py` | `python_reviewer` |
+| `src/page.tsx` | `typescript_reviewer`, `react_reviewer` |
+| `tests/test_service.py` | `python_reviewer`, `pr_test_analyzer` |
+| `android/app/src/MainActivity.kt` | `mobile_reviewer` |
+| `mobile-apps/apps/mrbit/src/App.tsx` | `typescript_reviewer`, `react_reviewer`, `mobile_reviewer` |
+| `src/service.js` | No specialized hint from extension alone. |
+
 ## Parallel schedule smoke checks
 
 These checks validate host scheduling semantics, not model quality or elapsed-time claims:
@@ -41,11 +54,25 @@ These checks validate host scheduling semantics, not model quality or elapsed-ti
 
 The MCP server only publishes the schedule and validates reported transition order; it does not launch workers or verify concurrency. Run these checks in a client adapter or host that can expose worker-start and completion events.
 
+## Representative quality and speed benchmark
+
+Use a fixed set of real, completed changes with human-adjudicated expected findings. Keep the same source snapshot, Evidence Packet, host instructions, profile checklists, model, and reasoning for each schedule under comparison. Match findings by the underlying failure mode, not wording; have a reviewer confirm evidence before counting a match.
+
+Record per case:
+
+- valid matched findings, unsupported candidates, and expected findings missed;
+- precision and recall, plus missed high-impact findings;
+- evidence-reference validity and source-location accuracy;
+- correct/unsupported rates for `high`, `medium`, and `low` confidence separately;
+- total wall-clock time, per-profile start/completion time, worker start skew, barrier wait, and available input/output token counts.
+
+Attach `execution_metrics` to a profile report only when the host can report accurate UTC start/completion timestamps and token usage. Compute full-run elapsed time and concurrency/barrier measurements in the host scheduler; the orchestrator cannot observe them. Compare the `python_backend` single-wave schedule with the former two-wave schedule on the same task set. Keep raw model responses and source snippets outside the repository; publish only aggregate results. Do not claim a quality, calibration, or speed improvement until this benchmark has actually run.
+
 ### Python backend parallel-start experiment
 
 `python_backend` starts `code_explorer`, `python_reviewer`, and `pr_test_analyzer` in one execution group. This removes the explorer barrier from the critical path, but the specialist reviewers cannot use the explorer's evidence map at dispatch time. The parent must prepare a complete compact Evidence Packet before starting the group and reconcile all outputs before synthesis.
 
-The schedule is a speed experiment, not a measured model-quality result. On representative Python/MCP changes, compare it with the former two-wave schedule using the same model, reasoning, Evidence Packet, and checklist versions. Record total elapsed time, each profile's elapsed time, worker start skew, barrier wait, checked and unique valid finding candidates, missed candidates found by the other schedule, and token use. Validate every candidate against source before scoring it. Keep raw model responses out of the repo; summarize aggregate results only. Retain the parallel schedule only if the time reduction is material and review quality stays acceptable.
+The schedule remains an unmeasured experiment. Apply the benchmark protocol above to compare it with the former two-wave schedule; keep it only if measured time savings are material and adjudicated review quality stays acceptable.
 
 ## Synthetic profile cases
 
@@ -169,6 +196,7 @@ These synthetic cases check the host's signal mapping and the orchestrator's fix
 
 - Each profile uses only its returned sections and stays within its focus.
 - Every finding candidate is traceable to the supplied evidence; unsupported candidates fail the case.
+- Where the Evidence Packet supports it, candidates include structured source locations, affected area, and concrete impact; reviewers do not assign severity.
 - `code_explorer` maps evidence without turning the map into findings, and `code_reviewer` does not repeat the map.
 - Coverage gaps remain separate from defect candidates; an empty case can return no candidate.
 - Bundle choice matches the language and scope matrix; the host does not submit custom profile lists.

@@ -5,10 +5,12 @@ import pytest
 from qa_orchestrator.contracts import (
     FinalReviewFinding,
     FinalReviewReport,
+    ProfileExecutionMetrics,
     ProfileReviewReport,
     ReviewAgent,
     ReviewContext,
     ReviewFindingCandidate,
+    ReviewFindingLocation,
     ReviewFindingSource,
 )
 
@@ -47,6 +49,9 @@ def review_finding_candidate():
         confidence="high",
         verification_gap="No runtime verification was performed.",
         evidence_refs=("E1",),
+        source_locations=(ReviewFindingLocation(path="src/service.py", start_line=42),),
+        affected_area="service response",
+        impact="The caller can receive an incorrect result.",
     )
 
 
@@ -59,6 +64,7 @@ def make_profile_review_report():
         coverage_gaps=(),
         unverified=(),
         evidence_map=(),
+        execution_metrics: ProfileExecutionMetrics | None = None,
     ):
         return ProfileReviewReport(
             profile=profile,
@@ -67,6 +73,7 @@ def make_profile_review_report():
             coverage_gaps=tuple(coverage_gaps),
             unverified=tuple(unverified),
             evidence_map=tuple(evidence_map),
+            execution_metrics=execution_metrics,
         )
 
     return make

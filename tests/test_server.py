@@ -497,6 +497,7 @@ async def test_orchestration_tools_return_no_evidence_fields(tmp_path):
     assert payload["allowed_profiles"] == [profile.value for profile in ReviewAgent]
     assert payload["allowed_bundles"] == [bundle.value for bundle in ReviewBundle]
     assert payload["recommended_bundles"] == ["ordinary_mr"]
+    assert payload["recommended_profiles"] == []
     assert payload["selected_bundle"] is None
     assert payload["review_profiles"] == []
     assert "evidence" not in payload
@@ -602,6 +603,8 @@ async def test_orchestration_tool_selects_sol_from_structured_risk_signals(tmp_p
                 "risk_signals": {
                     "high_risk_domain": True,
                     "evidence_uncertain": True,
+                    "rationale": "A material access-control question remains unresolved.",
+                    "evidence_refs": ["E1"],
                 },
             },
         )
@@ -758,6 +761,7 @@ async def test_bound_review_tools_record_context_and_structured_reports(
             },
         )
         run_id = started.structured_content["run_id"]
+        assert started.structured_content["recommended_profiles"] == ["python_reviewer"]
         primary = await client.call_tool(
             "advance_qa_orchestration",
             {

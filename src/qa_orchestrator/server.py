@@ -77,7 +77,9 @@ SERVER_INSTRUCTIONS = (
     "completed_profile field) and risk_signals accurately. "
     "The orchestrator validates the reported profile order; it cannot confirm each review ran, "
     "whether profiles ran concurrently, or whether host-reported risk_signals reflect evidence. "
-    "Bound reviews also validate report/profile alignment and citation membership, not report truth. "
+    "Risk signals require a rationale and Evidence Packet references, which are retained with the session. "
+    "Bound reviews validate report/profile alignment, citation membership, and finding-source lineage, "
+    "not report truth. File-based recommended_profiles are hints; the host selects the route. "
     "In host_default model-policy mode, use the model and reasoning configured by the host. "
     "Full workflow guidance remains in client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md."
 )
@@ -205,9 +207,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ReviewContext | None,
             Field(
                 description=(
-                    "Optional immutable repository, base/head, diff, and Evidence Packet identity. "
+                    "Optional immutable repository, base/head, changed-file, diff, and Evidence Packet identity. "
                     "When supplied, every completed profile must include a structured report whose "
-                    "evidence references belong to this packet; completed outcomes require a final report."
+                    "evidence references belong to this packet; completed outcomes require a final report. "
+                    "The response may include file-type-based recommended_profiles as non-binding hints."
                 )
             ),
         ] = None,
@@ -298,8 +301,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
             Field(
                 description=(
                     "For a review-context-bound session, one structured result per completed profile, "
-                    "in the same order. Every finding must cite Evidence Packet references. Omit for "
-                    "legacy sessions without review_context."
+                    "in the same order. Every finding must cite Evidence Packet references. Optional "
+                    "execution_metrics are host-reported and are not independently verified. Up to "
+                    "ten reports are accepted, with 64 KiB per report and 256 KiB combined per session. "
+                    "Omit for legacy sessions without review_context."
                 )
             ),
         ] = None,
@@ -308,7 +313,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
             Field(
                 description=(
                     "Required with the final completed primary-review profile. Send an empty object "
-                    "when no evidence-based fixed escalation signals apply; do not send on earlier "
+                    "when no evidence-based fixed escalation signals apply; any true signal requires "
+                    "a short rationale and Evidence Packet references. Do not send on earlier "
                     "profiles or on the synthesis transition."
                 )
             ),
@@ -345,9 +351,11 @@ def build_server(service: OrchestratorService) -> FastMCP:
           no unresolved material questions, and no risk signals. This bypasses only the separate synthesis
           step; the host still validates and produces the final QA report. The server cannot verify this claim.
           Bundles, findings, unresolved questions, or any risk signal require the normal synthesis stage.
-        - Trust boundary: completion fields and risk_signals are host-reported. The server cannot confirm
-          each review ran or that risk_signals reflect evidence; bound sessions also validate
-          report/profile alignment and citation membership, not report truth.
+        - Trust boundary: completion fields, execution_metrics, and risk_signals are host-reported.
+          The server cannot confirm each review ran, whether it ran concurrently, or that
+          risk_signals reflect evidence; bound sessions validate report/profile alignment,
+          citation membership, finding-source lineage, and risk-signal reference membership,
+          not report truth.
         - Early stop: omit route selectors, completion fields, and risk_signals.
         - Success saves state and refreshes expires_at.
         - Invalid/stale requests and unknown/expired run_ids fail without advancing.
@@ -433,7 +441,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
                 description=(
                     "Structured synthesized findings and coverage for a review_context-bound session. "
                     "Required when its outcome is completed; each finding cites registered evidence refs "
-                    "and the original profile-local candidate IDs that support it."
+                    "and the original profile-local candidate IDs and evidence that support it. The report "
+                    "is limited to 64 KiB; profile plus final reports are limited to 256 KiB per session."
                 )
             ),
         ] = None,

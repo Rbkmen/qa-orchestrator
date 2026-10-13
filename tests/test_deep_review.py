@@ -6,6 +6,14 @@ from qa_orchestrator.orchestration import (
 )
 
 
+def _evidenced_signals(**signals):
+    return DeepReviewSignals(
+        **signals,
+        rationale="The review evidence supports this escalation signal.",
+        evidence_refs=("E1",),
+    )
+
+
 def test_deep_review_signal_schema_explains_each_boolean():
     properties = DeepReviewSignals.model_json_schema()["properties"]
 
@@ -26,7 +34,7 @@ def test_evidence_uncertainty_is_specific_and_actionable():
 
 def test_high_risk_with_uncertain_evidence_requires_deep_review():
     decision = assess_deep_review(
-        DeepReviewSignals(high_risk_domain=True, evidence_uncertain=True)
+        _evidenced_signals(high_risk_domain=True, evidence_uncertain=True)
     )
 
     assert decision.should_escalate is True
@@ -39,7 +47,7 @@ def test_high_risk_with_uncertain_evidence_requires_deep_review():
 
 def test_two_complexity_signals_require_deep_review():
     decision = assess_deep_review(
-        DeepReviewSignals(cross_system_scope=True, non_reproducible=True)
+        _evidenced_signals(cross_system_scope=True, non_reproducible=True)
     )
 
     assert decision.should_escalate is True
@@ -53,7 +61,7 @@ def test_two_complexity_signals_require_deep_review():
 
 def test_critical_evidence_conflict_requires_deep_review():
     decision = assess_deep_review(
-        DeepReviewSignals(evidence_conflict=True, high_blast_radius=True)
+        _evidenced_signals(evidence_conflict=True, high_blast_radius=True)
     )
 
     assert decision.should_escalate is True
@@ -65,7 +73,7 @@ def test_critical_evidence_conflict_requires_deep_review():
 
 
 def test_single_low_risk_signal_does_not_require_deep_review():
-    decision = assess_deep_review(DeepReviewSignals(cross_system_scope=True))
+    decision = assess_deep_review(_evidenced_signals(cross_system_scope=True))
 
     assert decision.should_escalate is False
     assert decision.triggered_rules == ()

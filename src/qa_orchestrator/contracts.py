@@ -2,7 +2,7 @@ from enum import StrEnum
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 type QaTaskType = Literal[
     "ordinary_review",
@@ -48,6 +48,9 @@ type EvidenceRefId = Annotated[
     Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$"),
 ]
 type ChangedFilePath = Annotated[str, Field(min_length=1, max_length=1024)]
+
+_MAX_PROFILE_REVIEW_REPORT_BYTES = 64 * 1024
+_MAX_FINAL_REVIEW_REPORT_BYTES = 64 * 1024
 
 
 class ReviewContext(BaseModel):
@@ -111,6 +114,39 @@ class ReviewContext(BaseModel):
         return self
 
 
+class ReviewFindingLocation(BaseModel):
+    """A stable source locator for a finding candidate."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: ChangedFilePath
+    start_line: int = Field(ge=1)
+    end_line: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def validate_line_range(self) -> "ReviewFindingLocation":
+        if self.end_line is not None and self.end_line < self.start_line:
+            raise ValueError("end_line must be greater than or equal to start_line")
+        return self
+
+
+class ProfileExecutionMetrics(BaseModel):
+    """Optional host-reported timing and token counts for one completed profile."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    started_at: AwareDatetime
+    completed_at: AwareDatetime
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_execution_interval(self) -> "ProfileExecutionMetrics":
+        if self.completed_at < self.started_at:
+            raise ValueError("completed_at must be at or after started_at")
+        return self
+
+
 class ReviewFindingCandidate(BaseModel):
     """A possible defect with evidence references; the host still decides whether it is confirmed."""
 
@@ -122,6 +158,31 @@ class ReviewFindingCandidate(BaseModel):
     confidence: Literal["high", "medium", "low"]
     verification_gap: str = Field(min_length=1, max_length=2000)
     evidence_refs: tuple[EvidenceRefId, ...] = Field(min_length=1, max_length=32)
+    source_locations: tuple[ReviewFindingLocation, ...] = Field(
+        default=(),
+        max_length=20,
+        description="Precise source locations supporting this candidate when available.",
+    )
+    affected_area: str | None = Field(
+        default=None,
+        max_length=256,
+        description="Affected user flow or system area, when supported by the evidence.",
+    )
+    impact: str | None = Field(
+        default=None,
+        max_length=2000,
+        description="Concrete effect on users or contracts; severity remains host-owned.",
+    )
+
+    @model_validator(mode="after")
+    def validate_source_locations(self) -> "ReviewFindingCandidate":
+        location_keys = {
+            (location.path, location.start_line, location.end_line)
+            for location in self.source_locations
+        }
+        if len(location_keys) != len(self.source_locations):
+            raise ValueError("source_locations must be unique")
+        return self
 
 
 class ReviewFindingSource(BaseModel):
@@ -183,6 +244,10 @@ class ProfileReviewReport(BaseModel):
     coverage_gaps: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
     unverified: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
     evidence_map: tuple[ReviewEvidenceMapEntry, ...] = Field(default=(), max_length=500)
+    execution_metrics: ProfileExecutionMetrics | None = Field(
+        default=None,
+        description="Optional host-reported execution data; the orchestrator does not verify it.",
+    )
 
     @model_validator(mode="after")
     def validate_profile_scope(self) -> "ProfileReviewReport":
@@ -197,6 +262,8 @@ class ProfileReviewReport(BaseModel):
             self.finding_candidates
         ):
             raise ValueError("finding candidate IDs must be unique within a profile report")
+        if len(self.model_dump_json().encode("utf-8")) > _MAX_PROFILE_REVIEW_REPORT_BYTES:
+            raise ValueError("profile report exceeds the maximum serialized size")
         return self
 
 
@@ -219,6 +286,8 @@ class FinalReviewReport(BaseModel):
             self.finding_candidates
         ):
             raise ValueError("finding candidate IDs must be unique within the final report")
+        if len(self.model_dump_json().encode("utf-8")) > _MAX_FINAL_REVIEW_REPORT_BYTES:
+            raise ValueError("final review report exceeds the maximum serialized size")
         return self
 
 

@@ -177,6 +177,30 @@ def test_unknown_review_bundle_is_rejected_by_the_typed_contract():
         bundle_type("unknown_bundle")
 
 
+def test_changed_file_hints_follow_confirmed_language_and_test_paths():
+    assert review_profiles.recommended_profiles_for_changed_files(
+        ("src/payments/checkout.tsx", "src/payments/checkout.test.tsx")
+    ) == (
+        ReviewAgent.TYPESCRIPT_REVIEWER,
+        ReviewAgent.REACT_REVIEWER,
+        ReviewAgent.PR_TEST_ANALYZER,
+    )
+    assert review_profiles.recommended_profiles_for_changed_files(("backend/api.py",)) == (
+        ReviewAgent.PYTHON_REVIEWER,
+    )
+    assert review_profiles.recommended_profiles_for_changed_files(
+        ("android/app/src/MainActivity.kt",)
+    ) == (ReviewAgent.MOBILE_REVIEWER,)
+    assert review_profiles.recommended_profiles_for_changed_files(
+        ("mobile-apps/apps/mrbit/src/App.tsx",)
+    ) == (
+        ReviewAgent.TYPESCRIPT_REVIEWER,
+        ReviewAgent.REACT_REVIEWER,
+        ReviewAgent.MOBILE_REVIEWER,
+    )
+    assert review_profiles.recommended_profiles_for_changed_files(("src/service.js",)) == ()
+
+
 def test_catalog_responses_do_not_share_mutable_routing_definitions(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
     catalog = service.get_qa_orchestration_catalog()
