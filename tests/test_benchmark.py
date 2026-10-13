@@ -218,3 +218,56 @@ def test_digest_case_does_not_change_snapshot_or_configuration_identity(benchmar
         BenchmarkDataset.model_validate(dataset), BenchmarkResults.model_validate(results)
     )
     assert score["configurations"]["baseline"]["runs"] == 2
+
+
+def test_reliability_measures_intersection_and_spread_without_best_run_bias(benchmark_inputs):
+    from qa_orchestrator.benchmark import score_reliability
+
+    dataset, results = benchmark_inputs
+    second = deepcopy(results["runs"][0])
+    second.update(run_id="run-2", elapsed_ms=900)
+    second["adjudications"][0].update(gold_id="G-2")
+    second["adjudications"][1].update(gold_id="G-2")
+    results["runs"].append(second)
+    result = score_reliability(
+        BenchmarkDataset.model_validate(dataset),
+        BenchmarkResults.model_validate(results),
+        expected_repetitions=3,
+    )
+    case = result["groups"][0]
+    assert case["repetition_coverage_complete"] is False
+    assert case["always_found_gold"] == []
+    assert case["ever_found_gold"] == ["G-1", "G-2"]
+    assert case["pairwise_gold_jaccard"] == 0
+    assert case["elapsed_ms"] == {"min": 500, "max": 900, "median": 700.0, "p95": 900}
+    assert case["stable_gold_recall"] is None
+
+
+def test_reliability_rejects_different_packets_for_the_same_case(benchmark_inputs):
+    from qa_orchestrator.benchmark import score_reliability
+
+    dataset, results = benchmark_inputs
+    second = deepcopy(results["runs"][0])
+    second.update(run_id="run-2", evidence_packet_sha256="f" * 64)
+    results["runs"].append(second)
+    with pytest.raises(ValueError, match="same Evidence Packet"):
+        score_reliability(
+            BenchmarkDataset.model_validate(dataset),
+            BenchmarkResults.model_validate(results),
+            expected_repetitions=2,
+        )
+
+
+async def test_repetition_runner_executes_all_requested_attempts(benchmark_inputs):
+    from qa_orchestrator.benchmark import BenchmarkRun, run_repetitions
+
+    dataset, results = benchmark_inputs
+    seen = []
+
+    async def execute(case, attempt):
+        seen.append((case.case_id, attempt))
+        return BenchmarkRun.model_validate({**results["runs"][0], "run_id": f"real-{attempt}"})
+
+    runs = await run_repetitions(BenchmarkDataset.model_validate(dataset), execute, repetitions=3)
+    assert seen == [("case-1", 1), ("case-1", 2), ("case-1", 3)]
+    assert len(runs.runs) == 3

@@ -647,6 +647,7 @@ def _help() -> int:
     print("  qa-orch reload         перечитать и проверить модельную политику")
     print("  qa-orch benchmark      импортировать и оценить локальный benchmark")
     print("  qa-orch evidence       собрать и проверить реестр evidence")
+    print("  qa-orch rules          привязать явные правила к контексту ревью")
     print("  qa-orch                запустить MCP STDIO-сервер")
     return 0
 
@@ -667,6 +668,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             from qa_orchestrator.evidence import evidence_main
 
             return evidence_main(args[1:])
+        if args[0] == "rules":
+            from qa_orchestrator.review_rules import rules_main
+
+            return rules_main(args[1:])
         if args[:2] == ["config", "show"]:
             return _show_config()
         if args in (["reload"], ["config", "reload"]):

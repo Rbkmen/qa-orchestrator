@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from qa_orchestrator.checkpoints import ProfileCheckpointStore, checkpoint_key
 from qa_orchestrator.contracts import (
     ProfileExecutionMetrics,
     ProfileReviewReport,
@@ -15,6 +16,7 @@ from qa_orchestrator.contracts import (
     ReviewContext,
     ReviewRoute,
 )
+from qa_orchestrator.evidence import validate_registered_locations
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
     DeepReviewSignals,
@@ -23,6 +25,7 @@ from qa_orchestrator.orchestration import (
     OrchestrationStep,
     QaOrchestrationSession,
 )
+from qa_orchestrator.review_rules import ReviewRuleset
 from qa_orchestrator.service import OrchestratorService
 
 
@@ -48,6 +51,7 @@ class HostProfileJob:
     route: ReviewRoute
     previous_reports: tuple[ProfileReviewReport, ...]
     attempt: int
+    review_rules: ReviewRuleset | None = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +67,7 @@ class HostExecutionResult:
     failures: tuple[HostProfileFailure, ...]
     started_at: datetime
     completed_at: datetime
+    reused_profiles: tuple[ReviewAgent, ...] = ()
 
 
 ProfileExecutor = Callable[[HostProfileJob], Awaitable[ProfileReviewReport]]
@@ -78,10 +83,18 @@ class HostReviewAdapter:
         policy: HostExecutionPolicy | None = None,
         *,
         evidence_verifier: Callable[[ReviewContext], object] | None = None,
+        checkpoint_store: ProfileCheckpointStore | None = None,
+        executor_identity: str | None = None,
     ):
         self.service = service
         self.policy = policy or HostExecutionPolicy()
         self.evidence_verifier = evidence_verifier
+        if checkpoint_store is not None and (
+            not executor_identity or not executor_identity.strip()
+        ):
+            raise ValueError("checkpoint reuse requires an explicit executor/instruction version")
+        self.checkpoint_store = checkpoint_store
+        self.executor_identity = executor_identity
 
     async def _execute_profile(
         self,
@@ -89,17 +102,37 @@ class HostReviewAdapter:
         profile: ReviewAgent,
         executor: ProfileExecutor,
         semaphore: asyncio.Semaphore,
+        reused: list[ReviewAgent],
     ) -> ProfileReviewReport | HostProfileFailure:
         async with semaphore:
             started_at = datetime.now(UTC)
             route = self.service.prepare_review_route(profile)
+            key = None
+            if self.checkpoint_store:
+                key = checkpoint_key(
+                    session.review_context,
+                    route,
+                    session.model_policy,
+                    session.profile_reports,
+                    self.executor_identity,
+                )
+                cached = self.checkpoint_store.load(key)
+                if cached is not None:
+                    self._validate_report(session.review_context, profile, cached)
+                    reused.append(profile)
+                    return cached
             for attempt in range(1, self.policy.max_retries + 2):
                 job = HostProfileJob(
                     session.model_copy(deep=True),
                     profile,
-                    route,
+                    route.model_copy(deep=True),
                     tuple(session.profile_reports),
                     attempt,
+                    session.review_context.review_rules.for_paths(
+                        session.review_context.changed_files
+                    )
+                    if session.review_context and session.review_context.review_rules
+                    else None,
                 )
                 try:
                     async with asyncio.timeout(self.policy.profile_timeout_seconds):
@@ -115,12 +148,23 @@ class HostReviewAdapter:
                         output_tokens=usage.output_tokens if usage and attempt == 1 else None,
                         attempt_count=attempt,
                     )
-                    return ProfileReviewReport.model_validate(
+                    completed_report = ProfileReviewReport.model_validate(
                         {
                             **report.model_dump(),
                             "execution_metrics": metrics.model_dump(),
+                            "review_rules_sha256": session.review_context.review_rules.digest
+                            if session.review_context and session.review_context.review_rules
+                            else None,
                         }
                     )
+                    if self.checkpoint_store:
+                        try:
+                            self._validate_report(session.review_context, profile, completed_report)
+                        except ValueError:
+                            # Retain the raw result for host inspection; group submission rejects it.
+                            return completed_report
+                        self.checkpoint_store.save(key, completed_report)
+                    return completed_report
                 except (TimeoutError, RetryableProfileError) as exc:
                     if attempt > self.policy.max_retries:
                         reason = (
@@ -160,6 +204,7 @@ class HostReviewAdapter:
         semaphore = asyncio.Semaphore(self.policy.max_concurrency)
         unsaved: tuple[ProfileReviewReport, ...] = ()
         failures: tuple[HostProfileFailure, ...] = ()
+        reused: list[ReviewAgent] = []
         tasks: list[asyncio.Task] = []
         lease_seconds = (session.expires_at - datetime.now(UTC)).total_seconds()
         interval = min(self.policy.heartbeat_interval_seconds, max(lease_seconds / 3, 0.01))
@@ -176,7 +221,7 @@ class HostReviewAdapter:
                         continue
                     tasks = [
                         asyncio.create_task(
-                            self._execute_profile(session, profile, executor, semaphore)
+                            self._execute_profile(session, profile, executor, semaphore, reused)
                         )
                         for profile in remaining
                     ]
@@ -246,7 +291,30 @@ class HostReviewAdapter:
                 )
         if failures:
             session = self._stop_partial(run_id, session.revision)
-        return HostExecutionResult(session, unsaved, failures, started_at, datetime.now(UTC))
+        return HostExecutionResult(
+            session,
+            unsaved,
+            failures,
+            started_at,
+            datetime.now(UTC),
+            tuple(p for p in session.review_profiles if p in reused),
+        )
+
+    @staticmethod
+    def _validate_report(context: ReviewContext, profile: ReviewAgent, report: ProfileReviewReport):
+        if report.profile != profile:
+            raise ValueError("checkpoint profile mismatch")
+        refs = {ref for f in report.finding_candidates for ref in f.evidence_refs}
+        refs.update(
+            ref for n in (*report.coverage_gaps, *report.unverified) for ref in n.evidence_refs
+        )
+        refs.update(e.evidence_ref for e in report.evidence_map)
+        if refs - set(context.evidence_refs):
+            raise ValueError("profile report cites unknown evidence refs")
+        expected = context.review_rules.digest if context.review_rules else None
+        if report.review_rules_sha256 != expected:
+            raise ValueError("profile report rules digest mismatch")
+        validate_registered_locations(context, report.finding_candidates)
 
     def _submit_transition(self, request: AdvanceQaOrchestrationRequest) -> QaOrchestrationSession:
         for attempt in range(self.policy.max_retries + 1):

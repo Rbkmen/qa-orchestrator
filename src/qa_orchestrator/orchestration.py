@@ -861,6 +861,10 @@ class QaOrchestrator:
             if validated_report is not None:
                 if session.review_context is None:
                     raise OrchestrationError("final review report requires a bound review context")
+                expected_rules = (session.review_context.review_rules.digest
+                                  if session.review_context.review_rules else None)
+                if validated_report.review_rules_sha256 != expected_rules:
+                    raise OrchestrationError("final report rules digest mismatch")
                 if validated_report.profiles_reviewed != tuple(session.completed_profiles):
                     raise OrchestrationError(
                         "final report profiles do not match completed profiles"
@@ -1110,6 +1114,10 @@ class QaOrchestrator:
                     )
                 context_refs = set(session.review_context.evidence_refs)
                 for report in request.profile_reports:
+                    expected_rules = (session.review_context.review_rules.digest
+                                      if session.review_context.review_rules else None)
+                    if report.review_rules_sha256 != expected_rules:
+                        raise OrchestrationError("profile report rules digest mismatch")
                     report_refs = {
                         reference
                         for finding in report.finding_candidates

@@ -4,6 +4,8 @@ from urllib.parse import urlsplit
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from qa_orchestrator.review_rules import ReviewRuleset
+
 type QaTaskType = Literal[
     "ordinary_review",
     "widget_review",
@@ -112,6 +114,7 @@ class ReviewContext(BaseModel):
     evidence_packet_sha256: Sha256Digest
     changed_files: tuple[ChangedFilePath, ...] = Field(min_length=1, max_length=500)
     evidence_refs: tuple[EvidenceRefId, ...] = Field(min_length=1, max_length=1000)
+    review_rules: ReviewRuleset | None = None
     evidence_registry: tuple[EvidenceRecord, ...] = Field(
         default=(), max_length=1000,
         description="Optional complete ref-to-source registry with revision, coordinates and hashes."
@@ -305,6 +308,7 @@ class ProfileReviewReport(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     profile: ReviewAgent
+    review_rules_sha256: Sha256Digest | None = None
     scope: str = Field(min_length=1, max_length=2000)
     finding_candidates: tuple[ReviewFindingCandidate, ...] = Field(default=(), max_length=100)
     coverage_gaps: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
@@ -314,6 +318,11 @@ class ProfileReviewReport(BaseModel):
         default=None,
         description="Optional host-reported execution data; the orchestrator does not verify it.",
     )
+
+    @field_validator("review_rules_sha256")
+    @classmethod
+    def normalize_rules_digest(cls, value: str | None) -> str | None:
+        return value.lower() if value is not None else None
 
     @model_validator(mode="after")
     def validate_profile_scope(self) -> "ProfileReviewReport":
@@ -361,6 +370,7 @@ class FinalReviewReport(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     summary: str = Field(min_length=1, max_length=5000)
+    review_rules_sha256: Sha256Digest | None = None
     profiles_reviewed: tuple[ReviewAgent, ...] = Field(min_length=1)
     finding_candidates: tuple[FinalReviewFinding, ...] = Field(default=(), max_length=100)
     coverage_gaps: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
@@ -369,6 +379,11 @@ class FinalReviewReport(BaseModel):
         default=(), max_length=1000,
         description="One host decision per submitted candidate; absent on legacy saved reports."
     )
+
+    @field_validator("review_rules_sha256")
+    @classmethod
+    def normalize_rules_digest(cls, value: str | None) -> str | None:
+        return value.lower() if value is not None else None
 
     @model_validator(mode="after")
     def validate_profiles_reviewed(self) -> "FinalReviewReport":

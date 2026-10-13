@@ -37,6 +37,86 @@ def report(profile):
     return ProfileReviewReport(profile=profile, scope="Pinned source inspected.")
 
 
+async def test_successful_profile_is_checkpointed_before_its_wave_finishes(host_session, tmp_path):
+    from qa_orchestrator.checkpoints import ProfileCheckpointStore
+
+    service, run_id = host_session(bundle="python_backend")
+    store = ProfileCheckpointStore(tmp_path / "checkpoints.sqlite")
+    good_finished = asyncio.Event()
+    release = asyncio.Event()
+
+    async def execute(job):
+        if job.profile == ReviewAgent.CODE_EXPLORER:
+            good_finished.set()
+            return report(job.profile)
+        await release.wait()
+        raise RuntimeError("Provider failed")
+
+    adapter = HostReviewAdapter(
+        service,
+        HostExecutionPolicy(max_retries=0),
+        checkpoint_store=store,
+        executor_identity="fixture-v1",
+    )
+    task = asyncio.create_task(
+        adapter.run_primary_review(run_id, execute, lambda _: DeepReviewSignals())
+    )
+    await asyncio.wait_for(good_finished.wait(), 1)
+    await asyncio.sleep(0)
+    assert len(store.list_keys()) == 1
+    release.set()
+    assert (await task).session.status == "partial"
+    service, new_id = host_session(bundle="python_backend")
+    called = []
+
+    async def succeed(job):
+        called.append(job.profile)
+        return report(job.profile)
+
+    recovered = await HostReviewAdapter(
+        service, checkpoint_store=store, executor_identity="fixture-v1"
+    ).run_primary_review(new_id, succeed, lambda _: DeepReviewSignals())
+    assert not recovered.failures
+    assert ReviewAgent.CODE_EXPLORER not in called
+    assert recovered.reused_profiles == (ReviewAgent.CODE_EXPLORER,)
+    assert len(recovered.session.profile_reports) == 3
+
+
+async def test_checkpoint_rejects_different_executor_identity(host_session, tmp_path):
+    from qa_orchestrator.checkpoints import ProfileCheckpointStore
+
+    store = ProfileCheckpointStore(tmp_path / "checkpoints.sqlite")
+    called = []
+
+    async def execute(job):
+        called.append(job.profile)
+        return report(job.profile)
+
+    for identity in ("v1", "v2"):
+        service, run_id = host_session(profile="python_reviewer")
+        await HostReviewAdapter(
+            service, checkpoint_store=store, executor_identity=identity
+        ).run_primary_review(run_id, execute, lambda _: DeepReviewSignals())
+    assert len(called) == 2
+
+
+async def test_retry_gets_a_fresh_checklist_after_executor_mutation(host_session):
+    service, run_id = host_session(profile="python_reviewer")
+    original_focus = service.prepare_review_route("python_reviewer").focus
+
+    async def execute(job):
+        assert job.route.focus == original_focus
+        if job.attempt == 1:
+            job.route.focus = "changed by executor"
+            raise RetryableProfileError()
+        return report(job.profile)
+
+    result = await HostReviewAdapter(
+        service, HostExecutionPolicy(retry_delay_seconds=0)
+    ).run_primary_review(run_id, execute, lambda _: DeepReviewSignals())
+    assert not result.failures
+
+
 async def test_wave_barriers_and_fixed_order_are_enforced(host_session):
     service, run_id = host_session(bundle="ordinary_mr")
     explorer_started, release_explorer, release_second = (asyncio.Event() for _ in range(3))

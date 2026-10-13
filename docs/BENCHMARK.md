@@ -33,3 +33,9 @@ qa-orch benchmark score --dataset /path/to/run/dataset.json \
 The output reports precision, recall against complete reference sets, missed high-impact findings, correctness by confidence tier, validated evidence/locations, time, and token counts. Missing token usage stays unknown. Aggregates stay separate by configuration and explicitly list unreviewed cases; aggregate recall is unavailable for incomplete coverage or incomplete gold.
 
 Run matched configurations on the same cases and repetitions before comparing speed or quality. Preserve raw candidates, references and per-run scores locally outside the repository. Only aggregate, clearly labeled results should be published. See [Profile Evaluation](PROFILE_EVALUATION.md) for the benchmark protocol and Python schedule comparison.
+
+For fresh repeated attempts, `run_repetitions` invokes a host-supplied execution and
+adjudication callback. `qa-orch benchmark reliability --dataset dataset.json
+--results results.json --repetitions 3 --output reliability.json` reports stable
+gold findings and quality/time spreads, with explicit incomplete repetition
+coverage. See [Review Upgrades](REVIEW_UPGRADES.md) for identity and trust boundaries.

@@ -21,3 +21,7 @@ Continue from `result.session.current_step` with scoped deep review or host synt
 The adapter renews active leases during execution at `heartbeat_interval_seconds` (shortened when the remaining initial lease requires it). It submits each group with a unique request key and the revision used for that wave. Lost-response/connection retries reuse the exact payload; stale submissions cannot advance or stop a session progressed by another host. Failed lease renewal interrupts the wave, and expired sessions require a new run.
 
 An optional `evidence_verifier` callback validates the pinned input before execution. Connect it to the [local evidence checker](EVIDENCE_REGISTRY.md); a verification failure prevents worker launch. The callback receives the bound context and uses repository/packet paths supplied explicitly by the host.
+
+Optional scoped repository rules, per-profile checkpoints and a read-only Codex CLI
+executor are described in [Review Upgrades](REVIEW_UPGRADES.md). Checkpoint reuse
+is explicit and reported separately from fresh execution; disable it for benchmarks.

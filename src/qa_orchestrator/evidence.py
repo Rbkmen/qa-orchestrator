@@ -167,6 +167,14 @@ def evidence_main(argv: list[str]) -> int:
     verify = subparsers.add_parser(
         "verify", help="Check evidence against immutable local Git objects"
     )
+    chunks = subparsers.add_parser(
+        "chunks", help="Read pinned source into byte-faithful AST chunks"
+    )
+    chunks.add_argument("--repository", required=True, type=Path)
+    chunks.add_argument("--revision", required=True)
+    chunks.add_argument("--path", required=True)
+    chunks.add_argument("--max-bytes", default=16000, type=int)
+    chunks.add_argument("--output", type=Path)
     for command in (build, verify):
         command.add_argument("--context", required=True, type=Path)
         command.add_argument("--repository", required=True, type=Path)
@@ -175,6 +183,34 @@ def evidence_main(argv: list[str]) -> int:
     verify.add_argument("--packet", type=Path)
     verify.add_argument("--report", type=Path)
     args = parser.parse_args(argv)
+    if args.command == "chunks":
+        from qa_orchestrator.review_chunks import chunk_source
+
+        entry = EvidenceRecord(
+            evidence_ref="source",
+            kind="source",
+            sha256="0" * 64,
+            revision=args.revision,
+            path=args.path,
+        )
+        if _git(args.repository, "cat-file", "-t", entry.revision).strip() != b"commit":
+            raise ValueError("chunk revision must identify a commit")
+        source = _source_bytes(entry, args.repository)
+        payload = {
+            "revision": entry.revision,
+            "path": entry.path,
+            "source_sha256": hashlib.sha256(source).hexdigest(),
+            "chunks": [
+                c.model_dump(mode="json")
+                for c in chunk_source(source, path=entry.path, max_bytes=args.max_bytes)
+            ],
+        }
+        output = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        if args.output:
+            args.output.write_text(output, encoding="utf-8")
+        else:
+            print(output, end="")
+        return 0
     context = ReviewContext.model_validate_json(args.context.read_bytes())
     if args.command == "build":
         payload = register_evidence(

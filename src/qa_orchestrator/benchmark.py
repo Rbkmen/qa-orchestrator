@@ -3,8 +3,11 @@
 import argparse
 import hashlib
 import json
+import math
+import statistics
 import subprocess
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Literal
 
@@ -107,6 +110,7 @@ class BenchmarkRun(BaseModel):
     reasoning: str = Field(min_length=1, max_length=64)
     checklist_sha256: Sha256Digest
     host_instructions_sha256: Sha256Digest
+    review_rules_sha256: Sha256Digest | None = None
     base_sha: GitObjectId
     head_sha: GitObjectId
     diff_sha256: Sha256Digest
@@ -125,10 +129,11 @@ class BenchmarkRun(BaseModel):
         "evidence_packet_sha256",
         "checklist_sha256",
         "host_instructions_sha256",
+        "review_rules_sha256",
     )
     @classmethod
-    def normalize_hashes(cls, value: str) -> str:
-        return value.lower()
+    def normalize_hashes(cls, value: str | None) -> str | None:
+        return value.lower() if value is not None else None
 
     @model_validator(mode="after")
     def all_candidates_adjudicated(self) -> "BenchmarkRun":
@@ -166,6 +171,7 @@ class BenchmarkResults(BaseModel):
                 run.reasoning,
                 run.checklist_sha256,
                 run.host_instructions_sha256,
+                run.review_rules_sha256,
             )
             if configurations.setdefault(run.configuration_id, identity) != identity:
                 raise ValueError(
@@ -274,6 +280,104 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
     }
 
 
+def score_reliability(
+    dataset: BenchmarkDataset, results: BenchmarkResults, *, expected_repetitions: int
+) -> dict:
+    if not 2 <= expected_repetitions <= 20:
+        raise ValueError("repetitions must be between 2 and 20")
+    scored = score_benchmark(dataset, results)
+    summaries = {r["run_id"]: r for r in scored["runs"]}
+    cases = {c.case_id: c for c in dataset.cases}
+    grouped = defaultdict(list)
+    for run in results.runs:
+        grouped[(run.configuration_id, run.case_id)].append(run)
+    groups = []
+    for (configuration, case_id), runs in sorted(grouped.items()):
+        if len({r.evidence_packet_sha256 for r in runs}) != 1:
+            raise ValueError("repetitions must use the same Evidence Packet")
+        if len(runs) > expected_repetitions:
+            raise ValueError("more attempts than the declared repetition budget")
+        sets = [
+            {
+                g
+                for d in r.adjudications
+                if d.verdict == "matched"
+                for g in (d.gold_id, *d.additional_gold_ids)
+            }
+            for r in runs
+        ]
+        intersection, union = set.intersection(*sets), set.union(*sets)
+        pairs = [(a, b) for i, a in enumerate(sets) for b in sets[i + 1 :]]
+        jaccard = [len(a & b) / len(a | b) for a, b in pairs if a | b]
+        elapsed = sorted(r.elapsed_ms for r in runs)
+        complete = len(runs) == expected_repetitions
+        rows = [summaries[r.run_id] for r in runs]
+
+        def spread(values):
+            values = [v for v in values if v is not None]
+            return (
+                {"min": min(values), "max": max(values), "median": statistics.median(values)}
+                if values
+                else None
+            )
+
+        groups.append(
+            {
+                "configuration_id": configuration,
+                "case_id": case_id,
+                "attempts": len(runs),
+                "expected_repetitions": expected_repetitions,
+                "repetition_coverage_complete": complete,
+                "always_found_gold": sorted(intersection),
+                "ever_found_gold": sorted(union),
+                "stable_gold_recall": len(intersection) / len(cases[case_id].gold)
+                if complete and cases[case_id].gold_complete and cases[case_id].gold
+                else None,
+                "pairwise_gold_jaccard": statistics.mean(jaccard) if jaccard else None,
+                "precision": spread(r["precision"] for r in rows),
+                "recall": spread(r["recall"] for r in rows),
+                "elapsed_ms": {
+                    **spread(elapsed),
+                    "p95": elapsed[math.ceil(0.95 * len(elapsed)) - 1],
+                },
+                "finding_identity": "explicit golden IDs only; valid_unlisted has no stable identity",
+            }
+        )
+    return {
+        "schema_version": 1,
+        "scoring": "local_explicit_adjudication_repetitions",
+        "missing_cases_by_configuration": {
+            c: sorted(set(cases) - {r.case_id for r in results.runs if r.configuration_id == c})
+            for c in sorted({r.configuration_id for r in results.runs})
+        },
+        "groups": groups,
+    }
+
+
+async def run_repetitions(
+    dataset: BenchmarkDataset,
+    execute: Callable[[BenchmarkCase, int], Awaitable[BenchmarkRun]],
+    *,
+    repetitions: int = 3,
+) -> BenchmarkResults:
+    """Fresh serial attempts; execute owns worker launch AND external adjudication.
+
+    Failed calls abort; no duplication of prior results, hidden retries or checkpoint reuse.
+    """
+    if not 2 <= repetitions <= 20:
+        raise ValueError("repetitions must be between 2 and 20")
+    runs = []
+    for case in dataset.cases:
+        for attempt in range(1, repetitions + 1):
+            run = BenchmarkRun.model_validate(await execute(case, attempt))
+            if run.case_id != case.case_id:
+                raise ValueError("repetition runner returned a different case")
+            runs.append(run)
+    results = BenchmarkResults(runs=tuple(runs))
+    score_reliability(dataset, results, expected_repetitions=repetitions)
+    return results
+
+
 def import_reviewbench(golden_path: Path, repository_path: Path) -> BenchmarkDataset:
     try:
         return _import_reviewbench(golden_path, repository_path)
@@ -348,6 +452,11 @@ def benchmark_main(argv: list[str]) -> int:
     score.add_argument("--dataset", required=True, type=Path)
     score.add_argument("--results", required=True, type=Path)
     score.add_argument("--output", type=Path)
+    reliability = subparsers.add_parser("reliability", help="Score fresh repeated review runs")
+    reliability.add_argument("--dataset", required=True, type=Path)
+    reliability.add_argument("--results", required=True, type=Path)
+    reliability.add_argument("--repetitions", required=True, type=int)
+    reliability.add_argument("--output", type=Path)
     prepare = subparsers.add_parser("import-reviewbench", help="Import one public golden case")
     prepare.add_argument("--golden", required=True, type=Path)
     prepare.add_argument("--repository", required=True, type=Path)
@@ -358,7 +467,11 @@ def benchmark_main(argv: list[str]) -> int:
     else:
         dataset = BenchmarkDataset.model_validate_json(args.dataset.read_bytes())
         results = BenchmarkResults.model_validate_json(args.results.read_bytes())
-        payload = score_benchmark(dataset, results)
+        payload = (
+            score_reliability(dataset, results, expected_repetitions=args.repetitions)
+            if args.command == "reliability"
+            else score_benchmark(dataset, results)
+        )
     output = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if args.output:
         args.output.write_text(output, encoding="utf-8")

@@ -49,6 +49,23 @@ For coordinate-verifiable reviews, provide a complete `review_context.evidence_r
 
 ## Evidence and final findings
 
+### Optional review rules and host execution
+
+The host may bind an explicitly approved `ReviewRuleset` as
+`review_context.review_rules`. Pass only applicable scoped rules to workers;
+evaluate every guard condition against evidence and retain normal candidate
+decisions. Rules never automatically suppress findings. Include the complete
+ruleset SHA-256 as `review_rules_sha256` in every profile and final report.
+The host adapter supplies profile digests; synthesis remains host-owned.
+Without a bound ruleset, omit the digest. Rule changes require a new session.
+
+Per-profile checkpoints may reuse validated reports only for the same complete
+input and explicit executor/instruction version. Mark reused profiles separately
+from fresh execution and disable reuse for independent benchmarks. The optional
+Codex CLI executor performs packet-only review with read-only writes sandboxing;
+strict filesystem read isolation requires host OS/container controls. See
+`docs/REVIEW_UPGRADES.md` for configuration and limits.
+
 ### Confirmation and traceability
 
 - Put a defect in final `Findings` only when evidence supports both the failure condition and its material impact. Direct source and contract evidence can confirm a code-level defect; state clearly when runtime, deployment, or release behavior was not tested.
