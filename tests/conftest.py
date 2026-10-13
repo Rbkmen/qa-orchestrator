@@ -8,6 +8,7 @@ from qa_orchestrator.contracts import (
     ProfileExecutionMetrics,
     ProfileReviewReport,
     ReviewAgent,
+    ReviewCandidateDecision,
     ReviewContext,
     ReviewFindingCandidate,
     ReviewFindingLocation,
@@ -85,6 +86,7 @@ def make_final_review_report():
         profile_sources = tuple(sources)
         return FinalReviewFinding(
             **finding.model_dump(),
+            severity="medium",
             source_profiles=profile_sources,
             source_candidates=tuple(
                 ReviewFindingSource(profile=profile, candidate_id=finding.candidate_id)
@@ -100,6 +102,13 @@ def make_final_review_report():
             finding_candidates=final_findings,
             coverage_gaps=tuple(coverage_gaps),
             unverified=tuple(unverified),
+            candidate_decisions=tuple(
+                ReviewCandidateDecision(
+                    source=source, verdict="confirmed", rationale="Validated against source.",
+                    evidence_refs=finding.evidence_refs, final_finding_id=finding.candidate_id,
+                )
+                for finding in final_findings for source in finding.source_candidates
+            ),
         )
 
     return make

@@ -789,6 +789,11 @@ class QaOrchestrator:
                     for note in (*validated_report.coverage_gaps, *validated_report.unverified)
                     for reference in note.evidence_refs
                 )
+                report_refs.update(
+                    reference
+                    for decision in validated_report.candidate_decisions
+                    for reference in decision.evidence_refs
+                )
                 unknown_refs = report_refs - context_refs
                 if unknown_refs:
                     raise OrchestrationError("final review report cites unknown evidence refs")
@@ -842,6 +847,33 @@ class QaOrchestrator:
                     raise OrchestrationError(
                         "final finding source profiles do not match profiles_reviewed"
                     )
+                if not is_idempotent_legacy_replay:
+                    decisions = {
+                        (decision.source.profile, decision.source.candidate_id): decision
+                        for decision in validated_report.candidate_decisions
+                    }
+                    if set(decisions) != set(reported_candidates):
+                        raise OrchestrationError(
+                            "final report requires exactly one decision per submitted candidate"
+                        )
+                    for finding in validated_report.finding_candidates:
+                        linked = {
+                            source for source, decision in decisions.items()
+                            if decision.final_finding_id == finding.candidate_id
+                        }
+                        declared = {(s.profile, s.candidate_id) for s in finding.source_candidates}
+                        if linked != declared or not any(
+                            decisions[source].verdict == "confirmed" for source in linked
+                        ):
+                            raise OrchestrationError(
+                                "final finding sources must match confirmed and duplicate decisions"
+                            )
+                        if (finding.severity is None or not finding.source_locations
+                            or not finding.affected_area or not finding.affected_area.strip()
+                            or not finding.impact or not finding.impact.strip()):
+                            raise OrchestrationError(
+                                "confirmed findings require severity, source locations, affected area, and impact"
+                            )
 
             if session.status in _TERMINAL_SESSION_STATUSES:
                 if session.status is not final_status:

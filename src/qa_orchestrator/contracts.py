@@ -195,6 +195,9 @@ class ReviewFindingSource(BaseModel):
 
 
 class FinalReviewFinding(ReviewFindingCandidate):
+    severity: Literal["high", "medium", "low"] | None = Field(
+        default=None, description="Impact severity selected by the host for a confirmed finding."
+    )
     source_profiles: tuple[ReviewAgent, ...] = Field(min_length=1)
     source_candidates: tuple[ReviewFindingSource, ...] = Field(
         default=(),
@@ -267,6 +270,28 @@ class ProfileReviewReport(BaseModel):
         return self
 
 
+class ReviewCandidateDecision(BaseModel):
+    """The host's disposition of one profile-local candidate."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source: ReviewFindingSource
+    verdict: Literal["confirmed", "rejected", "duplicate", "unverified"]
+    rationale: str = Field(min_length=1, max_length=2000)
+    evidence_refs: tuple[EvidenceRefId, ...] = Field(min_length=1, max_length=32)
+    final_finding_id: str | None = Field(default=None, pattern=r"^F-[0-9]{2,}$")
+
+    @model_validator(mode="after")
+    def validate_final_link(self) -> "ReviewCandidateDecision":
+        if (self.verdict in {"confirmed", "duplicate"}) != (self.final_finding_id is not None):
+            raise ValueError("only confirmed and duplicate decisions require final_finding_id")
+        if not self.rationale.strip():
+            raise ValueError("candidate decision rationale must not be blank")
+        if len(set(self.evidence_refs)) != len(self.evidence_refs):
+            raise ValueError("candidate decision evidence_refs must be unique")
+        return self
+
+
 class FinalReviewReport(BaseModel):
     """Structured synthesis stored with a review-bound orchestration session."""
 
@@ -277,6 +302,10 @@ class FinalReviewReport(BaseModel):
     finding_candidates: tuple[FinalReviewFinding, ...] = Field(default=(), max_length=100)
     coverage_gaps: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
     unverified: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
+    candidate_decisions: tuple[ReviewCandidateDecision, ...] = Field(
+        default=(), max_length=1000,
+        description="One host decision per submitted candidate; absent on legacy saved reports."
+    )
 
     @model_validator(mode="after")
     def validate_profiles_reviewed(self) -> "FinalReviewReport":
@@ -286,6 +315,16 @@ class FinalReviewReport(BaseModel):
             self.finding_candidates
         ):
             raise ValueError("finding candidate IDs must be unique within the final report")
+        decision_sources = {
+            (decision.source.profile, decision.source.candidate_id)
+            for decision in self.candidate_decisions
+        }
+        if len(decision_sources) != len(self.candidate_decisions):
+            raise ValueError("candidate decisions must have unique sources")
+        finding_ids = {finding.candidate_id for finding in self.finding_candidates}
+        if any(decision.final_finding_id is not None and decision.final_finding_id not in finding_ids
+               for decision in self.candidate_decisions):
+            raise ValueError("candidate decision links an unknown final finding")
         if len(self.model_dump_json().encode("utf-8")) > _MAX_FINAL_REVIEW_REPORT_BYTES:
             raise ValueError("final review report exceeds the maximum serialized size")
         return self

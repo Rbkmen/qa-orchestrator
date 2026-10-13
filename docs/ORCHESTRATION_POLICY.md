@@ -140,6 +140,10 @@ For `outcome="completed"`, `finish_qa_orchestration` requires a `final_review_re
 
 Each profile report and final report is limited to 64 KiB of serialized data; combined session review artifacts are limited to 256 KiB and at most ten profile reports are accepted. Keep the Evidence Packet and raw model responses outside these reports. These report-bound sessions and their structured reports are retained in the configured SQLite session store, if enabled, until the normal session TTL or capacity eviction. They are available through `get_qa_orchestration`; `list_qa_orchestrations` includes repository, head SHA, diff hash, and whether reports are present. Reports saved before source-candidate linkage was added remain recoverable with empty `source_candidates`; they can be replayed idempotently but cannot be used to finalize a new session. Without `review_context`, the legacy content-free workflow remains available and no structured reports are accepted.
 
+### Host candidate decisions
+
+New final reports account for every submitted profile candidate in `candidate_decisions`. Each decision retains its source profile/local ID, verdict (`confirmed`, `rejected`, `duplicate`, `unverified`), rationale and registered evidence refs. Confirmed and duplicate decisions link an existing final finding; every final finding needs a confirmed source and exact source linkage. The host supplies final severity, impact, affected area and source locations. Rejected and unverified candidates remain traceable even when no final finding is emitted. Old saved reports can still be read and replayed idempotently.
+
 ### Deterministic deep-review decision
 
 After the final primary-review profile, the host sends boolean signals plus one concise rationale and the Evidence Packet references that support every enabled signal. It must not send raw evidence:
