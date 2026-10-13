@@ -25,10 +25,12 @@ def pinned_evidence(tmp_path):
         )
 
     git("init", "--quiet")
+    # Preserve the CRLF blob even when the host enables Git's line-ending conversion.
+    (repository / ".gitattributes").write_bytes(b"src/api.py -text\n")
     (repository / "src").mkdir()
     source = repository / "src/api.py"
     source.write_bytes(b"first\r\noriginal\r\nlast")
-    git("add", "src/api.py")
+    git("add", ".gitattributes", "src/api.py")
     git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
     base = git("rev-parse", "HEAD").decode().strip()
     source.write_bytes(b"first\r\nchanged\r\nlast")
