@@ -1,4 +1,4 @@
-"""Opt-in, local persistence for content-free orchestration sessions."""
+"""Opt-in, local persistence for orchestration sessions and structured review artifacts."""
 
 from __future__ import annotations
 

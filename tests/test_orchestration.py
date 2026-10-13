@@ -168,6 +168,29 @@ def test_review_bound_flow_validates_and_retains_structured_reports(
         (ReviewAgent.CODE_REVIEWER,),
         findings=((review_finding_candidate, (ReviewAgent.CODE_REVIEWER,)),),
     )
+    unreported_candidate = ReviewFindingCandidate(
+        **{**review_finding_candidate.model_dump(), "candidate_id": "F-99"}
+    )
+    unreported_final_report = make_final_review_report(
+        (ReviewAgent.CODE_REVIEWER,),
+        findings=((unreported_candidate, (ReviewAgent.CODE_REVIEWER,)),),
+    )
+    with pytest.raises(OrchestrationError, match="source candidates do not match profile reports"):
+        orchestrator.finish(
+            run_id=started.run_id,
+            outcome="completed",
+            final_review_report=unreported_final_report,
+        )
+
+    unlinked_final_report = final_report.model_dump()
+    unlinked_final_report["finding_candidates"][0].pop("source_candidates")
+    with pytest.raises(OrchestrationError, match="final findings require source candidates"):
+        orchestrator.finish(
+            run_id=started.run_id,
+            outcome="completed",
+            final_review_report=unlinked_final_report,
+        )
+
     finished = orchestrator.finish(
         run_id=started.run_id,
         outcome="completed",

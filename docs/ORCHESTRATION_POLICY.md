@@ -76,7 +76,7 @@ Triage → execution group 1 → ... → execution group N
 
 Transition identifiers are model-neutral, not model selectors: use the returned `model_policy` for each stage.
 
-Sessions are content-free and in memory by default, with a default TTL of `1800` seconds and a default limit of `100` active sessions. Successful transitions and finalization refresh the TTL; reads do not. Set `QA_ORCHESTRATOR_SESSION_STORE_PATH` to opt into a local SQLite file that restores unfinished structured state after a restart. It contains no evidence, prompts, source, logs, model responses, finalized outcomes, history, or statistics; finalization deletes the stored row. Use one server process per file. The shared cache is bounded, so older terminal sessions may be evicted when new sessions are created. Unknown runs, expired sessions, illegal or repeated transitions, and invalid signals are rejected without changing state. Without the optional store, the host starts a new session after a restart.
+Sessions are in memory by default, with a default TTL of `1800` seconds and a default limit of `100` active sessions. Successful transitions and finalization refresh the TTL; reads do not. Set `QA_ORCHESTRATOR_SESSION_STORE_PATH` to opt into a local SQLite file that restores unfinished structured state and finalized sessions with review artifacts after a restart. It contains no raw evidence, prompts, source, logs, model responses, or history; for bound reviews it stores identifiers and submitted structured reports, including the final outcome. Finalized legacy sessions without review artifacts are removed from the store. Use one server process per file. The shared cache is bounded, so older terminal sessions may be evicted when new sessions are created. Unknown runs, expired sessions, illegal or repeated transitions, and invalid signals are rejected without changing state. Without the optional store, the host starts a new session after a restart.
 
 Normal execution schedule for `ordinary_mr`:
 
@@ -136,9 +136,9 @@ For a reproducible review record, pass `review_context` when starting the sessio
 
 For every completed primary-review profile, pass one `profile_reports` item in the same order as `completed_profile` or `completed_profiles`. A report records the profile, reviewed scope, finding candidates, coverage gaps, unverified items, and evidence map. Each finding candidate must cite one or more IDs from `review_context.evidence_refs`; the server rejects unknown IDs and reports for the wrong profile. `code_explorer` and `pr_test_analyzer` cannot submit implementation finding candidates.
 
-For `outcome="completed"`, `finish_qa_orchestration` requires a `final_review_report` with the reviewed profiles, summary, synthesized candidates, coverage gaps, and unverified items. Final candidates must include their source profiles and cite registered evidence IDs. The server validates structure and reference membership; the host remains responsible for the truth of the report and final QA decision. A clean single-profile path may still skip the synthesis stage, but it supplies the final report at finish.
+For `outcome="completed"`, `finish_qa_orchestration` requires a `final_review_report` with the reviewed profiles, summary, synthesized candidates, coverage gaps, and unverified items. Final candidates must include their source profiles, each contributing profile-local candidate ID, and registered evidence IDs. The server verifies that every source pair exists in the submitted profile reports, as well as structure and evidence-reference membership; the host remains responsible for the truth of the report and final QA decision. A clean single-profile path may still skip the synthesis stage, but it supplies the final report at finish.
 
-These report-bound sessions and their structured reports are retained in the configured SQLite session store, if enabled, until the normal session TTL or capacity eviction. They are available through `get_qa_orchestration`; `list_qa_orchestrations` includes repository, head SHA, diff hash, and whether reports are present. Without `review_context`, the legacy content-free workflow remains available and no structured reports are accepted.
+These report-bound sessions and their structured reports are retained in the configured SQLite session store, if enabled, until the normal session TTL or capacity eviction. They are available through `get_qa_orchestration`; `list_qa_orchestrations` includes repository, head SHA, diff hash, and whether reports are present. Reports saved before source-candidate linkage was added remain recoverable with empty `source_candidates`; they can be replayed idempotently but cannot be used to finalize a new session. Without `review_context`, the legacy content-free workflow remains available and no structured reports are accepted.
 
 ### Deterministic deep-review decision
 
@@ -288,14 +288,15 @@ metadata, not host execution telemetry. For an existing recovered session,
 follow its returned `model_policy`; a later transition uses the restarted
 server's policy.
 
-`list_qa_orchestrations` takes no arguments and returns brief content-free metadata
+`list_qa_orchestrations` takes no arguments and returns brief metadata
 for non-expired sessions retained by this server, including retained terminal
 sessions. It reads a locked in-memory snapshot without renewing TTL, deleting
 expired rows, or writing storage. Entries are sorted by expiry descending, with
 `run_id` as tie-breaker. Use it to recover a lost ID, then call
 `get_qa_orchestration(run_id)` for full state; confirm the intended session when
 multiple entries match. Expired and evicted sessions are excluded. After restart,
-only unfinished sessions restored from configured storage are available.
+unfinished sessions and finalized sessions with review artifacts restored from
+configured storage are available.
 
 `get_qa_orchestration_catalog` takes no arguments and returns the fixed profiles
 with their names and focus, bundles with usage guidance and ordered profile IDs,

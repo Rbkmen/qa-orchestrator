@@ -395,7 +395,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
 
         - Includes retained terminal sessions; expired or evicted sessions are unrecoverable.
         - Sorts by expires_at descending, then run_id descending; empty means none are retained.
-        - After restart, only unfinished sessions restored from configured local storage appear.
+        - After restart, unfinished sessions and finalized sessions with saved review artifacts
+          restored from configured local storage appear.
         - Reading does not extend session TTL.
         """
         return service.list_qa_orchestrations()
@@ -431,7 +432,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
             Field(
                 description=(
                     "Structured synthesized findings and coverage for a review_context-bound session. "
-                    "Required when its outcome is completed; each finding cites registered evidence refs."
+                    "Required when its outcome is completed; each finding cites registered evidence refs "
+                    "and the original profile-local candidate IDs that support it."
                 )
             ),
         ] = None,
@@ -450,8 +452,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
         - Same outcome: returns the retained terminal session.
         - Different outcome: `conflicting final outcome`; status unchanged.
         - Premature call: `outcome is not ready`.
-        Finalized sessions expire at configured TTL (1800s default), or are removed by eviction
-        or restart. Removed run_ids cannot be deduplicated.
+        Finalized sessions with review artifacts can be restored from the configured store and
+        expire at configured TTL (1800s default), or are removed by eviction or explicit deletion.
+        Legacy finalized sessions without review artifacts are removed at restart. Removed run_ids
+        cannot be deduplicated.
         """
         return service.finish_qa_orchestration(
             outcome=outcome,

@@ -63,6 +63,7 @@ def test_unfinished_session_survives_restart_and_transition_refreshes_ttl(tmp_pa
 def test_completed_review_artifacts_survive_restart_until_normal_expiry(
     tmp_path,
     bound_review_context,
+    review_finding_candidate,
     make_profile_review_report,
     make_final_review_report,
 ):
@@ -81,7 +82,12 @@ def test_completed_review_artifacts_survive_restart_until_normal_expiry(
         completed_step=selected.current_step,
         status="completed",
         completed_profile=ReviewAgent.CODE_REVIEWER,
-        profile_reports=[make_profile_review_report(ReviewAgent.CODE_REVIEWER)],
+        profile_reports=[
+            make_profile_review_report(
+                ReviewAgent.CODE_REVIEWER,
+                findings=(review_finding_candidate,),
+            )
+        ],
         risk_signals=DeepReviewSignals(),
     )
     awaiting_outcome = first_process.advance(
@@ -89,7 +95,10 @@ def test_completed_review_artifacts_survive_restart_until_normal_expiry(
         completed_step=reviewed.current_step,
         status="completed",
     )
-    final_report = make_final_review_report((ReviewAgent.CODE_REVIEWER,))
+    final_report = make_final_review_report(
+        (ReviewAgent.CODE_REVIEWER,),
+        findings=((review_finding_candidate, (ReviewAgent.CODE_REVIEWER,)),),
+    )
     finished = first_process.finish(
         run_id=started.run_id,
         outcome="completed",
@@ -107,6 +116,32 @@ def test_completed_review_artifacts_survive_restart_until_normal_expiry(
     assert listed.review_head_sha == bound_review_context.head_sha
     assert listed.review_diff_sha256 == bound_review_context.diff_sha256
     assert listed.has_review_artifacts is True
+
+    legacy_payload = json.loads(finished.model_dump_json())
+    for finding in legacy_payload["final_review_report"]["finding_candidates"]:
+        finding.pop("source_candidates")
+    connection = sqlite3.connect(store.path)
+    try:
+        connection.execute(
+            "UPDATE sessions SET payload = ? WHERE run_id = ?",
+            (json.dumps(legacy_payload), started.run_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    legacy_restored = _orchestrator(store, clock)
+    legacy_report = legacy_restored.get(started.run_id).final_review_report
+    assert legacy_report is not None
+    assert legacy_report.finding_candidates[0].source_candidates == ()
+    assert (
+        legacy_restored.finish(
+            run_id=started.run_id,
+            outcome="completed",
+            final_review_report=legacy_report,
+        ).final_review_report
+        == legacy_report
+    )
 
     clock.advance(61)
     assert restored.list_sessions().sessions == []

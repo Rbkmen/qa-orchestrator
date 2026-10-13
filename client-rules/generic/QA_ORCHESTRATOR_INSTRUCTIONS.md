@@ -39,8 +39,9 @@ This file is the canonical source for orchestration mechanics and the generic ev
 
 - For new code reviews with a complete diff and Evidence Packet, pass `review_context` to `start_qa_orchestration`: repository identifier, distinct full base/head commit IDs, SHA-256 of the exact diff bytes, SHA-256 of the exact compact Evidence Packet bytes, changed paths, and the packet's unique evidence-reference IDs. Do not pass source contents or credentials. Omitting `review_context` keeps the legacy session contract.
 - In a bound session, include one `profile_reports` item for every completed profile in the same order as `completed_profile` or `completed_profiles`. Each finding candidate contains a stable ID, title, description, confidence, verification gap, and one or more registered evidence IDs. Keep findings out of `code_explorer` and `pr_test_analyzer` reports. Coverage gaps, unverified items, and evidence-map entries remain separate.
-- For a bound session with `outcome="completed"`, pass `final_review_report` to `finish_qa_orchestration`. Its `profiles_reviewed` must match the completed route; each synthesized finding names its source profiles and registered evidence IDs. This report is still host-authored and host-validated: the server checks its structure and citation membership, not whether the claims are true.
+- For a bound session with `outcome="completed"`, pass `final_review_report` to `finish_qa_orchestration`. Its `profiles_reviewed` must match the completed route; each synthesized finding names its source profiles, original profile-local candidate IDs, and registered evidence IDs. The server verifies that each source pair exists in the submitted profile reports. This report is still host-authored and host-validated: the server does not verify that the claims are true.
 - Bound reports are recoverable through `get_qa_orchestration` after restart only when the local session store is configured. They expire and are evicted under the same TTL and capacity rules as sessions; explicit deletion removes them.
+- Reports saved before source-candidate linkage was added remain recoverable with empty `source_candidates`; replay them only as the same idempotent finalization. New final reports must include source candidate IDs.
 
 ## Evidence and final findings
 
@@ -136,10 +137,11 @@ On the final primary-review role, set `risk_signals` from the evidence state. Ma
   an early stop, pass the same `partial` or `blocked` outcome already sent to
   `advance_qa_orchestration`.
 - By default, session state stays in memory. If `QA_ORCHESTRATOR_SESSION_STORE_PATH`
-  is configured, unfinished structured state can be recovered after a restart;
-  finalization deletes its stored row. Final outcomes are not persisted. Do not
-  call this for a task that was not orchestrated. Repeating the same outcome is
-  idempotent in the current process; a conflicting final outcome is rejected.
+  is configured, unfinished structured state and finalized sessions with review
+  artifacts can be recovered after a restart. Finalized legacy sessions without
+  review artifacts are removed. Do not call this for a task that was not
+  orchestrated. Repeating the same outcome is idempotent; a conflicting final
+  outcome is rejected.
 
 The orchestrator publishes exactly ten tools: `prepare_qa_orchestration`, `prepare_qa_orchestration_bundle`, `get_qa_orchestration_catalog`, `get_qa_orchestration_model_policy`, `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `list_qa_orchestrations`, `finish_qa_orchestration`, and `delete_qa_orchestration`.
 
@@ -165,8 +167,9 @@ Identify the intended entry by task type, route, stage, and expiry, then call
 `get_qa_orchestration` with its ID. Ask the user which session to resume if several
 entries match; do not guess or create another session before checking. Listing
 includes retained terminal sessions, excludes expired/evicted sessions, and does
-not renew TTL or write storage. After restart, only unfinished sessions restored
-from configured local storage are available.
+not renew TTL or write storage. After restart, unfinished sessions and finalized
+sessions with review artifacts restored from configured local storage are
+available.
 
 When asked which models are loaded, call `get_qa_orchestration_model_policy`
 with no arguments. It returns the current server's policy for new sessions,

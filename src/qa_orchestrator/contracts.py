@@ -1,5 +1,6 @@
 from enum import StrEnum
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -46,6 +47,7 @@ type EvidenceRefId = Annotated[
     str,
     Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$"),
 ]
+type ChangedFilePath = Annotated[str, Field(min_length=1, max_length=1024)]
 
 
 class ReviewContext(BaseModel):
@@ -58,7 +60,7 @@ class ReviewContext(BaseModel):
     head_sha: GitObjectId
     diff_sha256: Sha256Digest
     evidence_packet_sha256: Sha256Digest
-    changed_files: tuple[str, ...] = Field(min_length=1, max_length=500)
+    changed_files: tuple[ChangedFilePath, ...] = Field(min_length=1, max_length=500)
     evidence_refs: tuple[EvidenceRefId, ...] = Field(min_length=1, max_length=1000)
 
     @field_validator("repository")
@@ -67,6 +69,28 @@ class ReviewContext(BaseModel):
         normalized = value.strip()
         if not normalized:
             raise ValueError("repository must not be empty")
+        if "?" in normalized or "#" in normalized:
+            raise ValueError("repository identifier must not contain query or fragment data")
+        if normalized.startswith("//"):
+            raise ValueError("repository identifier must not contain clone credentials")
+        if "://" in normalized:
+            try:
+                parsed = urlsplit(normalized)
+            except ValueError as exc:
+                raise ValueError(
+                    "repository URL must not contain credentials or parameters"
+                ) from exc
+            if (
+                parsed.username is not None
+                or parsed.password is not None
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError("repository URL must not contain credentials or parameters")
+        else:
+            host, separator, _ = normalized.partition("/")
+            if separator and "@" in host:
+                raise ValueError("repository identifier must not contain clone credentials")
         return normalized
 
     @field_validator("base_sha", "head_sha", "diff_sha256", "evidence_packet_sha256")
@@ -100,13 +124,37 @@ class ReviewFindingCandidate(BaseModel):
     evidence_refs: tuple[EvidenceRefId, ...] = Field(min_length=1, max_length=32)
 
 
+class ReviewFindingSource(BaseModel):
+    """A profile-local candidate that contributed to one synthesized finding."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    profile: ReviewAgent
+    candidate_id: str = Field(pattern=r"^F-[0-9]{2,}$")
+
+
 class FinalReviewFinding(ReviewFindingCandidate):
     source_profiles: tuple[ReviewAgent, ...] = Field(min_length=1)
+    source_candidates: tuple[ReviewFindingSource, ...] = Field(
+        default=(),
+        description=(
+            "Required for new final reports; empty only on reports persisted before source linkage."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_source_profiles(self) -> "FinalReviewFinding":
         if len(set(self.source_profiles)) != len(self.source_profiles):
             raise ValueError("source_profiles must be unique")
+        if self.source_candidates:
+            source_profiles = {source.profile for source in self.source_candidates}
+            source_pairs = {
+                (source.profile, source.candidate_id) for source in self.source_candidates
+            }
+            if len(source_pairs) != len(self.source_candidates):
+                raise ValueError("source_candidates must be unique")
+            if source_profiles != set(self.source_profiles):
+                raise ValueError("source_profiles must match source_candidates")
         return self
 
 

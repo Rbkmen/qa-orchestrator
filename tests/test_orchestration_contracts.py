@@ -128,6 +128,26 @@ def test_review_context_requires_full_unique_review_identity(bound_review_contex
         ReviewContext(**{**bound_review_context.model_dump(), "evidence_refs": ("E1", "E1")})
 
 
+def test_review_context_bounds_paths_and_rejects_repository_credentials(bound_review_context):
+    context = bound_review_context.model_dump()
+    assert ReviewContext(**{**context, "changed_files": ("x" * 1024,)}).changed_files == (
+        "x" * 1024,
+    )
+
+    with pytest.raises(ValidationError):
+        ReviewContext(**{**context, "changed_files": ("x" * 1025,)})
+
+    for repository in (
+        "https://user:secret@github.com/group/repo",
+        "https://github.com/group/repo?token=secret",
+        "github.com/group/repo?token=secret",
+        "token@github.com/group/repo",
+        "git@github.com:group/repo.git",
+    ):
+        with pytest.raises(ValidationError, match="credentials|parameters|clone|query or fragment"):
+            ReviewContext(**{**context, "repository": repository})
+
+
 def test_profile_reports_keep_explorer_and_test_analyzer_within_their_scope(
     review_finding_candidate,
 ):

@@ -28,7 +28,7 @@ MCP  → {"status":"completed"}
 
 This short transcript omits the optional audit binding for readability. For a reproducible review record, start with `review_context` (repository, base/head SHAs, diff and Evidence Packet SHA-256 digests, changed paths, and evidence IDs), submit each profile's `profile_reports`, then pass the synthesized `final_review_report` when finalizing. See [bound review artifacts](docs/ORCHESTRATION_POLICY.md#bound-and-retained-review-artifacts) for the fields and retention behavior.
 
-Project instructions still guide the host. The orchestrator adds explicit session state and validates the sequence the host reports; it cannot confirm each review ran or that risk signals reflect evidence.
+Project instructions still guide the host. For bound reviews, the orchestrator also checks that each final finding points to a candidate reported by its named profile and cites registered evidence. It still cannot confirm that a profile ran or that a report reflects its sources.
 
 ## Quick start
 

@@ -23,7 +23,7 @@ When the `qa-orchestrator` MCP server is available, use it as a deterministic QA
 - Every `advance_qa_orchestration` call requires `run_id`, `completed_step`, and `status`. Copy `completed_step` from the latest session's `current_step`; use `status=completed` after success. After a lost response or transition error, read the session and continue from its current state; never replay an advance blindly.
 - For low-risk, narrow one-repository work, select one compatibility profile instead of a bundle; several changed files alone do not require a bundle. Inspect the full diff once, keep one compact Evidence Packet with stable `E1` references, and reopen only source needed to confirm a candidate or resolve a named link. Use bounded `F-01` candidates so roles do not repeat the full diff or logs.
 - Use the updated session returned by `advance_qa_orchestration` for the next action and model policy. Call `get_qa_orchestration` only to resume or recover an interrupted or unclear session. Do not pass evidence, prompts, or model outputs to the orchestrator.
-- If `run_id` is lost, call `list_qa_orchestrations` with no arguments, identify the intended entry by task type, route, stage, and expiry, then call `get_qa_orchestration` with its ID. If several entries match, ask which session to resume. Listing does not renew TTL or write storage, and cannot recover expired or evicted sessions. After restart, only unfinished sessions restored from configured local storage are available.
+- If `run_id` is lost, call `list_qa_orchestrations` with no arguments, identify the intended entry by task type, route, stage, and expiry, then call `get_qa_orchestration` with its ID. If several entries match, ask which session to resume. Listing does not renew TTL or write storage, and cannot recover expired or evicted sessions. After restart, unfinished sessions and finalized sessions with review artifacts restored from configured local storage are available.
 - Use `delete_qa_orchestration(run_id)` only when the user explicitly wants to discard that session, never as automatic cleanup or a substitute for normal finalization. It irreversibly removes only that session from memory and configured recovery storage at any stage; it records no QA outcome and does not stop host tasks or model executions. `deleted=true` confirms absence, including for an already missing ID; retries are safe. Storage failure preserves memory state.
 - Use the route only as a focus/checklist. Independently verify the diff, callers, contracts, runtime evidence, and unverified gaps.
 - Follow each route's `required_sections`. `code_explorer` returns an evidence map and unresolved links, not defect candidates; `code_reviewer` uses that map and reports concrete candidates supported by changed code and evidence. Keep coverage gaps separate from possible defects, and omit empty boilerplate.
@@ -33,10 +33,11 @@ When the `qa-orchestrator` MCP server is available, use it as a deterministic QA
   `blocked`). For an early stop, pass the same `partial` or `blocked` outcome
   already sent to `advance_qa_orchestration`.
 - By default, session state stays in memory. If `QA_ORCHESTRATOR_SESSION_STORE_PATH`
-  is configured, unfinished structured state can be recovered after a restart;
-  finalization deletes its stored row. Final outcomes are not persisted. Do not
-  call this for a task that was not orchestrated. Repeating the same outcome is
-  idempotent in the current process; a conflicting final outcome is rejected.
+  is configured, unfinished structured state and finalized sessions with review
+  artifacts can be recovered after a restart. Finalized legacy sessions without
+  review artifacts are removed. Do not call this for a task that was not
+  orchestrated. Repeating the same outcome is idempotent; a conflicting final
+  outcome is rejected.
 - For implementation-aware reviews, use the shared final-finding format, followed by Changes, Manual Test Plan, and Open Questions / Could Not Verify. Follow the workspace flow for additional requirements or planning sections without weakening the shared evidence and finding standards.
 - Do not add persistent QA memory, a source cache, or hidden tool calls.
 - When asked which models are loaded, call `get_qa_orchestration_model_policy`

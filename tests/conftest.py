@@ -9,6 +9,7 @@ from qa_orchestrator.contracts import (
     ReviewAgent,
     ReviewContext,
     ReviewFindingCandidate,
+    ReviewFindingSource,
 )
 
 
@@ -73,14 +74,19 @@ def make_profile_review_report():
 
 @pytest.fixture
 def make_final_review_report():
-    def make(profiles, *, findings=(), coverage_gaps=(), unverified=()):
-        final_findings = tuple(
-            FinalReviewFinding(
-                **finding.model_dump(),
-                source_profiles=tuple(source_profiles),
-            )
-            for finding, source_profiles in findings
+    def make_finding(finding, sources):
+        profile_sources = tuple(sources)
+        return FinalReviewFinding(
+            **finding.model_dump(),
+            source_profiles=profile_sources,
+            source_candidates=tuple(
+                ReviewFindingSource(profile=profile, candidate_id=finding.candidate_id)
+                for profile in profile_sources
+            ),
         )
+
+    def make(profiles, *, findings=(), coverage_gaps=(), unverified=()):
+        final_findings = tuple(make_finding(finding, sources) for finding, sources in findings)
         return FinalReviewReport(
             summary="Completed synthesis for the selected review profiles.",
             profiles_reviewed=tuple(profiles),

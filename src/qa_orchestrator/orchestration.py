@@ -695,6 +695,24 @@ class QaOrchestrator:
             self._purge_expired(now, keep_run_id=run_id)
             session = self._require_session(run_id, now)
 
+            is_idempotent_legacy_replay = (
+                session.status in _TERMINAL_SESSION_STATUSES
+                and session.status is final_status
+                and validated_report is not None
+                and validated_report == session.final_review_report
+            )
+            if (
+                validated_report is not None
+                and any(
+                    not finding.source_candidates
+                    for finding in validated_report.finding_candidates
+                )
+                and not is_idempotent_legacy_replay
+            ):
+                raise OrchestrationError(
+                    "final findings require source candidates from profile reports"
+                )
+
             if validated_report is not None:
                 if session.review_context is None:
                     raise OrchestrationError("final review report requires a bound review context")
@@ -716,6 +734,20 @@ class QaOrchestrator:
                 unknown_refs = report_refs - context_refs
                 if unknown_refs:
                     raise OrchestrationError("final review report cites unknown evidence refs")
+                reported_candidates = {
+                    (report.profile, candidate.candidate_id)
+                    for report in session.profile_reports
+                    for candidate in report.finding_candidates
+                }
+                source_candidates = {
+                    (source.profile, source.candidate_id)
+                    for finding in validated_report.finding_candidates
+                    for source in finding.source_candidates
+                }
+                if not source_candidates.issubset(reported_candidates):
+                    raise OrchestrationError(
+                        "final finding source candidates do not match profile reports"
+                    )
                 if any(
                     not set(finding.source_profiles).issubset(validated_report.profiles_reviewed)
                     for finding in validated_report.finding_candidates
