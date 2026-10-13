@@ -53,6 +53,53 @@ _MAX_PROFILE_REVIEW_REPORT_BYTES = 64 * 1024
 _MAX_FINAL_REVIEW_REPORT_BYTES = 64 * 1024
 
 
+class EvidenceRecord(BaseModel):
+    """Metadata for one evidence item; raw content remains with the host."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    evidence_ref: EvidenceRefId
+    kind: Literal["source", "diff", "requirement", "runtime", "other"]
+    sha256: Sha256Digest
+    revision: GitObjectId | None = None
+    path: ChangedFilePath | None = None
+    start_line: int | None = Field(default=None, ge=1)
+    end_line: int | None = Field(default=None, ge=1)
+    locator: str | None = Field(default=None, min_length=1, max_length=1024)
+
+    @field_validator("sha256", "revision")
+    @classmethod
+    def normalize_digests(cls, value: str | None) -> str | None:
+        return value.lower() if value is not None else None
+
+    @field_validator("path")
+    @classmethod
+    def repository_relative_path(cls, value: str | None) -> str | None:
+        if value is not None and (
+            value.startswith("/") or "\\" in value or ":" in value or "\x00" in value
+            or any(part in {"", ".", ".."} for part in value.split("/"))
+        ):
+            raise ValueError("evidence source path must be repository-relative")
+        return value
+
+    @model_validator(mode="after")
+    def validate_metadata(self) -> "EvidenceRecord":
+        if self.kind == "source":
+            if self.revision is None or self.path is None:
+                raise ValueError("source evidence requires revision and path")
+            if self.end_line is not None and (
+                self.start_line is None or self.end_line < self.start_line
+            ):
+                raise ValueError("invalid evidence source line range")
+        elif self.path is not None or self.start_line is not None or self.end_line is not None:
+            raise ValueError("source coordinates are allowed only for source evidence")
+        if self.kind == "diff" and self.revision is None:
+            raise ValueError("diff evidence requires a head revision")
+        if self.kind not in {"source", "diff"} and not self.locator:
+            raise ValueError("external evidence requires a stable locator")
+        return self
+
+
 class ReviewContext(BaseModel):
     """Immutable identifiers for the exact source and evidence packet reviewed."""
 
@@ -65,6 +112,10 @@ class ReviewContext(BaseModel):
     evidence_packet_sha256: Sha256Digest
     changed_files: tuple[ChangedFilePath, ...] = Field(min_length=1, max_length=500)
     evidence_refs: tuple[EvidenceRefId, ...] = Field(min_length=1, max_length=1000)
+    evidence_registry: tuple[EvidenceRecord, ...] = Field(
+        default=(), max_length=1000,
+        description="Optional complete ref-to-source registry with revision, coordinates and hashes."
+    )
 
     @field_validator("repository")
     @classmethod
@@ -111,6 +162,17 @@ class ReviewContext(BaseModel):
             raise ValueError("changed_files must be unique")
         if len(set(self.evidence_refs)) != len(self.evidence_refs):
             raise ValueError("evidence_refs must be unique")
+        if self.evidence_registry:
+            ids = [entry.evidence_ref for entry in self.evidence_registry]
+            if len(set(ids)) != len(ids) or set(ids) != set(self.evidence_refs):
+                raise ValueError("evidence registry must map each registered ref exactly once")
+            for entry in self.evidence_registry:
+                if entry.kind == "source" and entry.revision not in {self.base_sha, self.head_sha}:
+                    raise ValueError("source evidence revision must be the bound base or head")
+                if entry.kind == "diff" and (
+                    entry.revision != self.head_sha or entry.sha256 != self.diff_sha256
+                ):
+                    raise ValueError("diff evidence must match the bound head and diff hash")
         return self
 
 

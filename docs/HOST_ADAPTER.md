@@ -19,3 +19,5 @@ The adapter measures UTC start/completion time around actual executor calls. Tok
 Continue from `result.session.current_step` with scoped deep review or host synthesis. Existing completed profiles are skipped when resuming a retained primary-review session. Partial runs keep the existing terminal semantics and require a new session to rerun the same pinned input.
 
 The adapter renews active leases during execution at `heartbeat_interval_seconds` (shortened when the remaining initial lease requires it). It submits each group with a unique request key and the revision used for that wave. Lost-response/connection retries reuse the exact payload; stale submissions cannot advance or stop a session progressed by another host. Failed lease renewal interrupts the wave, and expired sessions require a new run.
+
+An optional `evidence_verifier` callback validates the pinned input before execution. Connect it to the [local evidence checker](EVIDENCE_REGISTRY.md); a verification failure prevents worker launch. The callback receives the bound context and uses repository/packet paths supplied explicitly by the host.

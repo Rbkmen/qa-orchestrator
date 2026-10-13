@@ -1,0 +1,28 @@
+# Evidence registry and local verification
+
+`ReviewContext.evidence_registry` optionally maps every registered evidence ID to metadata: kind, SHA-256, revision, source path and line range, or a stable external locator. If supplied, the registry must be complete and unique. Source revisions belong to the pinned base/head; diff entries match the bound head and diff hash. Raw content remains in the host's Evidence Packet.
+
+Source evidence can represent an entire file or an inclusive line range. Its digest hashes the exact Git blob bytes or exact selected LF-delimited lines, preserving CRLF and the final newline state. Source paths are repository-relative. A finding's coordinates must be covered by a cited head-source entry for that path; a base-source or unrelated diff reference cannot support head coordinates.
+
+## Build and verify
+
+Prepare a JSON list of records, for example:
+
+```json
+[
+  {"evidence_ref":"E1","kind":"source","revision":"<full head SHA>","path":"src/api.py","start_line":10,"end_line":20},
+  {"evidence_ref":"E2","kind":"diff","revision":"<full head SHA>"},
+  {"evidence_ref":"E3","kind":"requirement","locator":"TASK-123","sha256":"<content SHA-256>"}
+]
+```
+
+```sh
+qa-orch evidence build --context context.json --records records.json \
+  --repository /path/to/repo --output bound-context.json
+qa-orch evidence verify --context bound-context.json --repository /path/to/repo \
+  --packet evidence-packet.md --report profile-report.json --output verification.json
+```
+
+The builder computes source/diff hashes from immutable Git objects. External content hashes are supplied by the host. Verification checks commit identities, the exact diff hash, source hashes and ranges, and optionally the packet hash and finding coordinates. It does not execute target code or modify the repository. External requirements/runtime records remain explicitly unverified by this local checker. A missing packet check is reported as unknown; mismatches fail instead of silently rebinding the input.
+
+The MCP server validates registry structure and citation/location membership. It cannot read the host's raw packet or prove evidence truth. The host may pass `evidence_verifier=lambda context: verify_evidence(context, repository, packet)` to `HostReviewAdapter` to verify before any workers launch. Legacy contexts without a registry remain accepted; local verification requires a registry.

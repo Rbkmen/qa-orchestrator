@@ -211,6 +211,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
                     "When supplied, every completed profile must include a structured report whose "
                     "evidence references belong to this packet; completed outcomes require a final report. "
                     "The response may include file-type-based recommended_profiles as non-binding hints."
+                    " Optional evidence_registry metadata binds each ref to a source kind, revision, "
+                    "coordinates and content hash. The host verifies actual content locally."
                 )
             ),
         ] = None,

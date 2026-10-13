@@ -29,6 +29,7 @@ from qa_orchestrator.contracts import (
     ReviewBundle,
     ReviewContext,
 )
+from qa_orchestrator.evidence import validate_registered_locations
 from qa_orchestrator.model_policy import (
     DEFAULT_MODEL_SELECTION,
     HostDefaultModelSelection,
@@ -883,6 +884,10 @@ class QaOrchestrator:
                 unknown_refs = report_refs - context_refs
                 if unknown_refs:
                     raise OrchestrationError("final review report cites unknown evidence refs")
+                try:
+                    validate_registered_locations(session.review_context, validated_report.finding_candidates)
+                except ValueError as exc:
+                    raise OrchestrationError(str(exc)) from exc
                 reported_candidates = {
                     (report.profile, candidate.candidate_id): candidate
                     for report in session.profile_reports
@@ -1113,6 +1118,10 @@ class QaOrchestrator:
                         raise OrchestrationError(
                             "profile report cites unknown evidence refs"
                         )
+                    try:
+                        validate_registered_locations(session.review_context, report.finding_candidates)
+                    except ValueError as exc:
+                        raise OrchestrationError(str(exc)) from exc
                 transition_reports = request.profile_reports
 
             if request.skip_synthesis and (

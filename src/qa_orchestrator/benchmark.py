@@ -96,8 +96,10 @@ class BenchmarkRun(BaseModel):
     reasoning: str = Field(min_length=1, max_length=64)
     checklist_sha256: Sha256Digest
     host_instructions_sha256: Sha256Digest
+    base_sha: GitObjectId
     head_sha: GitObjectId
     diff_sha256: Sha256Digest
+    evidence_packet_sha256: Sha256Digest
     elapsed_ms: int = Field(ge=0)
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
@@ -149,7 +151,11 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
     summaries = []
     for run in results.runs:
         case = cases.get(run.case_id)
-        if case is None or (case.head_sha, case.diff_sha256) != (run.head_sha, run.diff_sha256):
+        if case is None or (case.base_sha, case.head_sha, case.diff_sha256) != (
+            run.base_sha,
+            run.head_sha,
+            run.diff_sha256,
+        ):
             raise ValueError("benchmark run does not match a pinned dataset case")
         gold = {finding.gold_id: finding for finding in case.gold}
         if any(d.gold_id is not None and d.gold_id not in gold for d in run.adjudications):
@@ -175,6 +181,7 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
                 "run_id": run.run_id,
                 "case_id": run.case_id,
                 "configuration_id": run.configuration_id,
+                "evidence_packet_sha256": run.evidence_packet_sha256,
                 "candidates": len(run.candidates),
                 "valid": valid,
                 "matched_gold": len(matched),

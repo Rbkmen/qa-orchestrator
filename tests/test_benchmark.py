@@ -48,9 +48,11 @@ def benchmark_inputs():
         "reasoning": "medium",
         "checklist_sha256": "3" * 64,
         "host_instructions_sha256": "4" * 64,
+        "base_sha": "0" * 40,
         "head_sha": "1" * 40,
         "diff_sha256": "2" * 64,
         "elapsed_ms": 500,
+        "evidence_packet_sha256": "6" * 64,
         "adjudicator": "fixture-reviewer",
         "candidates": [
             {

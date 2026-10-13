@@ -12,6 +12,7 @@ from qa_orchestrator.contracts import (
     ProfileExecutionMetrics,
     ProfileReviewReport,
     ReviewAgent,
+    ReviewContext,
     ReviewRoute,
 )
 from qa_orchestrator.orchestration import (
@@ -71,9 +72,16 @@ RiskAssessor = Callable[[tuple[ProfileReviewReport, ...]], DeepReviewSignals]
 class HostReviewAdapter:
     """Execute fixed primary-review waves; the host still owns evidence and final decisions."""
 
-    def __init__(self, service: OrchestratorService, policy: HostExecutionPolicy | None = None):
+    def __init__(
+        self,
+        service: OrchestratorService,
+        policy: HostExecutionPolicy | None = None,
+        *,
+        evidence_verifier: Callable[[ReviewContext], object] | None = None,
+    ):
         self.service = service
         self.policy = policy or HostExecutionPolicy()
+        self.evidence_verifier = evidence_verifier
 
     async def _execute_profile(
         self,
@@ -141,6 +149,8 @@ class HostReviewAdapter:
             or session.review_context is None
         ):
             raise ValueError("host adapter requires an active review-bound primary review")
+        if self.evidence_verifier is not None:
+            self.evidence_verifier(session.review_context)
         if session.selected_bundle is not None:
             groups = self.service.prepare_review_bundle(session.selected_bundle).execution_groups
         else:

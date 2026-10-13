@@ -299,3 +299,18 @@ async def test_heartbeat_keeps_a_long_profile_alive(host_session):
         session.run_id, execute, lambda reports: DeepReviewSignals()
     )
     assert result.session.current_step == "synthesis"
+
+
+async def test_local_evidence_verification_fails_before_starting_workers(host_session):
+    service, run_id = host_session(profile="python_reviewer")
+
+    def verify(context):
+        raise ValueError("pinned content hash mismatch")
+
+    async def execute(job):
+        pytest.fail("worker must not start with invalid evidence")
+
+    adapter = HostReviewAdapter(service, evidence_verifier=verify)
+    with pytest.raises(ValueError, match="pinned content hash mismatch"):
+        await adapter.run_primary_review(run_id, execute, lambda reports: DeepReviewSignals())
+    assert service.get_qa_orchestration(run_id).completed_profiles == []

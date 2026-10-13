@@ -15,7 +15,7 @@ The importer pins the diff SHA-256 computed by Git with `--binary --no-ext-diff 
 
 ## Record and score a run
 
-`BenchmarkDataset` and `BenchmarkResults` in `qa_orchestrator.benchmark` publish their Pydantic JSON schemas. A run records its case ID, exact head/diff hashes, model/reasoning, checklist and host-instruction hashes, elapsed milliseconds, optional token counts, candidate reports, and explicit adjudications. Every candidate must have exactly one adjudication with a rationale:
+`BenchmarkDataset` and `BenchmarkResults` in `qa_orchestrator.benchmark` publish their Pydantic JSON schemas. A run records its case ID, exact base/head/diff and Evidence Packet hashes, model/reasoning, checklist and host-instruction hashes, elapsed milliseconds, optional token counts, candidate reports, and explicit adjudications. Every candidate must have exactly one adjudication with a rationale:
 
 - `matched`: one golden ID; each gold finding receives credit once per run.
 - `valid_unlisted`: source-confirmed useful finding absent from the reference.

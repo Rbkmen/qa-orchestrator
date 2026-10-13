@@ -45,6 +45,8 @@ This file is the canonical source for orchestration mechanics and the generic ev
 
 For every submitted profile-local candidate, include one host-owned `candidate_decisions` entry: `source`, `verdict` (`confirmed`, `rejected`, `duplicate`, or `unverified`), a concise rationale, and supporting registered evidence refs. Confirmed and duplicate decisions link `final_finding_id`; rejected and unverified decisions do not. Every final finding must have a confirmed source, match all linked confirmed/duplicate sources, and include host-selected severity, concrete impact, affected area, and precise source locations. Saved legacy reports remain readable and can be replayed only as the same retained finalization.
 
+For coordinate-verifiable reviews, provide a complete `review_context.evidence_registry` and use the host-local `qa-orch evidence` checker. Source entries carry the exact base/head revision, repository-relative path, optional inclusive line range, and content hash; diff entries carry the bound head/diff hash; external entries carry a sanitized locator and host-supplied hash. Cite a covering head-source entry for every finding location. The server validates membership and structure; the host verifies actual Git objects and packet bytes. External runtime/requirement evidence needs its own authoritative verification.
+
 ## Evidence and final findings
 
 ### Confirmation and traceability
