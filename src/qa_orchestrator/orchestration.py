@@ -17,7 +17,15 @@ from pydantic import (
     model_validator,
 )
 
-from qa_orchestrator.contracts import QaTaskOutcome, QaTaskType, ReviewAgent, ReviewBundle
+from qa_orchestrator.contracts import (
+    FinalReviewReport,
+    ProfileReviewReport,
+    QaTaskOutcome,
+    QaTaskType,
+    ReviewAgent,
+    ReviewBundle,
+    ReviewContext,
+)
 from qa_orchestrator.model_policy import (
     DEFAULT_MODEL_SELECTION,
     HostDefaultModelSelection,
@@ -269,9 +277,12 @@ class QaOrchestrationSession(BaseModel):
     recommended_bundles: list[ReviewBundle] = Field(default_factory=list)
     selected_bundle: ReviewBundle | None = None
     selected_profile: ReviewAgent | None = None
+    review_context: ReviewContext | None = None
     review_profiles: list[ReviewAgent] = Field(default_factory=list)
     current_profile: ReviewAgent | None = None
     completed_profiles: list[ReviewAgent] = Field(default_factory=list)
+    profile_reports: list[ProfileReviewReport] = Field(default_factory=list)
+    final_review_report: FinalReviewReport | None = None
     deep_assessment: DeepReviewAssessment | None = None
     deep_reason_code: OrchestrationReason | None = None
     model_policy: StageModelPolicy | None = None
@@ -280,9 +291,30 @@ class QaOrchestrationSession(BaseModel):
     host_owns_decisions: Literal[True] = True
     expires_at: AwareDatetime
 
+    @model_validator(mode="after")
+    def validate_review_artifacts(self) -> "QaOrchestrationSession":
+        if self.review_context is None and (self.profile_reports or self.final_review_report):
+            raise ValueError("review artifacts require a bound review context")
+        if self.profile_reports and tuple(report.profile for report in self.profile_reports) != tuple(
+            self.completed_profiles
+        ):
+            raise ValueError("profile reports must match completed profiles in order")
+        if (
+            self.final_review_report is not None
+            and self.final_review_report.profiles_reviewed != tuple(self.completed_profiles)
+        ):
+            raise ValueError("final report profiles must match completed profiles in order")
+        if (
+            self.status is OrchestrationStatus.COMPLETED
+            and self.review_context is not None
+            and self.final_review_report is None
+        ):
+            raise ValueError("completed review-bound sessions require a final review report")
+        return self
+
 
 class QaOrchestrationSummary(BaseModel):
-    """Content-free metadata for identifying a retained session."""
+    """Bounded metadata for finding a retained orchestration session."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -293,6 +325,10 @@ class QaOrchestrationSummary(BaseModel):
     selected_bundle: ReviewBundle | None
     selected_profile: ReviewAgent | None
     current_profile: ReviewAgent | None
+    review_repository: str | None = None
+    review_head_sha: str | None = None
+    review_diff_sha256: str | None = None
+    has_review_artifacts: bool = False
     expires_at: AwareDatetime
 
 
@@ -324,6 +360,7 @@ class AdvanceQaOrchestrationRequest(BaseModel):
     selected_profile: ReviewAgent | None = None
     completed_profile: ReviewAgent | None = None
     completed_profiles: list[ReviewAgent] | None = None
+    profile_reports: list[ProfileReviewReport] | None = Field(default=None, min_length=1)
     risk_signals: DeepReviewSignals | None = None
     skip_synthesis: bool = Field(
         default=False,
@@ -343,6 +380,16 @@ class AdvanceQaOrchestrationRequest(BaseModel):
         has_completed_profiles = (
             self.completed_profile is not None or self.completed_profiles is not None
         )
+        if self.profile_reports is not None:
+            if self.completed_step is not OrchestrationStep.PRIMARY_REVIEW or self.status != "completed":
+                raise ValueError("profile_reports require a completed primary review")
+            expected_profiles = (
+                [self.completed_profile]
+                if self.completed_profile is not None
+                else self.completed_profiles
+            )
+            if [report.profile for report in self.profile_reports] != expected_profiles:
+                raise ValueError("profile_reports must match completed profiles in order")
         if self.completed_step is OrchestrationStep.TRIAGE and self.status == "completed":
             if (self.selected_bundle is None) == (self.selected_profile is None):
                 raise ValueError("exactly one selection is required after triage")
@@ -438,7 +485,11 @@ class QaOrchestrator:
         self._sessions: dict[str, QaOrchestrationSession] = {}
         if session_store is not None:
             for session in session_store.load_all():
-                if session.next_action in _FINALIZED_TERMINAL_ACTIONS.values():
+                has_review_artifacts = bool(session.profile_reports or session.final_review_report)
+                if (
+                    session.next_action in _FINALIZED_TERMINAL_ACTIONS.values()
+                    and not has_review_artifacts
+                ):
                     session_store.delete(session.run_id)
                     continue
                 self._sessions[session.run_id] = session
@@ -454,11 +505,20 @@ class QaOrchestrator:
     def model_selection(self) -> ModelPolicySelection:
         return self._model_selection
 
-    def start(self, task_type: QaTaskType) -> QaOrchestrationSession:
+    def start(
+        self,
+        task_type: QaTaskType,
+        review_context: ReviewContext | None = None,
+    ) -> QaOrchestrationSession:
         try:
             validated_task_type = _TASK_TYPE_ADAPTER.validate_python(task_type)
+            validated_review_context = (
+                ReviewContext.model_validate(review_context)
+                if review_context is not None
+                else None
+            )
         except ValidationError as exc:
-            raise OrchestrationError("invalid task type") from exc
+            raise OrchestrationError("invalid task type or review context") from exc
 
         with self._lock:
             now = self._clock()
@@ -475,6 +535,7 @@ class QaOrchestrator:
                 allowed_profiles=list(ReviewAgent),
                 allowed_bundles=list(REVIEW_BUNDLES),
                 recommended_bundles=list(recommended_bundles_for(validated_task_type)),
+                review_context=validated_review_context,
                 model_policy=self._model_policies[OrchestrationStep.TRIAGE],
                 next_action=_NEXT_ACTIONS[OrchestrationStep.TRIAGE],
                 expires_at=now + timedelta(seconds=self._ttl_seconds),
@@ -492,6 +553,7 @@ class QaOrchestrator:
         selected_profile: ReviewAgent | None = None,
         completed_profile: ReviewAgent | None = None,
         completed_profiles: list[ReviewAgent] | None = None,
+        profile_reports: list[ProfileReviewReport] | None = None,
         risk_signals: DeepReviewSignals | None = None,
         skip_synthesis: bool = False,
     ) -> QaOrchestrationSession:
@@ -504,6 +566,7 @@ class QaOrchestrator:
                 selected_profile=selected_profile,
                 completed_profile=completed_profile,
                 completed_profiles=completed_profiles,
+                profile_reports=profile_reports,
                 risk_signals=risk_signals,
                 skip_synthesis=skip_synthesis,
             )
@@ -569,6 +632,24 @@ class QaOrchestrator:
                         selected_bundle=session.selected_bundle,
                         selected_profile=session.selected_profile,
                         current_profile=session.current_profile,
+                        review_repository=(
+                            session.review_context.repository
+                            if session.review_context is not None
+                            else None
+                        ),
+                        review_head_sha=(
+                            session.review_context.head_sha
+                            if session.review_context is not None
+                            else None
+                        ),
+                        review_diff_sha256=(
+                            session.review_context.diff_sha256
+                            if session.review_context is not None
+                            else None
+                        ),
+                        has_review_artifacts=bool(
+                            session.profile_reports or session.final_review_report
+                        ),
                         expires_at=session.expires_at,
                     )
                     for session in retained
@@ -581,12 +662,26 @@ class QaOrchestrator:
             self._delete_session(run_id)
         return result
 
-    def finish(self, *, run_id: str, outcome: QaTaskOutcome) -> QaOrchestrationSession:
-        """Record the host-owned final outcome for a completed orchestration flow."""
+    def finish(
+        self,
+        *,
+        run_id: str,
+        outcome: QaTaskOutcome,
+        final_review_report: FinalReviewReport | None = None,
+    ) -> QaOrchestrationSession:
+        """Record the host-owned outcome and, when supplied, its structured review report."""
         try:
             final_status = OrchestrationStatus(outcome)
         except ValueError as exc:
             raise OrchestrationError("invalid final outcome") from exc
+        try:
+            validated_report = (
+                FinalReviewReport.model_validate(final_review_report)
+                if final_review_report is not None
+                else None
+            )
+        except ValidationError as exc:
+            raise OrchestrationError("invalid final review report") from exc
 
         if final_status not in {
             OrchestrationStatus.COMPLETED,
@@ -600,31 +695,82 @@ class QaOrchestrator:
             self._purge_expired(now, keep_run_id=run_id)
             session = self._require_session(run_id, now)
 
+            if validated_report is not None:
+                if session.review_context is None:
+                    raise OrchestrationError("final review report requires a bound review context")
+                if validated_report.profiles_reviewed != tuple(session.completed_profiles):
+                    raise OrchestrationError(
+                        "final report profiles do not match completed profiles"
+                    )
+                context_refs = set(session.review_context.evidence_refs)
+                report_refs = {
+                    reference
+                    for finding in validated_report.finding_candidates
+                    for reference in finding.evidence_refs
+                }
+                report_refs.update(
+                    reference
+                    for note in (*validated_report.coverage_gaps, *validated_report.unverified)
+                    for reference in note.evidence_refs
+                )
+                unknown_refs = report_refs - context_refs
+                if unknown_refs:
+                    raise OrchestrationError("final review report cites unknown evidence refs")
+                if any(
+                    not set(finding.source_profiles).issubset(validated_report.profiles_reviewed)
+                    for finding in validated_report.finding_candidates
+                ):
+                    raise OrchestrationError(
+                        "final finding source profiles do not match profiles_reviewed"
+                    )
+
             if session.status in _TERMINAL_SESSION_STATUSES:
                 if session.status is not final_status:
                     raise OrchestrationError("conflicting final outcome")
+                if (
+                    validated_report is not None
+                    and validated_report != session.final_review_report
+                ):
+                    raise OrchestrationError("conflicting final review report")
                 final_action = _FINALIZED_TERMINAL_ACTIONS[final_status]
                 if session.next_action == final_action:
                     return self._copy(session)
                 updated = session.model_copy(update={"next_action": final_action})
                 updated = self._refresh_expiry(updated, now)
-                self._save_session(updated, persist=False)
+                self._save_session(
+                    updated,
+                    persist=bool(updated.profile_reports or updated.final_review_report),
+                )
                 return self._copy(updated)
 
             if session.status is not OrchestrationStatus.AWAITING_HOST_OUTCOME:
                 raise OrchestrationError("outcome is not ready")
+            if (
+                final_status is OrchestrationStatus.COMPLETED
+                and session.review_context is not None
+                and validated_report is None
+            ):
+                raise OrchestrationError(
+                    "completed review-bound sessions require a final review report"
+                )
+            if validated_report is not None and session.review_context is None:
+                raise OrchestrationError("final review report requires a bound review context")
 
             updated = self._refresh_expiry(
                 session.model_copy(
                     update={
                         "status": final_status,
+                        "final_review_report": validated_report,
                         "model_policy": None,
                         "next_action": _FINALIZED_TERMINAL_ACTIONS[final_status],
                     }
                 ),
                 now,
             )
-            self._save_session(updated, persist=False)
+            self._save_session(
+                updated,
+                persist=bool(updated.profile_reports or updated.final_review_report),
+            )
             return self._copy(updated)
 
     def _completed_transition(
@@ -646,6 +792,8 @@ class QaOrchestrator:
                     "current_step": OrchestrationStep.PRIMARY_REVIEW,
                     "selected_bundle": request.selected_bundle,
                     "selected_profile": selected_profile,
+                    "profile_reports": [],
+                    "final_review_report": None,
                     "review_profiles": list(selected_profiles),
                     "current_profile": selected_profile,
                     "completed_profiles": [],
@@ -692,6 +840,42 @@ class QaOrchestrator:
             is_last_profile = next_profile_index + len(transition_profiles) == len(
                 session.review_profiles
             )
+            if session.review_context is None:
+                if request.profile_reports is not None:
+                    raise OrchestrationError(
+                        "profile reports require a bound review context"
+                    )
+                transition_reports: list[ProfileReviewReport] = []
+            else:
+                if request.profile_reports is None:
+                    raise OrchestrationError(
+                        "profile_reports are required for a review-bound primary review"
+                    )
+                if tuple(report.profile for report in request.profile_reports) != tuple(
+                    transition_profiles
+                ):
+                    raise OrchestrationError(
+                        "profile reports do not match the next completed profiles"
+                    )
+                context_refs = set(session.review_context.evidence_refs)
+                for report in request.profile_reports:
+                    report_refs = {
+                        reference
+                        for finding in report.finding_candidates
+                        for reference in finding.evidence_refs
+                    }
+                    report_refs.update(
+                        reference
+                        for note in (*report.coverage_gaps, *report.unverified)
+                        for reference in note.evidence_refs
+                    )
+                    report_refs.update(entry.evidence_ref for entry in report.evidence_map)
+                    if report_refs - context_refs:
+                        raise OrchestrationError(
+                            "profile report cites unknown evidence refs"
+                        )
+                transition_reports = request.profile_reports
+
             if request.skip_synthesis and (
                 not is_last_profile
                 or session.selected_bundle is not None
@@ -700,7 +884,15 @@ class QaOrchestrator:
                 raise OrchestrationError(
                     "synthesis can be skipped only for a clean single-profile review"
                 )
+            if request.skip_synthesis and any(
+                report.finding_candidates or report.coverage_gaps or report.unverified
+                for report in transition_reports
+            ):
+                raise OrchestrationError(
+                    "synthesis cannot be skipped with findings, coverage gaps, or unverified items"
+                )
             completed_profiles = [*session.completed_profiles, *transition_profiles]
+            profile_reports = [*session.profile_reports, *transition_reports]
             if not is_last_profile:
                 if request.risk_signals is not None:
                     raise OrchestrationError(
@@ -711,6 +903,7 @@ class QaOrchestrator:
                     update={
                         "current_profile": next_profile,
                         "completed_profiles": completed_profiles,
+                        "profile_reports": profile_reports,
                         "model_policy": self._model_policies[OrchestrationStep.PRIMARY_REVIEW],
                         "next_action": _NEXT_ACTIONS[OrchestrationStep.PRIMARY_REVIEW],
                     }
@@ -731,6 +924,7 @@ class QaOrchestrator:
                         "current_step": OrchestrationStep.DEEP_REVIEW,
                         "current_profile": None,
                         "completed_profiles": completed_profiles,
+                        "profile_reports": profile_reports,
                         "deep_assessment": assessment,
                         "deep_reason_code": assessment.reason_codes[0],
                         "model_policy": self._model_policies[OrchestrationStep.DEEP_REVIEW],
@@ -744,6 +938,7 @@ class QaOrchestrator:
                         "current_step": OrchestrationStep.AWAITING_HOST_OUTCOME,
                         "current_profile": None,
                         "completed_profiles": completed_profiles,
+                        "profile_reports": profile_reports,
                         "deep_assessment": assessment,
                         "deep_reason_code": None,
                         "model_policy": None,
@@ -757,6 +952,7 @@ class QaOrchestrator:
                     "current_step": OrchestrationStep.SYNTHESIS,
                     "current_profile": None,
                     "completed_profiles": completed_profiles,
+                    "profile_reports": profile_reports,
                     "deep_assessment": assessment,
                     "deep_reason_code": None,
                     "model_policy": self._model_policies[OrchestrationStep.SYNTHESIS],

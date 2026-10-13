@@ -3,7 +3,13 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
-from qa_orchestrator.contracts import ReviewAgent, ReviewBundle, ReviewRouteSelection
+from qa_orchestrator.contracts import (
+    ProfileReviewReport,
+    ReviewAgent,
+    ReviewBundle,
+    ReviewContext,
+    ReviewRouteSelection,
+)
 from qa_orchestrator.orchestration import (
     MODEL_POLICIES,
     AdvanceQaOrchestrationRequest,
@@ -105,6 +111,48 @@ def test_orchestration_session_rejects_disabled_ownership_flags():
             next_action="Host performs triage.",
             host_owns_decisions=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+
+
+def test_review_context_requires_full_unique_review_identity(bound_review_context):
+    assert bound_review_context.base_sha == "0" * 40
+    assert bound_review_context.diff_sha256 == "2" * 64
+
+    with pytest.raises(ValidationError, match="different revisions"):
+        ReviewContext(**{**bound_review_context.model_dump(), "head_sha": "0" * 40})
+
+    with pytest.raises(ValidationError):
+        ReviewContext(**{**bound_review_context.model_dump(), "diff_sha256": "not-a-digest"})
+
+    with pytest.raises(ValidationError, match="evidence_refs must be unique"):
+        ReviewContext(**{**bound_review_context.model_dump(), "evidence_refs": ("E1", "E1")})
+
+
+def test_profile_reports_keep_explorer_and_test_analyzer_within_their_scope(
+    review_finding_candidate,
+):
+    for profile in (ReviewAgent.CODE_EXPLORER, ReviewAgent.PR_TEST_ANALYZER):
+        with pytest.raises(ValidationError, match="cannot report implementation findings"):
+            ProfileReviewReport(
+                profile=profile,
+                scope="Changed code and tests.",
+                finding_candidates=(review_finding_candidate,),
+            )
+
+
+def test_advance_request_requires_profile_reports_in_completion_order(
+    make_profile_review_report,
+):
+    with pytest.raises(ValidationError, match="profile_reports must match completed profiles"):
+        AdvanceQaOrchestrationRequest(
+            run_id="qar-0123456789abcdef0123456789abcdef",
+            completed_step=OrchestrationStep.PRIMARY_REVIEW,
+            status="completed",
+            completed_profiles=[ReviewAgent.CODE_REVIEWER, ReviewAgent.PR_TEST_ANALYZER],
+            profile_reports=[
+                make_profile_review_report(ReviewAgent.PR_TEST_ANALYZER),
+                make_profile_review_report(ReviewAgent.CODE_REVIEWER),
+            ],
         )
 
 

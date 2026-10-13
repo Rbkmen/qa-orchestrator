@@ -1,7 +1,7 @@
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 type QaTaskType = Literal[
     "ordinary_review",
@@ -38,6 +38,140 @@ class ReviewBundle(StrEnum):
     SECURITY = "security"
     AUTOTEST = "autotest"
     REQUIREMENTS = "requirements"
+
+
+type GitObjectId = Annotated[str, Field(pattern=r"(?i)^(?:[a-f0-9]{40}|[a-f0-9]{64})$")]
+type Sha256Digest = Annotated[str, Field(pattern=r"(?i)^[a-f0-9]{64}$")]
+type EvidenceRefId = Annotated[
+    str,
+    Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$"),
+]
+
+
+class ReviewContext(BaseModel):
+    """Immutable identifiers for the exact source and evidence packet reviewed."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    repository: str = Field(min_length=1, max_length=512)
+    base_sha: GitObjectId
+    head_sha: GitObjectId
+    diff_sha256: Sha256Digest
+    evidence_packet_sha256: Sha256Digest
+    changed_files: tuple[str, ...] = Field(min_length=1, max_length=500)
+    evidence_refs: tuple[EvidenceRefId, ...] = Field(min_length=1, max_length=1000)
+
+    @field_validator("repository")
+    @classmethod
+    def normalize_repository(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("repository must not be empty")
+        return normalized
+
+    @field_validator("base_sha", "head_sha", "diff_sha256", "evidence_packet_sha256")
+    @classmethod
+    def normalize_hashes(cls, value: str) -> str:
+        return value.lower()
+
+    @model_validator(mode="after")
+    def validate_review_identity(self) -> "ReviewContext":
+        if self.base_sha == self.head_sha:
+            raise ValueError("base_sha and head_sha must identify different revisions")
+        if any(not path.strip() for path in self.changed_files):
+            raise ValueError("changed_files must contain non-empty paths")
+        if len(set(self.changed_files)) != len(self.changed_files):
+            raise ValueError("changed_files must be unique")
+        if len(set(self.evidence_refs)) != len(self.evidence_refs):
+            raise ValueError("evidence_refs must be unique")
+        return self
+
+
+class ReviewFindingCandidate(BaseModel):
+    """A possible defect with evidence references; the host still decides whether it is confirmed."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    candidate_id: str = Field(pattern=r"^F-[0-9]{2,}$")
+    title: str = Field(min_length=1, max_length=256)
+    description: str = Field(min_length=1, max_length=5000)
+    confidence: Literal["high", "medium", "low"]
+    verification_gap: str = Field(min_length=1, max_length=2000)
+    evidence_refs: tuple[EvidenceRefId, ...] = Field(min_length=1, max_length=32)
+
+
+class FinalReviewFinding(ReviewFindingCandidate):
+    source_profiles: tuple[ReviewAgent, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_source_profiles(self) -> "FinalReviewFinding":
+        if len(set(self.source_profiles)) != len(self.source_profiles):
+            raise ValueError("source_profiles must be unique")
+        return self
+
+
+class ReviewNote(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: str = Field(min_length=1, max_length=2000)
+    evidence_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=32)
+
+
+class ReviewEvidenceMapEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    evidence_ref: EvidenceRefId
+    description: str = Field(min_length=1, max_length=2000)
+
+
+class ProfileReviewReport(BaseModel):
+    """Structured host-reported result for one completed specialist profile."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    profile: ReviewAgent
+    scope: str = Field(min_length=1, max_length=2000)
+    finding_candidates: tuple[ReviewFindingCandidate, ...] = Field(default=(), max_length=100)
+    coverage_gaps: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
+    unverified: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
+    evidence_map: tuple[ReviewEvidenceMapEntry, ...] = Field(default=(), max_length=500)
+
+    @model_validator(mode="after")
+    def validate_profile_scope(self) -> "ProfileReviewReport":
+        if (
+            self.profile in {ReviewAgent.CODE_EXPLORER, ReviewAgent.PR_TEST_ANALYZER}
+            and self.finding_candidates
+        ):
+            raise ValueError(f"{self.profile.value} cannot report implementation findings")
+        if len({entry.evidence_ref for entry in self.evidence_map}) != len(self.evidence_map):
+            raise ValueError("evidence_map references must be unique")
+        if len({finding.candidate_id for finding in self.finding_candidates}) != len(
+            self.finding_candidates
+        ):
+            raise ValueError("finding candidate IDs must be unique within a profile report")
+        return self
+
+
+class FinalReviewReport(BaseModel):
+    """Structured synthesis stored with a review-bound orchestration session."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    summary: str = Field(min_length=1, max_length=5000)
+    profiles_reviewed: tuple[ReviewAgent, ...] = Field(min_length=1)
+    finding_candidates: tuple[FinalReviewFinding, ...] = Field(default=(), max_length=100)
+    coverage_gaps: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
+    unverified: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
+
+    @model_validator(mode="after")
+    def validate_profiles_reviewed(self) -> "FinalReviewReport":
+        if len(set(self.profiles_reviewed)) != len(self.profiles_reviewed):
+            raise ValueError("profiles_reviewed must be unique")
+        if len({finding.candidate_id for finding in self.finding_candidates}) != len(
+            self.finding_candidates
+        ):
+            raise ValueError("finding candidate IDs must be unique within the final report")
+        return self
 
 
 class ReviewRoute(BaseModel):

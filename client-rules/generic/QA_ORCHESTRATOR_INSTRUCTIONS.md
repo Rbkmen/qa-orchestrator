@@ -35,6 +35,13 @@ This file is the canonical source for orchestration mechanics and the generic ev
 - Inspect the full diff once and record relevant changed behavior, source locators, and verified facts in one compact per-task Evidence Packet with stable `E1`, `E2`, ... references. Give each profile only relevant sections; reopen only the source needed to confirm a concrete candidate or resolve a named link. `code_explorer` returns an evidence map and unresolved links, not defect candidates; `code_reviewer` uses that map and reports only concrete candidates supported by the changed code and evidence. Other profiles stay within their returned focus. Use stable `F-01`, `F-02`, ... IDs for bounded finding candidates; each candidate cites evidence references, states evidence confidence, and names its verification gap. Keep coverage gaps separate, deduplicate candidates during synthesis, and do not repeat full diffs or raw logs. A candidate is not a confirmed final finding until the host validates it.
 - Routes and orchestration states are marked `read_only=true` and `host_owns_decisions=true`; do not treat the orchestrator as an autonomous agent or delegate external writes to it.
 
+### Audit-bound review mode
+
+- For new code reviews with a complete diff and Evidence Packet, pass `review_context` to `start_qa_orchestration`: repository identifier, distinct full base/head commit IDs, SHA-256 of the exact diff bytes, SHA-256 of the exact compact Evidence Packet bytes, changed paths, and the packet's unique evidence-reference IDs. Do not pass source contents or credentials. Omitting `review_context` keeps the legacy session contract.
+- In a bound session, include one `profile_reports` item for every completed profile in the same order as `completed_profile` or `completed_profiles`. Each finding candidate contains a stable ID, title, description, confidence, verification gap, and one or more registered evidence IDs. Keep findings out of `code_explorer` and `pr_test_analyzer` reports. Coverage gaps, unverified items, and evidence-map entries remain separate.
+- For a bound session with `outcome="completed"`, pass `final_review_report` to `finish_qa_orchestration`. Its `profiles_reviewed` must match the completed route; each synthesized finding names its source profiles and registered evidence IDs. This report is still host-authored and host-validated: the server checks its structure and citation membership, not whether the claims are true.
+- Bound reports are recoverable through `get_qa_orchestration` after restart only when the local session store is configured. They expire and are evicted under the same TTL and capacity rules as sessions; explicit deletion removes them.
+
 ## Evidence and final findings
 
 ### Confirmation and traceability

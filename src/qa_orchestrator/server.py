@@ -5,11 +5,14 @@ from pydantic import Field
 
 from qa_orchestrator.config import Settings
 from qa_orchestrator.contracts import (
+    FinalReviewReport,
+    ProfileReviewReport,
     QaOrchestrationCatalog,
     QaTaskOutcome,
     QaTaskType,
     ReviewAgent,
     ReviewBundle,
+    ReviewContext,
     ReviewRoute,
     ReviewRouteBatch,
 )
@@ -74,6 +77,7 @@ SERVER_INSTRUCTIONS = (
     "completed_profile field) and risk_signals accurately. "
     "The orchestrator validates the reported profile order; it cannot confirm each review ran, "
     "whether profiles ran concurrently, or whether host-reported risk_signals reflect evidence. "
+    "Bound reviews also validate report/profile alignment and citation membership, not report truth. "
     "In host_default model-policy mode, use the model and reasoning configured by the host. "
     "Full workflow guidance remains in client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md."
 )
@@ -197,18 +201,30 @@ def build_server(service: OrchestratorService) -> FastMCP:
                 )
             ),
         ],
+        review_context: Annotated[
+            ReviewContext | None,
+            Field(
+                description=(
+                    "Optional immutable repository, base/head, diff, and Evidence Packet identity. "
+                    "When supplied, every completed profile must include a structured report whose "
+                    "evidence references belong to this packet; completed outcomes require a final report."
+                )
+            ),
+        ] = None,
     ) -> QaOrchestrationSession:
-        """Create a content-free QA session for a tracked review; call once before triage.
+        """Create a QA session; optionally bind it to one immutable review input.
 
         Every call creates a separate session. Use prepare_qa_orchestration for a stateless profile
         checklist. `task_type` narrows the bundle shortlist; the host still selects the review route.
+        For an auditable code review, pass `review_context` with the exact source and evidence packet
+        identifiers. The server stores the identifiers and submitted report fields, not the raw diff or full Evidence Packet.
 
         - Sessions expire after the configured TTL (1800 seconds by default).
         - Capacity is 100 sessions by default and can be configured.
         - Expired sessions are purged and retained terminal sessions may be evicted. If capacity can
           only be freed by removing an active session, the call returns a `session limit` error.
         """
-        return service.start_qa_orchestration(task_type)
+        return service.start_qa_orchestration(task_type, review_context)
 
     @mcp.tool(title="Record QA step result", annotations=STATE_TOOL_ANNOTATIONS)
     def advance_qa_orchestration(
@@ -277,6 +293,16 @@ def build_server(service: OrchestratorService) -> FastMCP:
                 )
             ),
         ] = None,
+        profile_reports: Annotated[
+            list[ProfileReviewReport] | None,
+            Field(
+                description=(
+                    "For a review-context-bound session, one structured result per completed profile, "
+                    "in the same order. Every finding must cite Evidence Packet references. Omit for "
+                    "legacy sessions without review_context."
+                )
+            ),
+        ] = None,
         risk_signals: Annotated[
             DeepReviewSignals | None,
             Field(
@@ -312,14 +338,16 @@ def build_server(service: OrchestratorService) -> FastMCP:
         - Every call requires run_id, completed_step, and status. Copy completed_step from the latest
           session's current_step; use status=completed after a successful stage.
         - Primary review: after a whole execution group finishes, report its ordered profiles together
-          with completed_profiles. Older hosts may continue reporting completed_profile one at a time.
+          with completed_profiles. In a review-context-bound session, also supply matching profile_reports.
+          Older hosts may continue reporting completed_profile one at a time.
           The final group requires risk_signals ({} if none).
         - Clean single-profile fast path: set skip_synthesis=true only when that review has no findings,
           no unresolved material questions, and no risk signals. This bypasses only the separate synthesis
           step; the host still validates and produces the final QA report. The server cannot verify this claim.
           Bundles, findings, unresolved questions, or any risk signal require the normal synthesis stage.
-        - Trust boundary: completion fields and risk_signals are host-reported. The server validates
-          the reported sequence, but cannot confirm each review ran or that risk_signals reflect evidence.
+        - Trust boundary: completion fields and risk_signals are host-reported. The server cannot confirm
+          each review ran or that risk_signals reflect evidence; bound sessions also validate
+          report/profile alignment and citation membership, not report truth.
         - Early stop: omit route selectors, completion fields, and risk_signals.
         - Success saves state and refreshes expires_at.
         - Invalid/stale requests and unknown/expired run_ids fail without advancing.
@@ -336,6 +364,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
                 selected_profile=selected_profile,
                 completed_profile=completed_profile,
                 completed_profiles=completed_profiles,
+                profile_reports=profile_reports,
                 risk_signals=risk_signals,
                 skip_synthesis=skip_synthesis,
             )
@@ -343,8 +372,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
 
     @mcp.tool(title="Inspect one QA session", annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def get_qa_orchestration(run_id: RunId) -> QaOrchestrationSession:
-        """Read one retained run_id's content-free state: status, current step, next action,
-        and current-stage model policy.
+        """Read one retained run_id's state, including bound review context and structured reports.
 
         Use run_id on the server retaining that session to resume or reconcile a lost
         advance_qa_orchestration response. Reads do not extend expires_at. Errors `unknown run_id` or
@@ -359,7 +387,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
 
     @mcp.tool(title="List retained QA sessions", annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def list_qa_orchestrations() -> QaOrchestrationList:
-        """List non-expired QA session identifiers and brief metadata retained by this server.
+        """List non-expired QA session identifiers and brief metadata, including bound review identity.
 
         Recover a lost run_id by matching task type, route, and stage; confirm if several match.
         Call get_qa_orchestration(run_id) for full state and next action, or
@@ -398,14 +426,27 @@ def build_server(service: OrchestratorService) -> FastMCP:
                 description="Host-selected final session status: completed, partial, or blocked."
             ),
         ],
+        final_review_report: Annotated[
+            FinalReviewReport | None,
+            Field(
+                description=(
+                    "Structured synthesized findings and coverage for a review_context-bound session. "
+                    "Required when its outcome is completed; each finding cites registered evidence refs."
+                )
+            ),
+        ] = None,
     ) -> QaOrchestrationSession:
-        """Finalize the whole QA run's outcome; active step results belong to advance_qa_orchestration.
+        """Finalize the QA run and store its structured report when the session is review-bound.
 
         After normal synthesis or an eligible clean single-profile fast path, use the retained
         run_id at awaiting_host_outcome to choose completed, partial, or blocked.
         After an early stop recorded by advance_qa_orchestration, outcome must match its partial/blocked
         status.
 
+        - A completed review-bound session requires `final_review_report`.
+        - Structured reports survive a restart only when the same session store is configured;
+          otherwise they are in-memory only. They remain until TTL expiry, capacity eviction, or
+          explicit deletion.
         - Same outcome: returns the retained terminal session.
         - Different outcome: `conflicting final outcome`; status unchanged.
         - Premature call: `outcome is not ready`.
@@ -415,6 +456,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
         return service.finish_qa_orchestration(
             outcome=outcome,
             run_id=run_id,
+            final_review_report=final_review_report,
         )
 
     return mcp

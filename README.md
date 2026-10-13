@@ -1,7 +1,7 @@
 # QA Orchestrator
 [![QA Orchestrator MCP server – quality and maintenance score on Glama](https://glama.ai/mcp/servers/Rbkmen/qa-orchestrator/badges/card.svg)](https://glama.ai/mcp/servers/Rbkmen/qa-orchestrator)
 
-A deterministic MCP helper for host-owned QA reviews. The host keeps the code, evidence, model calls, findings, and final decision; the server keeps only bounded orchestration state.
+A deterministic MCP helper for host-owned QA reviews. The host owns the code, evidence, model calls, and final decision. When a review is bound to an immutable input, the server can retain its source identifiers and structured reports; it does not store the raw diff or full Evidence Packet.
 
 ## Example: a small Ruby guard change
 
@@ -25,6 +25,8 @@ MCP  → {"current_step":"awaiting_host_outcome"}
 Host → finish_qa_orchestration({"run_id":"qar-7977ccfeb8ac487f9c83f756452cee1a","outcome":"completed"})
 MCP  → {"status":"completed"}
 ```
+
+This short transcript omits the optional audit binding for readability. For a reproducible review record, start with `review_context` (repository, base/head SHAs, diff and Evidence Packet SHA-256 digests, changed paths, and evidence IDs), submit each profile's `profile_reports`, then pass the synthesized `final_review_report` when finalizing. See [bound review artifacts](docs/ORCHESTRATION_POLICY.md#bound-and-retained-review-artifacts) for the fields and retention behavior.
 
 Project instructions still guide the host. The orchestrator adds explicit session state and validates the sequence the host reports; it cannot confirm each review ran or that risk signals reflect evidence.
 
@@ -50,7 +52,7 @@ See the [bundle and profile catalog](docs/ORCHESTRATION_POLICY.md#fixed-bundles-
 
 ## Responsibility boundary
 
-The host owns evidence, model execution, review findings, severity, release readiness, and external actions. `QA Orchestrator` validates host-reported transitions and risk signals; it cannot verify that a profile ran or that a signal reflects evidence. `read_only=true` and `host_owns_decisions=true` describe the boundary; session tools still update local state. Use the updated session after `advance_qa_orchestration`; call `get_qa_orchestration` only to resume or recover.
+The host owns evidence, model execution, finding confirmation, severity, release readiness, and external actions. For a bound review, `QA Orchestrator` checks report/profile alignment and that citations use registered Evidence Packet references; it cannot verify that a profile ran or that a report reflects its sources. `read_only=true` and `host_owns_decisions=true` describe the boundary; session tools still update local state. Use the updated session after `advance_qa_orchestration`; call `get_qa_orchestration` to resume, recover, or read saved reports.
 
 When `model_policy.mode` is `configured`, the host uses its returned per-stage model settings. When it is `host_default`, the host uses its own configured model and reasoning. See [model policy and orchestration details](docs/ORCHESTRATION_POLICY.md#model-policy), the [installation guide](docs/INSTALLATION.md), and the [Codex and Claude Code guides](docs/clients/).
 

@@ -130,6 +130,16 @@ The `autotest` bundle includes `typescript_reviewer`; use it for broad TypeScrip
 
 The host inspects the full diff once and keeps one per-task Evidence Packet with changed behavior, source locators, and verified facts. Give each profile only relevant sections; reopen source only to confirm a concrete candidate or resolve a named link. Evidence items use stable local references such as `E1`, and finding candidates use stable identifiers such as `F-01`. `code_explorer` returns an evidence map and unresolved links, not defect candidates. `code_reviewer` uses that map and reports only concrete candidates supported by the changed code and evidence. Test analysis reports coverage gaps; specialist profiles stay within their returned focus. A finding candidate includes evidence references, confidence, and a verification gap. Profiles do not repeat the full diff or raw logs, and synthesis receives deduplicated candidates and references rather than full transcripts. Routes return only the sections relevant to their profile: evidence map, finding candidates, coverage gaps, and unverified items are separate outputs.
 
+### Bound and retained review artifacts
+
+For a reproducible review record, pass `review_context` when starting the session. It binds the run to a repository, distinct base and head commit IDs, the SHA-256 of the exact diff, the SHA-256 of the compact Evidence Packet, the changed paths, and the packet's stable evidence-reference IDs. Hash the exact bytes used by the host; do not include credentials in the repository identifier. The server stores these identifiers and the submitted structured reports, not the raw diff or full Evidence Packet.
+
+For every completed primary-review profile, pass one `profile_reports` item in the same order as `completed_profile` or `completed_profiles`. A report records the profile, reviewed scope, finding candidates, coverage gaps, unverified items, and evidence map. Each finding candidate must cite one or more IDs from `review_context.evidence_refs`; the server rejects unknown IDs and reports for the wrong profile. `code_explorer` and `pr_test_analyzer` cannot submit implementation finding candidates.
+
+For `outcome="completed"`, `finish_qa_orchestration` requires a `final_review_report` with the reviewed profiles, summary, synthesized candidates, coverage gaps, and unverified items. Final candidates must include their source profiles and cite registered evidence IDs. The server validates structure and reference membership; the host remains responsible for the truth of the report and final QA decision. A clean single-profile path may still skip the synthesis stage, but it supplies the final report at finish.
+
+These report-bound sessions and their structured reports are retained in the configured SQLite session store, if enabled, until the normal session TTL or capacity eviction. They are available through `get_qa_orchestration`; `list_qa_orchestrations` includes repository, head SHA, diff hash, and whether reports are present. Without `review_context`, the legacy content-free workflow remains available and no structured reports are accepted.
+
 ### Deterministic deep-review decision
 
 The host sends only boolean, content-free signals after the final primary-review profile:
@@ -236,7 +246,7 @@ Every review must separate confirmed findings from hypotheses and unverified run
 
 ## Final outcome
 
-`finish_qa_orchestration` accepts only `run_id` and the host-owned final outcome. It updates the bounded in-memory session and deletes any persisted unfinished state. Repeating the same outcome is idempotent in the current process; a conflicting outcome is rejected. Final outcomes and task statistics are not written to disk.
+`finish_qa_orchestration` accepts `run_id`, the host-owned final outcome, and an optional `final_review_report`. A completed context-bound review requires the report. In-memory sessions remain bounded by TTL and capacity; when local persistence is configured, sessions with structured review artifacts remain recoverable after restart until TTL expiry, capacity eviction, or explicit deletion. Legacy sessions without reports keep the previous behavior and are removed from the recovery store at finalization. Repeating the same outcome and report is idempotent; a conflicting outcome or report is rejected.
 
 ## Discard a session
 

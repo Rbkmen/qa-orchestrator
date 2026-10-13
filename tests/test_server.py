@@ -195,6 +195,7 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     assert set(tools["finish_qa_orchestration"].inputSchema["properties"]) == {
         "outcome",
         "run_id",
+        "final_review_report",
     }
     assert deletion.inputSchema["properties"]["run_id"]["pattern"] == run_id_schema["pattern"]
 
@@ -464,6 +465,10 @@ async def test_list_qa_orchestrations_recovers_run_id_without_changing_state(tmp
             "selected_bundle": None,
             "selected_profile": None,
             "current_profile": None,
+            "review_repository": None,
+            "review_head_sha": None,
+            "review_diff_sha256": None,
+            "has_review_artifacts": False,
             "expires_at": started.structured_content["expires_at"],
         }
         recovered = await client.call_tool(
@@ -724,6 +729,81 @@ async def test_orchestration_tools_complete_each_bundle(tmp_path, bundle: Review
             "code_reviewer",
             "pr_test_analyzer",
         ]
+
+
+@pytest.mark.asyncio
+async def test_bound_review_tools_record_context_and_structured_reports(
+    tmp_path,
+    bound_review_context,
+    review_finding_candidate,
+    make_profile_review_report,
+    make_final_review_report,
+):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    profile_report = make_profile_review_report(
+        ReviewAgent.CODE_REVIEWER,
+        findings=(review_finding_candidate,),
+    )
+    final_report = make_final_review_report(
+        (ReviewAgent.CODE_REVIEWER,),
+        findings=((review_finding_candidate, (ReviewAgent.CODE_REVIEWER,)),),
+    )
+
+    async with Client(build_server(service)) as client:
+        started = await client.call_tool(
+            "start_qa_orchestration",
+            {
+                "task_type": "ordinary_review",
+                "review_context": bound_review_context.model_dump(mode="json"),
+            },
+        )
+        run_id = started.structured_content["run_id"]
+        primary = await client.call_tool(
+            "advance_qa_orchestration",
+            {
+                "run_id": run_id,
+                "completed_step": "triage",
+                "status": "completed",
+                "selected_profile": "code_reviewer",
+            },
+        )
+        synthesis = await client.call_tool(
+            "advance_qa_orchestration",
+            {
+                "run_id": run_id,
+                "completed_step": primary.structured_content["current_step"],
+                "status": "completed",
+                "completed_profile": "code_reviewer",
+                "profile_reports": [profile_report.model_dump(mode="json")],
+                "risk_signals": {},
+            },
+        )
+        awaiting_outcome = await client.call_tool(
+            "advance_qa_orchestration",
+            {
+                "run_id": run_id,
+                "completed_step": synthesis.structured_content["current_step"],
+                "status": "completed",
+            },
+        )
+        finished = await client.call_tool(
+            "finish_qa_orchestration",
+            {
+                "run_id": run_id,
+                "outcome": "completed",
+                "final_review_report": final_report.model_dump(mode="json"),
+            },
+        )
+        recovered = await client.call_tool("get_qa_orchestration", {"run_id": run_id})
+        listed = await client.call_tool("list_qa_orchestrations", {})
+
+    assert awaiting_outcome.structured_content["current_step"] == "awaiting_host_outcome"
+    assert finished.structured_content["review_context"]["diff_sha256"] == "2" * 64
+    assert finished.structured_content["final_review_report"]["finding_candidates"][0][
+        "evidence_refs"
+    ] == ["E1"]
+    assert recovered.structured_content == finished.structured_content
+    assert listed.structured_content["sessions"][0]["has_review_artifacts"] is True
 
 
 @pytest.mark.asyncio

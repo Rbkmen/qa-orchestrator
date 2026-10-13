@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from qa_orchestrator.contracts import ReviewAgent, ReviewBundle
+from qa_orchestrator.contracts import ReviewAgent, ReviewBundle, ReviewFindingCandidate, ReviewNote
 from qa_orchestrator.orchestration import (
     DeepReviewRule,
     DeepReviewSignals,
@@ -94,6 +94,119 @@ def test_normal_flow_skips_sol():
     assert session.next_action == (
         "Host submits the final QA outcome with finish_qa_orchestration."
     )
+
+
+def test_review_bound_flow_validates_and_retains_structured_reports(
+    bound_review_context,
+    review_finding_candidate,
+    make_profile_review_report,
+    make_final_review_report,
+):
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    started = orchestrator.start("ordinary_review", bound_review_context)
+    primary = orchestrator.advance(
+        run_id=started.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_profile=ReviewAgent.CODE_REVIEWER,
+    )
+
+    with pytest.raises(OrchestrationError, match="profile_reports are required"):
+        orchestrator.advance(
+            run_id=started.run_id,
+            completed_step=primary.current_step,
+            status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+            risk_signals=DeepReviewSignals(),
+        )
+
+    unknown_reference_candidate = ReviewFindingCandidate(
+        **{
+            **review_finding_candidate.model_dump(),
+            "evidence_refs": ("E9",),
+        }
+    )
+    with pytest.raises(OrchestrationError, match="unknown evidence refs"):
+        orchestrator.advance(
+            run_id=started.run_id,
+            completed_step=primary.current_step,
+            status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+            profile_reports=[
+                make_profile_review_report(
+                    ReviewAgent.CODE_REVIEWER,
+                    findings=(unknown_reference_candidate,),
+                )
+            ],
+            risk_signals=DeepReviewSignals(),
+        )
+
+    reviewed = orchestrator.advance(
+        run_id=started.run_id,
+        completed_step=primary.current_step,
+        status="completed",
+        completed_profile=ReviewAgent.CODE_REVIEWER,
+        profile_reports=[
+            make_profile_review_report(
+                ReviewAgent.CODE_REVIEWER,
+                findings=(review_finding_candidate,),
+            )
+        ],
+        risk_signals=DeepReviewSignals(),
+    )
+    awaiting_outcome = orchestrator.advance(
+        run_id=started.run_id,
+        completed_step=reviewed.current_step,
+        status="completed",
+    )
+    assert awaiting_outcome.profile_reports[0].finding_candidates[0] == review_finding_candidate
+
+    with pytest.raises(OrchestrationError, match="require a final review report"):
+        orchestrator.finish(run_id=started.run_id, outcome="completed")
+
+    final_report = make_final_review_report(
+        (ReviewAgent.CODE_REVIEWER,),
+        findings=((review_finding_candidate, (ReviewAgent.CODE_REVIEWER,)),),
+    )
+    finished = orchestrator.finish(
+        run_id=started.run_id,
+        outcome="completed",
+        final_review_report=final_report,
+    )
+
+    assert finished.final_review_report == final_report
+    assert orchestrator.get(started.run_id).final_review_report == final_report
+    assert orchestrator.list_sessions().sessions[0].has_review_artifacts
+
+
+def test_review_bound_fast_path_cannot_skip_reported_coverage_gaps(
+    bound_review_context,
+    make_profile_review_report,
+):
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    started = orchestrator.start("ordinary_review", bound_review_context)
+    primary = orchestrator.advance(
+        run_id=started.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_profile=ReviewAgent.CODE_REVIEWER,
+    )
+
+    with pytest.raises(OrchestrationError, match="coverage gaps"):
+        orchestrator.advance(
+            run_id=started.run_id,
+            completed_step=primary.current_step,
+            status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+            profile_reports=[
+                make_profile_review_report(
+                    ReviewAgent.CODE_REVIEWER,
+                    coverage_gaps=(ReviewNote(text="No test covers the new branch.", evidence_refs=("E2",)),),
+                )
+            ],
+            risk_signals=DeepReviewSignals(),
+            skip_synthesis=True,
+        )
 
 
 def test_clean_single_profile_can_skip_standalone_synthesis():

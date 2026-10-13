@@ -4,11 +4,13 @@ from pydantic import Field
 
 from qa_orchestrator.config import Settings
 from qa_orchestrator.contracts import (
+    FinalReviewReport,
     QaOrchestrationCatalog,
     QaTaskOutcome,
     QaTaskType,
     ReviewAgent,
     ReviewBundle,
+    ReviewContext,
     ReviewRoute,
     ReviewRouteBatch,
     ReviewRouteSelection,
@@ -86,8 +88,12 @@ class OrchestratorService:
     def get_qa_orchestration_catalog(self) -> QaOrchestrationCatalog:
         return build_review_catalog()
 
-    def start_qa_orchestration(self, task_type: QaTaskType) -> QaOrchestrationSession:
-        return self.orchestrator.start(task_type)
+    def start_qa_orchestration(
+        self,
+        task_type: QaTaskType,
+        review_context: ReviewContext | None = None,
+    ) -> QaOrchestrationSession:
+        return self.orchestrator.start(task_type, review_context)
 
     def advance_qa_orchestration(
         self,
@@ -130,5 +136,10 @@ class OrchestratorService:
         *,
         run_id: str,
         outcome: QaTaskOutcome,
+        final_review_report: FinalReviewReport | None = None,
     ) -> QaOrchestrationSession:
-        return self.orchestrator.finish(run_id=run_id, outcome=outcome)
+        return self.orchestrator.finish(
+            run_id=run_id,
+            outcome=outcome,
+            final_review_report=final_review_report,
+        )

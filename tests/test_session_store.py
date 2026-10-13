@@ -60,6 +60,61 @@ def test_unfinished_session_survives_restart_and_transition_refreshes_ttl(tmp_pa
     assert restored.model_dump() == advanced.model_dump()
 
 
+def test_completed_review_artifacts_survive_restart_until_normal_expiry(
+    tmp_path,
+    bound_review_context,
+    make_profile_review_report,
+    make_final_review_report,
+):
+    store = SqliteSessionStore(tmp_path / "sessions.sqlite3")
+    clock = FakeClock()
+    first_process = _orchestrator(store, clock)
+    started = first_process.start("ordinary_review", bound_review_context)
+    selected = first_process.advance(
+        run_id=started.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_profile=ReviewAgent.CODE_REVIEWER,
+    )
+    reviewed = first_process.advance(
+        run_id=started.run_id,
+        completed_step=selected.current_step,
+        status="completed",
+        completed_profile=ReviewAgent.CODE_REVIEWER,
+        profile_reports=[make_profile_review_report(ReviewAgent.CODE_REVIEWER)],
+        risk_signals=DeepReviewSignals(),
+    )
+    awaiting_outcome = first_process.advance(
+        run_id=started.run_id,
+        completed_step=reviewed.current_step,
+        status="completed",
+    )
+    final_report = make_final_review_report((ReviewAgent.CODE_REVIEWER,))
+    finished = first_process.finish(
+        run_id=started.run_id,
+        outcome="completed",
+        final_review_report=final_report,
+    )
+
+    assert awaiting_outcome.current_step is OrchestrationStep.AWAITING_HOST_OUTCOME
+    assert store.load_all() == [finished]
+
+    restored = _orchestrator(store, clock)
+
+    assert restored.get(started.run_id) == finished
+    listed = restored.list_sessions().sessions[0]
+    assert listed.review_repository == bound_review_context.repository
+    assert listed.review_head_sha == bound_review_context.head_sha
+    assert listed.review_diff_sha256 == bound_review_context.diff_sha256
+    assert listed.has_review_artifacts is True
+
+    clock.advance(61)
+    assert restored.list_sessions().sessions == []
+    with pytest.raises(OrchestrationError, match="expired session"):
+        restored.get(started.run_id)
+    assert store.load_all() == []
+
+
 def test_python_backend_session_resumes_remaining_group_after_schedule_change(tmp_path):
     store = SqliteSessionStore(tmp_path / "sessions.sqlite3")
     clock = FakeClock()
