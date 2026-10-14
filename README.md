@@ -1,61 +1,213 @@
 # QA Orchestrator
+
 [![QA Orchestrator MCP server – quality and maintenance score on Glama](https://glama.ai/mcp/servers/Rbkmen/qa-orchestrator/badges/card.svg)](https://glama.ai/mcp/servers/Rbkmen/qa-orchestrator)
 
-A deterministic MCP helper for host-owned QA reviews. The host owns the code, evidence, model calls, and final decision. When a review is bound to an immutable input, the server can retain its source identifiers and structured reports; it does not store the raw diff or full Evidence Packet.
+A Python/FastMCP toolkit for evidence-bound code and QA reviews: deterministic workflow, ten specialist profiles, nine fixed bundles, structured findings, and optional execution and evaluation tools.
 
-## Example: a small Ruby guard change
-
-Suppose a diff adds an early return to `BudgetGuard#check!` when the limit is absent.
-
-**Ordinary QA:** follow project instructions, inspect the diff and targeted tests, then report confirmed findings.
-
-**With QA Orchestrator:** the host does the same QA work; the server supplies a profile, checks reported transitions, and applies fixed escalation rules. It does not run the review.
-
-```text
-Host → start_qa_orchestration({"task_type":"ordinary_review"})
-MCP  → {"run_id":"qar-7977ccfeb8ac487f9c83f756452cee1a","current_step":"triage","model_policy":{"mode":"host_default"}}
-Host → inspect Ruby diff; choose ruby_reviewer
-Host → advance_qa_orchestration({"run_id":"qar-7977ccfeb8ac487f9c83f756452cee1a","completed_step":"triage","status":"completed","selected_profile":"ruby_reviewer"})
-MCP  → primary_review; selected_review_routes returns the checklist and execution_groups=[["ruby_reviewer"]]
-Host → review against the returned checklist; then report completion and evidence-based signals
-Host → advance_qa_orchestration({"run_id":"qar-7977ccfeb8ac487f9c83f756452cee1a","completed_step":"primary_review","status":"completed","completed_profiles":["ruby_reviewer"],"risk_signals":{}})
-MCP  → {"current_step":"synthesis"}
-Host → advance_qa_orchestration({"run_id":"qar-7977ccfeb8ac487f9c83f756452cee1a","completed_step":"synthesis","status":"completed"})
-MCP  → {"current_step":"awaiting_host_outcome"}
-Host → finish_qa_orchestration({"run_id":"qar-7977ccfeb8ac487f9c83f756452cee1a","outcome":"completed"})
-MCP  → {"status":"completed"}
-```
-
-This short transcript omits the optional audit binding for readability. For a reproducible review record, start with `review_context` (repository, base/head SHAs, diff and Evidence Packet SHA-256 digests, changed paths, and evidence IDs), submit each profile's `profile_reports`, then pass the synthesized `final_review_report` when finalizing. See [bound review artifacts](docs/ORCHESTRATION_POLICY.md#bound-and-retained-review-artifacts) for the fields and retention behavior.
-
-Project instructions still guide the host. For bound reviews, the orchestrator also checks that each final finding points to a candidate reported by its named profile and cites registered evidence. It still cannot confirm that a profile ran or that a report reflects its sources.
+The **host** (Codex, Claude Code, or another integration) retrieves evidence, runs models, validates findings, and owns the final QA decision. The MCP server checks workflow and report contracts. Optional Python tools supervise actual execution; connecting the MCP server alone does not activate them.
 
 ## Quick start
 
-Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), Git, and Codex CLI/Desktop. Quick Start uses the reviewed server revision:
+Requires Python 3.12+, Git, [uv](https://docs.astral.sh/uv/), and an MCP host. Supports Windows, macOS, and Linux. Model access is configured in the host.
+
+For installation without a checkout, replace `<commit-sha>` with the full immutable revision you intend to install:
 
 ```bash
-codex mcp add qa-orchestrator -- uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@9c278d8be0362e79de39e1a3e530a96fab48e414' qa-orchestrator-mcp
+codex mcp add qa-orchestrator -- uvx --from 'git+https://github.com/Rbkmen/qa-orchestrator.git@<commit-sha>' qa-orchestrator-mcp
 ```
 
-This registers the server without a checkout or model-setup wizard. With no saved policy, `model_policy` is `host_default`: use the model and reasoning configured by the MCP host. Existing explicit policies remain active; see the installation guide to switch one back to host defaults.
+Use the same revision for server and host instructions. Remote installs contain only published code; local upgrades require a checkout installation.
 
-The server sends concise advisory instructions during MCP initialization. The [canonical host rules](client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md) define the full workflow and evidence contract. Execution speed and latency preferences remain controlled by the user's host/provider settings.
+With no saved policy, `model_policy` is `host_default`: the host uses its own model and reasoning. Existing explicit policies remain active.
 
-## Choose a review path
+For a checkout installation:
 
-Use one profile for a routine, narrowly scoped, low-risk change. Several changed files alone do not require a bundle. Use a fixed bundle for broad, cross-concern, or high-risk work. After selecting a route during triage, use `selected_review_routes` from the `advance_qa_orchestration` response; it contains the checklists and `execution_groups`, so the session needs no separate preparation call. The stateless `prepare_qa_orchestration` tools remain available for standalone lookup or recovery. Profiles in one group may run concurrently; wait for the group, then record it once with `completed_profiles` in fixed order. Older clients can still report profiles individually with `completed_profile`. Use sequential execution when the host cannot run workers. The host chooses from changed files and confirmed stack; `recommended_bundles` is a shortlist, not a risk score or restriction.
+```bash
+git clone https://github.com/Rbkmen/qa-orchestrator.git
+cd qa-orchestrator
+uv sync --locked
+uv run qa-orchestrator-doctor --json
+```
 
-For a single-profile review only, set `skip_synthesis=true` on the final primary-review transition when the profile reports no findings, no unresolved material questions, and all risk signals are false. This skips only the separate synthesis step: the host still validates and produces the final QA result. Keep synthesis for bundles and any review with findings, unresolved questions, or risk signals.
+Register `scripts/qa-orchestrator` on macOS/Linux or `.venv\Scripts\qa-orchestrator-mcp.exe` on Windows. The client starts the STDIO server on demand. See [Installation](docs/INSTALLATION.md), [Codex](docs/clients/codex.md), and [Claude Code](docs/clients/claude-code.md).
 
-See the [bundle and profile catalog](docs/ORCHESTRATION_POLICY.md#fixed-bundles-and-profile-names), [deterministic deep-review rules](docs/ORCHESTRATION_POLICY.md#deterministic-deep-review-decision), and [complete MCP tool contract](docs/ORCHESTRATION_POLICY.md#mcp-tools).
+Reference the [canonical host rules](client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md) from existing instructions. Verify the connection with `get_qa_orchestration_catalog`, `get_qa_orchestration_model_policy`, and `prepare_qa_orchestration(agent_profile="code_explorer")`; these calls create no session.
 
-## Responsibility boundary
+## Architecture and responsibilities
 
-The host owns evidence, model execution, finding confirmation, severity, release readiness, and external actions. For a bound review, `QA Orchestrator` checks report/profile alignment and that citations use registered Evidence Packet references; it cannot verify that a profile ran or that a report reflects its sources. `read_only=true` and `host_owns_decisions=true` describe the boundary; session tools still update local state. Use the updated session after `advance_qa_orchestration`; call `get_qa_orchestration` to resume, recover, or read saved reports.
+| Layer | Responsibility |
+|---|---|
+| MCP server | Checklists, stage/group validation, fixed escalation rules, bounded session state |
+| Evidence utilities | Immutable Git source/diff hashes, citation coordinates, exact context packets |
+| `HostReviewAdapter` | Async executor supervision, concurrency/time budgets, group barriers and attempts |
+| `CodexProfileExecutor` | Installed CLI execution, strict output schema, report validation and reported usage |
+| Benchmark tools | Snapshot identity and scoring of explicitly adjudicated runs |
 
-When `model_policy.mode` is `configured`, the host uses its returned per-stage model settings. When it is `host_default`, the host uses its own configured model and reasoning. See [model policy and orchestration details](docs/ORCHESTRATION_POLICY.md#model-policy), the [installation guide](docs/INSTALLATION.md), and the [Codex and Claude Code guides](docs/clients/).
+The host owns source retrieval, defect confirmation, severity, final decisions, code edits, and external writes. Jira, GitLab, CI, TestRail, Sentry, and other sources come through the host's tools. Initialization instructions are advisory; `read_only=true` and `host_owns_decisions=true` describe review ownership, while session tools mutate local state.
 
-## Development
+## Review workflow
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Public MCP contract changes require focused tool-surface and ownership-boundary checks.
+```text
+Pinned evidence → triage → primary review groups → optional deep review
+                → synthesis → awaiting_host_outcome → host final outcome
+```
+
+1. Build the evidence input; use `ReviewContext` for an auditable bound review.
+2. Call `start_qa_orchestration`, then complete triage through `advance_qa_orchestration` with one `selected_profile` or `selected_bundle`.
+3. Run the returned `execution_groups`. Profiles in one group may run concurrently; wait for all, then record the ordered `completed_profiles` and reports in one transition. Transition calls are sequential.
+4. Supply evidence-based `risk_signals` on the last primary-review transition. Perform any required deep review, then validate and synthesize the result.
+5. Call `finish_qa_orchestration` with `completed`, `partial`, or `blocked`. A completed bound review requires `final_review_report`. Record early stops through `advance_qa_orchestration` first.
+
+Use the session returned by each transition. Read/recover with `get_qa_orchestration` or `list_qa_orchestrations`. Revision checks and request keys protect against stale submissions and lost-response retries.
+
+`completed` records workflow completion; it is not a CI pass or release approval. For a clean **single-profile** route, `skip_synthesis=true` skips the separate synthesis stage, but still requires host validation and a final report. Findings, material unresolved questions, coverage gaps, unverified notes, or risk signals prevent the shortcut. Bundles retain synthesis.
+
+### Deep-review rules
+
+| Trigger | Required signals |
+|---|---|
+| High-risk uncertainty | `high_risk_domain` and `evidence_uncertain` |
+| Multiple complexity signals | At least two of `cross_system_scope`, `multiple_plausible_causes`, `non_reproducible`, `high_blast_radius` |
+| Critical evidence conflict | `evidence_conflict` and at least one of `high_risk_domain`, `cross_system_scope`, `high_blast_radius` |
+
+Enabled signals require rationale and evidence refs. Missing CI, Stage, or device execution alone does not require escalation; uncertainty must concern a material question that scoped review could resolve.
+
+**Example:** ordinary QA of a small Ruby guard change checks requirements, the changed branch, callers, and assertions. The host can select `ruby_reviewer`, execute its checklist, submit its report and risk signals, synthesize, then finalize. See the [complete MCP tool contract](docs/ORCHESTRATION_POLICY.md#mcp-tools) for payloads.
+
+## Profiles and bundles
+
+Use one profile for a narrow, low-risk concern; use a bundle for broad or cross-concern work. File count alone does not define scope.
+
+| Profile | Focus |
+|---|---|
+| `code_explorer` | Faraday — Evidence Investigator: paths, callers, dependencies and evidence map |
+| `code_reviewer` | Changed-code failure modes and contract breaks |
+| `pr_test_analyzer` | Test coverage and meaningful assertion gaps |
+| `security_reviewer` | Authentication, authorization, input validation and sensitive data |
+| `silent_failure_hunter` | Swallowed errors, fallbacks, timeout/rollback and error propagation |
+| `typescript_reviewer` | Types, narrowing, casts, async and error contracts |
+| `react_reviewer` | State, effects, rendering, accessibility and visible behavior |
+| `ruby_reviewer` | Ruby semantics, exceptions, persistence and relevant jobs |
+| `python_reviewer` | Validation, serialization, cancellation, cleanup and MCP contracts |
+| `mobile_reviewer` | React Native/native lifecycle, navigation and platform contracts |
+
+Test Analyzer returns coverage gaps; Evidence Investigator returns an evidence map and unresolved links. Both are prohibited from returning implementation findings, enforced by server validation and the Codex output schema.
+
+In the schedules below, `+` means one concurrent-capable group; `→` means a barrier between groups.
+
+| Bundle | Execution groups |
+|---|---|
+| `ordinary_mr` | `code_explorer` → `code_reviewer` + `pr_test_analyzer` |
+| `widget` | `code_explorer` → `react_reviewer` + `typescript_reviewer` + `pr_test_analyzer` |
+| `widget_js` | `code_explorer` → `code_reviewer` + `react_reviewer` + `pr_test_analyzer` |
+| `ruby_backend` | `code_explorer` → `ruby_reviewer` + `pr_test_analyzer` |
+| `python_backend` | `code_explorer` + `python_reviewer` + `pr_test_analyzer` |
+| `mobile` | `code_explorer` → `mobile_reviewer` + `pr_test_analyzer` |
+| `security` | `code_explorer` → `security_reviewer` + `silent_failure_hunter` |
+| `autotest` | `code_reviewer` + `typescript_reviewer` + `pr_test_analyzer` |
+| `requirements` | `code_explorer` → `code_reviewer` |
+
+The Python bundle starts all profiles together; required context must be supplied upfront. Reports from previous groups are available only to subsequent groups. The installed catalog is authoritative; see the [bundle and profile catalog](docs/ORCHESTRATION_POLICY.md#fixed-bundles-and-profile-names).
+
+## Evidence and context
+
+A bound `ReviewContext` pins repository identity, full base/head commits, diff and packet SHA-256, changed paths, and evidence IDs. Optional registry metadata adds source hashes, coordinates and external locators. Bound profiles submit structured reports; finding coordinates must be supported by cited head-source records when a registry is supplied.
+
+Local utilities verify immutable Git bytes, hashes and coordinates. External requirements/runtime evidence remains unverified by the Git checker. The MCP server validates identifiers and citations; it does not read the raw packet.
+
+Exact context packing retains original UTF-8 fragments without summarizing or truncating them. Changed source, diff and supplied requirements remain mandatory. Optional omissions are declared; mandatory overflow fails before execution. Reports cannot cite omitted refs. The Codex executor defaults to 1,500,000 rendered bytes and a 2 MB serialized packet limit, not token limits. Source caching is bounded and in memory; Python AST chunks preserve source coordinates.
+
+See [Evidence Registry](docs/EVIDENCE_REGISTRY.md) and [context packing](docs/REVIEW_UPGRADES.md#7-exact-context-packing).
+
+## Findings and final decisions
+
+Reports separate candidates, coverage gaps, unverified claims and evidence maps. The host assigns every candidate one verdict: `confirmed`, `rejected`, `duplicate`, or `unverified`, with rationale and evidence. Final findings retain profile/candidate lineage; confirmation requires severity, impact, affected area and source locations. Finalization checks the complete decision ledger.
+
+Paired `failure_condition` and `flip_condition` describe failure prerequisites and refuting evidence. Conditioned candidates require a context/candidate-bound counterevidence check; confirmation or duplicate linkage requires `not_refuted`. The host performs that inspection. Legacy candidates may omit both conditions.
+
+Explicit scoped `ReviewRuleset` rules can raise concerns or guard against known false-positive patterns. They bind reports through a digest and guide inspection; they do not automatically suppress findings or learn from reviews. See [rules and counterevidence](docs/REVIEW_UPGRADES.md).
+
+## Host execution
+
+`HostReviewAdapter` supervises an injected async `execute_profile(job)` for a bound session with triage complete. It enforces group barriers, concurrency/time limits, lease renewal and cancellation. It stops at deep review or synthesis; later stages and final decisions remain with the host.
+
+Timeouts and explicit `RetryableProfileError` can be retried. Permanent failures are not replayed automatically. A failed group is never recorded as complete; the run becomes `partial`, retaining successful unsaved reports.
+
+`CodexProfileExecutor` uses an authenticated installed CLI, a fresh temporary workspace, read-only sandbox, no inherited user configuration, and a strict JSON schema. Invalid output or detected forbidden tool actions fail the call; timeout/cancellation terminates its process tree. In `host_default`, it requires an explicit model. Other runtimes use a custom executor.
+
+Optional checkpoints reuse validated reports only when context, rules, checklist, model policy, previous-group reports and executor/instruction identity match. Reuse is reported separately; disable it for independent benchmark repetitions. See [Host Adapter](docs/HOST_ADAPTER.md) and [execution tools](docs/REVIEW_UPGRADES.md).
+
+## Performance and evaluation
+
+Narrow routing, concurrent groups, the clean-profile synthesis shortcut, checkpoints and bounded context selection can avoid unnecessary work. Execution speed and latency preferences remain controlled by the user's host/provider settings; improvement requires measurement.
+
+`execution_attempts` records fresh successful, failed and cancelled calls, queue wait, duration and available phase/token observations. Missing usage remains unknown, never zero. Checkpoint reuse is separate; `model_seconds` includes the CLI/process interval rather than provider-only inference. No automatic price estimate is produced.
+
+Benchmark tools score pinned runs using explicit adjudications and can report precision, eligible recall, high-impact misses, evidence validity, time, usage and repetition stability. They do not launch models or decide matches. Keep reference findings hidden and compare fresh matched runs. Unit tests do not prove review quality or speed. See [Benchmark](docs/BENCHMARK.md) and [Profile Evaluation](docs/PROFILE_EVALUATION.md).
+
+## MCP tools
+
+| Tool | Purpose |
+|---|---|
+| `get_qa_orchestration_catalog` | Profiles, bundles and schedules |
+| `prepare_qa_orchestration` | One profile checklist |
+| `prepare_qa_orchestration_bundle` | Bundle checklists and groups |
+| `get_qa_orchestration_model_policy` | Running server's policy snapshot |
+| `start_qa_orchestration` | Create a session |
+| `advance_qa_orchestration` | Validate and record a transition/reports |
+| `renew_qa_orchestration` | Extend an active lease |
+| `get_qa_orchestration` | Read a retained session |
+| `list_qa_orchestrations` | Discover retained session IDs |
+| `finish_qa_orchestration` | Finalize host outcome and report |
+| `delete_qa_orchestration` | Irreversibly discard local session state |
+
+Reads do not extend TTL. Deletion neither finalizes a review nor cancels host execution.
+
+## CLI tools
+
+| Command | Purpose |
+|---|---|
+| `qa-orch setup` / `setup --host-default` | Configure per-stage models or return to host settings |
+| `qa-orch config show` / `reload` | Inspect/validate the saved policy |
+| `qa-orch evidence build` / `verify` | Register/verify source and diff |
+| `qa-orch evidence pack` / `chunks` | Exact context packets/source chunks |
+| `qa-orch rules` | Bind explicit review rules |
+| `qa-orch benchmark import-reviewbench` / `score` / `reliability` | Import and score adjudicated runs |
+| `qa-orchestrator-doctor --json` | Read-only local diagnostics |
+
+`qa-orchestrator` aliases `qa-orch`. Running either without a subcommand starts the MCP server. These tools do not provide a one-command MR review and publication flow.
+
+## Configuration
+
+`host_default` uses the host's model/reasoning. Optional `configured` policy sets provider, model and effort per stage. Setup validates local metadata, not account access or live model capabilities; no provider credentials are stored.
+
+| Variable | Default |
+|---|---|
+| `QA_ORCHESTRATOR_DATA_DIR` | `~/.qa-orchestrator` |
+| `QA_ORCHESTRATOR_MODEL_POLICY_PATH` | `<data-dir>/model-policy.json` |
+| `QA_ORCHESTRATOR_ORCHESTRATION_TTL_SECONDS` | `1800` |
+| `QA_ORCHESTRATOR_ORCHESTRATION_MAX_SESSIONS` | `100` |
+| `QA_ORCHESTRATOR_SESSION_STORE_PATH` | Unset; opt-in SQLite recovery |
+
+Pass overrides through the MCP client's environment. Restart the server connection after code/policy changes: CLI `reload` does not update that process. Inspect the loaded policy with `get_qa_orchestration_model_policy`; neither configuration nor session metadata proves model execution.
+
+## Storage and trust boundaries
+
+Session state is bounded and in memory by default. Optional SQLite restores non-expired unfinished sessions and finalized bound reviews with structured reports. Finalized legacy sessions without artifacts are removed. Checkpoints use a separate opt-in store; use one server process per session-store file.
+
+Stored reports can contain source-derived findings and descriptions. Raw packets, prompts, transcripts and benchmark artifacts are managed separately by the host. Reports are limited to 64 KiB each and 256 KiB combined per session. Normal MCP calls need no network; installation, evidence tools and model execution may need it.
+
+Validation proves structure, identity and reported sequence, not source completeness, defect truth or runtime success. The CLI read-only sandbox restricts writes, not all reads; strict read isolation needs an OS/container boundary. Forbidden-action detection cannot prove an action never started. No autonomous external writes or learned persistent QA memory are added.
+
+## Development and documentation
+
+```bash
+uv run pytest -q
+uv run ruff check .
+uv run qa-orchestrator-doctor --json
+git diff --check
+```
+
+Implementation: `src/qa_orchestrator/`. Tests cover contracts, workflow, storage, evidence and execution supervision; real-model quality and target application/device checks are separate.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md), [Orchestration Policy](docs/ORCHESTRATION_POLICY.md), [Review Upgrades](docs/REVIEW_UPGRADES.md), and [SECURITY.md](SECURITY.md). Licensed under [MIT](LICENSE).

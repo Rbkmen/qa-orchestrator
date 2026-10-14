@@ -29,7 +29,7 @@ from qa_orchestrator.contracts import (
     ReviewBundle,
     ReviewContext,
 )
-from qa_orchestrator.evidence import validate_registered_locations
+from qa_orchestrator.evidence import validate_context_selection, validate_registered_locations
 from qa_orchestrator.model_policy import (
     DEFAULT_MODEL_SELECTION,
     HostDefaultModelSelection,
@@ -39,6 +39,7 @@ from qa_orchestrator.model_policy import (
     is_valid_model_id,
     reasoning_capabilities_verified,
 )
+from qa_orchestrator.refutation import validate_refutation_check
 from qa_orchestrator.review_profiles import (
     REVIEW_BUNDLES,
     bundle_execution_groups,
@@ -951,6 +952,17 @@ class QaOrchestrator:
                         raise OrchestrationError(
                             "final report requires exactly one decision per submitted candidate"
                         )
+                    for source, decision in decisions.items():
+                        candidate = reported_candidates[source]
+                        if candidate.flip_condition is not None and decision.refutation is None:
+                            raise OrchestrationError("candidate conditions require a refutation check")
+                        if decision.refutation is not None:
+                            try:
+                                validate_refutation_check(
+                                    session.review_context, candidate, decision.refutation
+                                )
+                            except ValueError as exc:
+                                raise OrchestrationError(str(exc)) from exc
                     for finding in validated_report.finding_candidates:
                         linked = {
                             source for source, decision in decisions.items()
@@ -1135,6 +1147,7 @@ class QaOrchestrator:
                         )
                     try:
                         validate_registered_locations(session.review_context, report.finding_candidates)
+                        validate_context_selection(session.review_context, report)
                     except ValueError as exc:
                         raise OrchestrationError(str(exc)) from exc
                 transition_reports = request.profile_reports

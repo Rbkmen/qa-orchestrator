@@ -195,6 +195,44 @@ class ReviewFindingLocation(BaseModel):
         return self
 
 
+class ProfileAttemptObservation(BaseModel):
+    """Executor-supplied observations, including usage available before failure."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    cached_input_tokens: int | None = Field(default=None, ge=0)
+    preparation_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    model_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    validation_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+
+
+class ProfileAttemptMetrics(ProfileAttemptObservation):
+    """One actual executor call; no exception bodies or source content."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    profile: ReviewAgent
+    attempt: int = Field(ge=1, le=4)
+    outcome: Literal["completed", "retryable_error", "timeout", "failed", "cancelled"]
+    started_at: AwareDatetime
+    completed_at: AwareDatetime
+    queue_seconds: float = Field(ge=0, allow_inf_nan=False)
+    executor_seconds: float = Field(ge=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> "ProfileAttemptMetrics":
+        if self.completed_at < self.started_at:
+            raise ValueError("completed_at must be at or after started_at")
+        if (
+            self.cached_input_tokens is not None and self.input_tokens is not None
+            and self.cached_input_tokens > self.input_tokens
+        ):
+            raise ValueError("cached input cannot exceed total input tokens")
+        return self
+
+
 class ProfileExecutionMetrics(BaseModel):
     """Optional host-reported timing and token counts for one completed profile."""
 
@@ -205,6 +243,7 @@ class ProfileExecutionMetrics(BaseModel):
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
     attempt_count: int = Field(default=1, ge=1, le=4)
+    attempts: tuple[ProfileAttemptMetrics, ...] = Field(default=(), max_length=4)
 
     @model_validator(mode="after")
     def validate_execution_interval(self) -> "ProfileExecutionMetrics":
@@ -239,9 +278,23 @@ class ReviewFindingCandidate(BaseModel):
         max_length=2000,
         description="Concrete effect on users or contracts; severity remains host-owned.",
     )
+    failure_condition: str | None = Field(
+        default=None, min_length=1, max_length=2000,
+        description="Specific preconditions that make the alleged failure occur.",
+    )
+    flip_condition: str | None = Field(
+        default=None, min_length=1, max_length=2000,
+        description="Concrete source/contract evidence that would refute this candidate.",
+    )
 
     @model_validator(mode="after")
     def validate_source_locations(self) -> "ReviewFindingCandidate":
+        if (self.failure_condition is None) != (self.flip_condition is None):
+            raise ValueError("provide both failure_condition and flip_condition")
+        if self.failure_condition is not None and (
+            not self.failure_condition.strip() or not self.flip_condition.strip()
+        ):
+            raise ValueError("refutation conditions must not be blank")
         location_keys = {
             (location.path, location.start_line, location.end_line)
             for location in self.source_locations
@@ -302,12 +355,40 @@ class ReviewEvidenceMapEntry(BaseModel):
     description: str = Field(min_length=1, max_length=2000)
 
 
+class ProfileContextSelection(BaseModel):
+    """Host assertion of the exact subset actually sent to a profile."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    source_packet_sha256: Sha256Digest
+    selected_packet_sha256: Sha256Digest
+    included_refs: tuple[EvidenceRefId, ...] = Field(max_length=1000)
+    omitted_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=1000)
+    budget_omitted_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=1000)
+    max_bytes: int = Field(ge=1, le=2_000_000)
+    selected_bytes: int = Field(ge=0, le=2_000_000)
+
+    @model_validator(mode="after")
+    def validate_partition(self) -> "ProfileContextSelection":
+        if (
+            len(set(self.included_refs)) != len(self.included_refs)
+            or len(set(self.omitted_refs)) != len(self.omitted_refs)
+            or len(set(self.budget_omitted_refs)) != len(self.budget_omitted_refs)
+            or set(self.included_refs) & set(self.omitted_refs)
+            or not set(self.budget_omitted_refs).issubset(self.omitted_refs)
+        ):
+            raise ValueError("context selection refs must be a unique partition")
+        if self.selected_bytes > self.max_bytes:
+            raise ValueError("context selection exceeds byte budget")
+        return self
+
+
 class ProfileReviewReport(BaseModel):
     """Structured host-reported result for one completed specialist profile."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     profile: ReviewAgent
+    context_selection: ProfileContextSelection | None = None
     review_rules_sha256: Sha256Digest | None = None
     scope: str = Field(min_length=1, max_length=2000)
     finding_candidates: tuple[ReviewFindingCandidate, ...] = Field(default=(), max_length=100)
@@ -342,6 +423,23 @@ class ProfileReviewReport(BaseModel):
         return self
 
 
+class RefutationCheck(BaseModel):
+    """Host's evidence-backed assessment, not a vote or proof of another agent's execution."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    context_sha256: Sha256Digest
+    candidate_sha256: Sha256Digest
+    status: Literal["refuted", "not_refuted", "unverified"]
+    rationale: str = Field(min_length=1, max_length=2000)
+    evidence_refs: tuple[EvidenceRefId, ...] = Field(min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def validate_rationale(self) -> "RefutationCheck":
+        if not self.rationale.strip() or len(set(self.evidence_refs)) != len(self.evidence_refs):
+            raise ValueError("refutation requires a nonblank rationale and unique refs")
+        return self
+
+
 class ReviewCandidateDecision(BaseModel):
     """The host's disposition of one profile-local candidate."""
 
@@ -352,9 +450,15 @@ class ReviewCandidateDecision(BaseModel):
     rationale: str = Field(min_length=1, max_length=2000)
     evidence_refs: tuple[EvidenceRefId, ...] = Field(min_length=1, max_length=32)
     final_finding_id: str | None = Field(default=None, pattern=r"^F-[0-9]{2,}$")
+    refutation: RefutationCheck | None = None
 
     @model_validator(mode="after")
     def validate_final_link(self) -> "ReviewCandidateDecision":
+        if (
+            self.refutation is not None and self.verdict in {"confirmed", "duplicate"}
+            and self.refutation.status != "not_refuted"
+        ):
+            raise ValueError("confirmation requires a resolved, not_refuted refutation check")
         if (self.verdict in {"confirmed", "duplicate"}) != (self.final_finding_id is not None):
             raise ValueError("only confirmed and duplicate decisions require final_finding_id")
         if not self.rationale.strip():

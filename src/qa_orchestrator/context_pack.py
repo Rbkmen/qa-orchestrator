@@ -1,0 +1,257 @@
+"""Exact, deterministic context selection. Reviewed content never selects its own scope."""
+
+import hashlib
+import json
+from collections import OrderedDict
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from qa_orchestrator.contracts import EvidenceRecord, ReviewAgent, ReviewContext
+from qa_orchestrator.evidence import _diff, _git, _source_lines
+
+
+class ContextFragment(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    record: EvidenceRecord
+    text: str = Field(max_length=4_000_000)
+    required: bool = True
+    profiles: tuple[ReviewAgent, ...] = ()
+    priority: int = Field(default=0, ge=0, le=100)
+
+    @model_validator(mode="after")
+    def validate_content(self) -> "ContextFragment":
+        if hashlib.sha256(self.text.encode()).hexdigest() != self.record.sha256:
+            raise ValueError("context fragment content hash mismatch")
+        if len(set(self.profiles)) != len(self.profiles):
+            raise ValueError("context profiles must be unique")
+        return self
+
+
+class ContextPacket(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    format: Literal["qa-orchestrator-context-v1"] = "qa-orchestrator-context-v1"
+    fragments: tuple[ContextFragment, ...] = Field(min_length=1, max_length=1000)
+    deleted_paths: tuple[str, ...] = Field(default=(), max_length=500)
+
+    @model_validator(mode="after")
+    def validate_refs(self) -> "ContextPacket":
+        refs = [f.record.evidence_ref for f in self.fragments]
+        if len(set(refs)) != len(refs):
+            raise ValueError("context refs must be unique")
+        if len(set(self.deleted_paths)) != len(self.deleted_paths):
+            raise ValueError("deleted paths must be unique")
+        return self
+
+
+@dataclass(frozen=True)
+class PackedContext:
+    text: str
+    sha256: str
+    included_refs: tuple[str, ...]
+    omitted_refs: tuple[str, ...]
+    budget_omitted_refs: tuple[str, ...]
+
+
+def select_context(packet: ContextPacket, profile: ReviewAgent, *, max_bytes: int) -> PackedContext:
+    if not 1 <= max_bytes <= 2_000_000:
+        raise ValueError("context byte budget outside supported bounds")
+    profile = ReviewAgent(profile)
+    groups = {}
+    omitted, budget_omitted = [], []
+    for fragment in sorted(packet.fragments, key=lambda f: f.record.evidence_ref):
+        if not fragment.required and fragment.profiles and profile not in fragment.profiles:
+            omitted.append(fragment.record.evidence_ref)
+            continue
+        identity = fragment.record.model_dump(exclude={"evidence_ref"})
+        key = json.dumps(identity, sort_keys=True)
+        groups.setdefault(key, []).append(fragment)
+    ordered = sorted(
+        groups.values(),
+        key=lambda fs: (
+            not any(f.required for f in fs),
+            -max(f.priority for f in fs),
+            fs[0].record.evidence_ref,
+        ),
+    )
+    blocks, included, size = [], [], 0
+    for fragments in ordered:
+        # Aliases share bytes only when revision, coordinates, locator and hash all agree.
+        metadata = [f.record.model_dump(mode="json", exclude_none=True) for f in fragments]
+        block = json.dumps(metadata, sort_keys=True, ensure_ascii=False) + "\n" + fragments[0].text
+        block += "\nEND EVIDENCE FRAGMENT\n"
+        cost = len(block.encode())
+        refs = [f.record.evidence_ref for f in fragments]
+        if size + cost > max_bytes:
+            if any(f.required for f in fragments):
+                raise ValueError("mandatory context exceeds budget; split the review explicitly")
+            omitted.extend(refs)
+            budget_omitted.extend(refs)
+            continue
+        blocks.append(block)
+        included.extend(refs)
+        size += cost
+    text = "".join(blocks)
+    return PackedContext(
+        text,
+        hashlib.sha256(text.encode()).hexdigest(),
+        tuple(included),
+        tuple(sorted(omitted)),
+        tuple(sorted(budget_omitted)),
+    )
+
+
+class PinnedSourceCache:
+    """Bounded in-memory blob cache. No worktree reads or persistent review memory."""
+
+    def __init__(self, *, max_bytes: int = 16_000_000):
+        if not 1 <= max_bytes <= 64_000_000:
+            raise ValueError("source cache size outside supported bounds")
+        self.max_bytes = max_bytes
+        self.hits = 0
+        self._blobs: OrderedDict[str, bytes] = OrderedDict()
+        self._size = 0
+
+    def read(self, repository: Path, entry: EvidenceRecord) -> bytes:
+        blob = (
+            _git(repository, "rev-parse", "--verify", f"{entry.revision}:{entry.path}")
+            .decode()
+            .strip()
+        )
+        if blob in self._blobs:
+            self.hits += 1
+            data = self._blobs.pop(blob)
+            self._blobs[blob] = data
+        else:
+            if int(_git(repository, "cat-file", "-s", blob)) > 4_000_000:
+                raise ValueError("source blob exceeds supported size")
+            data = _git(repository, "cat-file", "blob", blob)
+            if len(data) > 4_000_000:
+                raise ValueError("source blob exceeds supported size")
+            if len(data) <= self.max_bytes:
+                while self._blobs and (
+                    self._size + len(data) > self.max_bytes or len(self._blobs) >= 128
+                ):
+                    _, old = self._blobs.popitem(last=False)
+                    self._size -= len(old)
+                self._blobs[blob] = data
+                self._size += len(data)
+        if entry.start_line is None:
+            return data
+        lines = _source_lines(data)
+        end = entry.end_line or entry.start_line
+        if end > len(lines):
+            raise ValueError("source range outside pinned blob")
+        return b"".join(lines[entry.start_line - 1 : end])
+
+
+def build_context_packet(
+    context: ReviewContext,
+    repository: Path,
+    *,
+    cache: PinnedSourceCache | None = None,
+    optional_profiles: dict[str, tuple[ReviewAgent, ...]] | None = None,
+    priorities: dict[str, int] | None = None,
+    external_content: dict[str, str] | None = None,
+) -> ContextPacket:
+    if not context.evidence_registry:
+        raise ValueError("context packing requires a complete evidence registry")
+    deleted = tuple(
+        sorted(
+            set(
+                _git(
+                    repository,
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--diff-filter=D",
+                    "--name-only",
+                    "-z",
+                    context.base_sha,
+                    context.head_sha,
+                    "--",
+                )
+                .decode("utf-8")
+                .rstrip("\x00")
+                .split("\x00")
+            )
+            - {""}
+        )
+    )
+    deleted = tuple(path for path in deleted if path in context.changed_files)
+    _validate_mandatory_presence(context, deleted)
+    cache = cache or PinnedSourceCache()
+    optional_profiles, priorities, external_content = (
+        optional_profiles or {},
+        priorities or {},
+        external_content or {},
+    )
+    refs = set(context.evidence_refs)
+    if (set(optional_profiles) | set(priorities) | set(external_content)) - refs:
+        raise ValueError("context plan cites unknown evidence refs")
+    diff = _diff(context, repository)
+    fragments = []
+    for entry in context.evidence_registry:
+        if entry.evidence_ref in optional_profiles:
+            if entry.kind in {"diff", "requirement"}:
+                raise ValueError("diff and requirements must remain mandatory")
+            if entry.kind == "source" and entry.path in context.changed_files:
+                raise ValueError("changed source must remain mandatory")
+        if entry.kind == "source":
+            text = cache.read(repository, entry).decode("utf-8")
+        elif entry.kind == "diff":
+            text = diff.decode("utf-8")
+        else:
+            if entry.evidence_ref not in external_content:
+                raise ValueError("external evidence requires explicit host content")
+            text = external_content[entry.evidence_ref]
+        fragments.append(
+            ContextFragment(
+                record=entry,
+                text=text,
+                required=entry.evidence_ref not in optional_profiles,
+                profiles=optional_profiles.get(entry.evidence_ref, ()),
+                priority=priorities.get(entry.evidence_ref, 0),
+            )
+        )
+    return ContextPacket(
+        fragments=tuple(sorted(fragments, key=lambda f: f.record.evidence_ref)),
+        deleted_paths=deleted,
+    )
+
+
+def validate_packet_context(packet: ContextPacket, context: ReviewContext) -> None:
+    _validate_mandatory_presence(context, packet.deleted_paths)
+    registry = {r.evidence_ref: r for r in context.evidence_registry}
+    if {f.record.evidence_ref for f in packet.fragments} != set(context.evidence_refs):
+        raise ValueError("context packet must cover every bound evidence ref")
+    for fragment in packet.fragments:
+        if fragment.record != registry.get(fragment.record.evidence_ref):
+            raise ValueError("context packet metadata differs from the bound registry")
+        if not fragment.required and (
+            fragment.record.kind in {"diff", "requirement"}
+            or fragment.record.kind == "source"
+            and fragment.record.path in context.changed_files
+        ):
+            raise ValueError("mandatory changed source/diff/requirements cannot be excluded")
+
+
+def _validate_mandatory_presence(context: ReviewContext, deleted_paths: tuple[str, ...]) -> None:
+    if not any(r.kind == "diff" for r in context.evidence_registry):
+        raise ValueError("mandatory diff evidence is absent")
+    paths = {r.path for r in context.evidence_registry if r.kind == "source"}
+    if set(context.changed_files) - paths:
+        raise ValueError("mandatory changed source evidence is absent")
+    if set(deleted_paths) - set(context.changed_files):
+        raise ValueError("deleted paths must belong to the bound changed files")
+    for path in context.changed_files:
+        revision = context.base_sha if path in deleted_paths else context.head_sha
+        if not any(
+            r.kind == "source" and r.path == path and r.revision == revision
+            for r in context.evidence_registry
+        ):
+            raise ValueError("mandatory changed source revision is absent")

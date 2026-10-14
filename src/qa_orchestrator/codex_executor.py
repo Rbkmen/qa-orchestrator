@@ -7,21 +7,32 @@ import os
 import signal
 import sys
 import tempfile
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from time import perf_counter
 
 from pydantic import ValidationError
 
-from qa_orchestrator.contracts import ProfileExecutionMetrics, ProfileReviewReport
+from qa_orchestrator.context_pack import ContextPacket, select_context, validate_packet_context
+from qa_orchestrator.contracts import (
+    ProfileAttemptObservation,
+    ProfileContextSelection,
+    ProfileExecutionMetrics,
+    ProfileReviewReport,
+    ReviewAgent,
+)
 from qa_orchestrator.host import HostProfileJob, HostReviewAdapter
 
 
 def _output_schema(profile: str) -> dict:
     schema = ProfileReviewReport.model_json_schema()
     # Metrics and rule-version assertions are host-owned, not model output.
-    for name in ("execution_metrics", "review_rules_sha256"):
+    for name in ("execution_metrics", "review_rules_sha256", "context_selection"):
         schema["properties"].pop(name)
     schema["properties"]["profile"] = {"type": "string", "enum": [profile]}
+    if profile in {ReviewAgent.PR_TEST_ANALYZER, ReviewAgent.CODE_EXPLORER}:
+        schema["properties"]["finding_candidates"]["maxItems"] = 0
 
     def strict(node):
         if isinstance(node, dict):
@@ -55,9 +66,13 @@ class CodexProfileExecutor:
         model: str | None = None,
         reasoning: str | None = None,
         timeout_seconds: float = 300,
+        max_context_bytes: int = 1_500_000,
     ):
         if not command or not 0 < timeout_seconds <= 3600:
             raise ValueError("invalid CLI command or timeout")
+        if not 1 <= max_context_bytes <= 2_000_000:
+            raise ValueError("invalid context byte budget")
+        self.max_context_bytes = max_context_bytes
         self.packet = Path(packet)
         self.command, self.model, self.reasoning = command, model, reasoning
         self.timeout_seconds = timeout_seconds
@@ -68,8 +83,9 @@ class CodexProfileExecutor:
         return hashlib.sha256(
             json.dumps(
                 {
-                    "implementation": "codex-packet-executor-v3",
+                    "implementation": "codex-packet-executor-v5",
                     "command": self.command,
+                    "max_context_bytes": self.max_context_bytes,
                     "model": self.model,
                     "reasoning": self.reasoning,
                 },
@@ -78,6 +94,16 @@ class CodexProfileExecutor:
         ).hexdigest()
 
     async def __call__(self, job: HostProfileJob) -> ProfileReviewReport:
+        prepared = perf_counter()
+        observation = job.observation if job.observation is not None else ProfileAttemptObservation()
+        try:
+            return await self._execute(replace(job, observation=observation))
+        finally:
+            if observation.preparation_seconds is None:
+                observation.preparation_seconds = perf_counter() - prepared
+
+    async def _execute(self, job: HostProfileJob) -> ProfileReviewReport:
+        prepared = perf_counter()
         context = job.session.review_context
         if context is None:
             raise ValueError("CLI executor requires pinned review context")
@@ -89,6 +115,24 @@ class CodexProfileExecutor:
             or hashlib.sha256(packet).hexdigest() != context.evidence_packet_sha256
         ):
             raise ValueError("Evidence packet hash mismatch")
+        packet_text = packet.decode("utf-8")
+        selection = None
+        if packet_text.lstrip().startswith("{"):
+            try:
+                document = json.loads(packet_text)
+            except ValueError:
+                document = None
+            if isinstance(document, dict) and document.get("format") == "qa-orchestrator-context-v1":
+                structured = ContextPacket.model_validate(document)
+                validate_packet_context(structured, context)
+                packed = select_context(structured, job.profile, max_bytes=self.max_context_bytes)
+                packet_text = packed.text
+                selection = ProfileContextSelection(
+                    source_packet_sha256=context.evidence_packet_sha256,
+                    selected_packet_sha256=packed.sha256, included_refs=packed.included_refs,
+                    omitted_refs=packed.omitted_refs, budget_omitted_refs=packed.budget_omitted_refs,
+                    max_bytes=self.max_context_bytes, selected_bytes=len(packet_text.encode()),
+                )
         prompt = (
             "You are a read-only specialist reviewer. Use ONLY the bound Evidence Packet below. "
             "Do not run code, tests, tools, network requests or inspect other files. "
@@ -106,7 +150,7 @@ class CodexProfileExecutor:
             + context.model_dump_json(exclude={"review_rules"})
             + "\n"
             + "BEGIN EVIDENCE PACKET\n"
-            + packet.decode("utf-8")
+            + packet_text
             + "\nEND EVIDENCE PACKET"
         )
         started = datetime.now(UTC)
@@ -148,6 +192,9 @@ class CodexProfileExecutor:
             argv.append("-")
             if os.name == "nt":
                 argv = [sys.executable, "-m", "qa_orchestrator.process_worker", *argv]
+            if job.observation is not None:
+                job.observation.preparation_seconds = perf_counter() - prepared
+            model_started = perf_counter()
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 cwd=workdir,
@@ -157,17 +204,21 @@ class CodexProfileExecutor:
                 start_new_session=os.name != "nt",
                 limit=131072,
             )
+            validated = None
             try:
                 async with asyncio.timeout(self.timeout_seconds):
                     writer = asyncio.create_task(self._send(proc, prompt.encode()))
                     try:
-                        events = await self._events(proc)
+                        events = await self._events(proc, job.observation)
                         await writer
                         code = await proc.wait()
                     finally:
                         if not writer.done():
                             writer.cancel()
                         await asyncio.gather(writer, return_exceptions=True)
+                if job.observation is not None:
+                    job.observation.model_seconds = perf_counter() - model_started
+                validated = perf_counter()
                 if code or any(e.get("type") in {"error", "turn.failed"} for e in events):
                     raise ValueError("CLI reviewer failed")
                 completed = [e for e in events if e.get("type") == "turn.completed"]
@@ -176,19 +227,25 @@ class CodexProfileExecutor:
                 try:
                     report = ProfileReviewReport.model_validate_json(output.read_bytes())
                     digest = context.review_rules.digest if context.review_rules else None
-                    report = report.model_copy(update={"review_rules_sha256": digest})
+                    report = report.model_copy(update={"review_rules_sha256": digest,
+                                                     "context_selection": selection})
                     HostReviewAdapter._validate_report(context, job.profile, report)
                 except (ValidationError, ValueError) as exc:
                     raise ValueError("CLI reviewer returned an invalid report") from exc
-                usage = completed[-1].get("usage", {})
+                if job.observation is not None:
+                    job.observation.validation_seconds = perf_counter() - validated
                 metrics = ProfileExecutionMetrics(
                     started_at=started,
                     completed_at=datetime.now(UTC),
-                    input_tokens=usage.get("input_tokens"),
-                    output_tokens=usage.get("output_tokens"),
+                    input_tokens=job.observation.input_tokens,
+                    output_tokens=job.observation.output_tokens,
                 )
                 return report.model_copy(update={"execution_metrics": metrics})
             finally:
+                if validated is not None and job.observation.validation_seconds is None:
+                    job.observation.validation_seconds = perf_counter() - validated
+                if job.observation is not None and job.observation.model_seconds is None:
+                    job.observation.model_seconds = perf_counter() - model_started
                 await self._stop(proc)
 
     @staticmethod
@@ -198,8 +255,9 @@ class CodexProfileExecutor:
         proc.stdin.close()
 
     @staticmethod
-    async def _events(proc) -> list[dict]:
+    async def _events(proc, observation=None) -> list[dict]:
         result, count = [], 0
+        unknown_usage = set()
         while line := await proc.stdout.readline():
             count += len(line)
             if count > 2_000_000:
@@ -210,6 +268,21 @@ class CodexProfileExecutor:
                 raise ValueError("CLI reviewer emitted malformed events") from exc
             if not isinstance(event, dict):
                 raise ValueError("CLI reviewer emitted malformed events")  # noqa: TRY004 -- invalid JSON protocol
+            if observation is not None and event.get("type") in {"turn.completed", "turn.failed"}:
+                usage = event.get("usage")
+                for name in ("input_tokens", "output_tokens", "cached_input_tokens"):
+                    value = usage.get(name) if isinstance(usage, dict) else None
+                    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                        unknown_usage.add(name)
+                    if name in unknown_usage:
+                        setattr(observation, name, None)
+                    else:
+                        setattr(observation, name, (getattr(observation, name) or 0) + value)
+                if (observation.cached_input_tokens is not None
+                    and observation.input_tokens is not None
+                    and observation.cached_input_tokens > observation.input_tokens):
+                    unknown_usage.add("cached_input_tokens")
+                    observation.cached_input_tokens = None
             item = event.get("item")
             if isinstance(item, dict) and item.get("type") in {
                 "command_execution",

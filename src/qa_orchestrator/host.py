@@ -4,19 +4,22 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from time import perf_counter
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from qa_orchestrator.checkpoints import ProfileCheckpointStore, checkpoint_key
 from qa_orchestrator.contracts import (
+    ProfileAttemptMetrics,
+    ProfileAttemptObservation,
     ProfileExecutionMetrics,
     ProfileReviewReport,
     ReviewAgent,
     ReviewContext,
     ReviewRoute,
 )
-from qa_orchestrator.evidence import validate_registered_locations
+from qa_orchestrator.evidence import validate_context_selection, validate_registered_locations
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
     DeepReviewSignals,
@@ -52,6 +55,7 @@ class HostProfileJob:
     previous_reports: tuple[ProfileReviewReport, ...]
     attempt: int
     review_rules: ReviewRuleset | None = None
+    observation: ProfileAttemptObservation | None = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +72,7 @@ class HostExecutionResult:
     started_at: datetime
     completed_at: datetime
     reused_profiles: tuple[ReviewAgent, ...] = ()
+    execution_attempts: tuple[ProfileAttemptMetrics, ...] = ()
 
 
 ProfileExecutor = Callable[[HostProfileJob], Awaitable[ProfileReviewReport]]
@@ -103,8 +108,11 @@ class HostReviewAdapter:
         executor: ProfileExecutor,
         semaphore: asyncio.Semaphore,
         reused: list[ReviewAgent],
+        ledger: list[ProfileAttemptMetrics],
     ) -> ProfileReviewReport | HostProfileFailure:
+        queued = perf_counter()
         async with semaphore:
+            queue_seconds = perf_counter() - queued
             started_at = datetime.now(UTC)
             route = self.service.prepare_review_route(profile)
             key = None
@@ -121,62 +129,78 @@ class HostReviewAdapter:
                     self._validate_report(session.review_context, profile, cached)
                     reused.append(profile)
                     return cached
+            attempts = []
             for attempt in range(1, self.policy.max_retries + 2):
+                observation = ProfileAttemptObservation()
                 job = HostProfileJob(
-                    session.model_copy(deep=True),
-                    profile,
-                    route.model_copy(deep=True),
-                    tuple(session.profile_reports),
-                    attempt,
+                    session.model_copy(deep=True), profile, route.model_copy(deep=True),
+                    tuple(session.profile_reports), attempt,
                     session.review_context.review_rules.for_paths(
                         session.review_context.changed_files
-                    )
-                    if session.review_context and session.review_context.review_rules
-                    else None,
+                    ) if session.review_context.review_rules else None,
+                    observation,
                 )
+                attempt_started = datetime.now(UTC)
+                clock = perf_counter()
+                outcome, failure = "failed", None
                 try:
                     async with asyncio.timeout(self.policy.profile_timeout_seconds):
                         raw_report = await executor(job)
                     report = ProfileReviewReport.model_validate(raw_report)
-                    if report.profile != profile:
-                        return HostProfileFailure(profile, "wrong_profile")
                     usage = report.execution_metrics
-                    metrics = ProfileExecutionMetrics(
-                        started_at=started_at,
-                        completed_at=datetime.now(UTC),
-                        input_tokens=usage.input_tokens if usage and attempt == 1 else None,
-                        output_tokens=usage.output_tokens if usage and attempt == 1 else None,
-                        attempt_count=attempt,
-                    )
-                    completed_report = ProfileReviewReport.model_validate(
-                        {
-                            **report.model_dump(),
-                            "execution_metrics": metrics.model_dump(),
-                            "review_rules_sha256": session.review_context.review_rules.digest
-                            if session.review_context and session.review_context.review_rules
-                            else None,
-                        }
-                    )
-                    if self.checkpoint_store:
-                        try:
-                            self._validate_report(session.review_context, profile, completed_report)
-                        except ValueError:
-                            # Retain the raw result for host inspection; group submission rejects it.
-                            return completed_report
-                        self.checkpoint_store.save(key, completed_report)
-                    return completed_report
+                    if usage:
+                        for name in ("input_tokens", "output_tokens"):
+                            if getattr(observation, name) is None:
+                                setattr(observation, name, getattr(usage, name))
+                    if report.profile != profile:
+                        failure = HostProfileFailure(profile, "wrong_profile")
+                    else:
+                        outcome = "completed"
                 except (TimeoutError, RetryableProfileError) as exc:
+                    outcome = "timeout" if isinstance(exc, TimeoutError) else "retryable_error"
                     if attempt > self.policy.max_retries:
-                        reason = (
-                            "profile_timeout"
-                            if isinstance(exc, TimeoutError)
-                            else "retry_exhausted"
+                        failure = HostProfileFailure(
+                            profile, "profile_timeout" if outcome == "timeout" else "retry_exhausted"
                         )
-                        return HostProfileFailure(profile, reason)
+                except asyncio.CancelledError:
+                    outcome = "cancelled"
+                    raise
+                except Exception:  # noqa: BLE001 -- never retain private provider exception bodies
+                    failure = HostProfileFailure(profile, "executor_error")
+                finally:
+                    record = ProfileAttemptMetrics(
+                        **observation.model_dump(), profile=profile, attempt=attempt,
+                        outcome=outcome, started_at=attempt_started, completed_at=datetime.now(UTC),
+                        queue_seconds=queue_seconds if attempt == 1 else 0,
+                        executor_seconds=perf_counter() - clock,
+                    )
+                    attempts.append(record)
+                    ledger.append(record)
+                if failure:
+                    return failure
+                if outcome != "completed":
                     await asyncio.sleep(self.policy.retry_delay_seconds)
-                except Exception:  # noqa: BLE001 -- isolate arbitrary injected executor failures
-                    # Provider exception bodies may contain credentials or raw prompts.
-                    return HostProfileFailure(profile, "executor_error")
+                    continue
+                def total(name):
+                    values = [getattr(record, name) for record in attempts]
+                    return sum(values) if all(value is not None for value in values) else None
+                metrics = ProfileExecutionMetrics(
+                    started_at=started_at, completed_at=datetime.now(UTC),
+                    input_tokens=total("input_tokens"), output_tokens=total("output_tokens"),
+                    attempt_count=attempt, attempts=tuple(attempts),
+                )
+                completed_report = ProfileReviewReport.model_validate({
+                    **report.model_dump(), "execution_metrics": metrics.model_dump(),
+                    "review_rules_sha256": session.review_context.review_rules.digest
+                    if session.review_context.review_rules else None,
+                })
+                if self.checkpoint_store:
+                    try:
+                        self._validate_report(session.review_context, profile, completed_report)
+                    except ValueError:
+                        return completed_report
+                    self.checkpoint_store.save(key, completed_report)
+                return completed_report
         raise AssertionError("unreachable executor state")
 
     async def run_primary_review(
@@ -205,11 +229,13 @@ class HostReviewAdapter:
         unsaved: tuple[ProfileReviewReport, ...] = ()
         failures: tuple[HostProfileFailure, ...] = ()
         reused: list[ReviewAgent] = []
+        ledger: list[ProfileAttemptMetrics] = []
         tasks: list[asyncio.Task] = []
         lease_seconds = (session.expires_at - datetime.now(UTC)).total_seconds()
         interval = min(self.policy.heartbeat_interval_seconds, max(lease_seconds / 3, 0.01))
         heartbeat = asyncio.create_task(self._renew_lease(run_id, interval))
         wave: asyncio.Future | None = None
+        cancellation: asyncio.CancelledError | None = None
         try:
             async with asyncio.timeout(self.policy.run_timeout_seconds):
                 offset = 0
@@ -221,7 +247,7 @@ class HostReviewAdapter:
                         continue
                     tasks = [
                         asyncio.create_task(
-                            self._execute_profile(session, profile, executor, semaphore, reused)
+                            self._execute_profile(session, profile, executor, semaphore, reused, ledger)
                         )
                         for profile in remaining
                     ]
@@ -259,7 +285,8 @@ class HostReviewAdapter:
                     unsaved = ()
         except TimeoutError:
             failures = (HostProfileFailure(None, "run_timeout"),)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            cancellation = exc
             try:
                 self._stop_partial(run_id, session.revision)
             except OrchestrationError:
@@ -281,6 +308,8 @@ class HostReviewAdapter:
             await asyncio.gather(heartbeat, return_exceptions=True)
             if wave is not None:
                 await asyncio.gather(wave, return_exceptions=True)
+            if cancellation is not None:
+                cancellation.execution_attempts = tuple(ledger)
             if failures and not unsaved:
                 unsaved = tuple(
                     task.result()
@@ -298,6 +327,7 @@ class HostReviewAdapter:
             started_at,
             datetime.now(UTC),
             tuple(p for p in session.review_profiles if p in reused),
+            tuple(ledger),
         )
 
     @staticmethod
@@ -315,6 +345,7 @@ class HostReviewAdapter:
         if report.review_rules_sha256 != expected:
             raise ValueError("profile report rules digest mismatch")
         validate_registered_locations(context, report.finding_candidates)
+        validate_context_selection(context, report)
 
     def _submit_transition(self, request: AdvanceQaOrchestrationRequest) -> QaOrchestrationSession:
         for attempt in range(self.policy.max_retries + 1):

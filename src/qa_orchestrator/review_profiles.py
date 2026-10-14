@@ -17,6 +17,7 @@ COMMON_CONSTRAINTS = (
     "Use only the evidence gathered by the host agent.",
     "Cite stable Evidence Packet references for every finding candidate.",
     "For code findings, include source locations; state the affected area and concrete impact when evidence supports them.",
+    "For each new defect candidate, provide failure_condition and flip_condition: the exact precondition and source/contract evidence that would refute the claim. If the counterevidence is unavailable, retain that verification gap; do not invent a check or a verdict.",
     "Keep possible defects separate from coverage gaps; leave confirmation and final decisions to the host.",
     "Do not decide severity, priority, root cause, release readiness, or merge readiness.",
     "Do not perform external writes.",

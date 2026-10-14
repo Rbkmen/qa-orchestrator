@@ -37,6 +37,77 @@ def report(profile):
     return ProfileReviewReport(profile=profile, scope="Pinned source inspected.")
 
 
+async def test_attempt_ledger_preserves_failed_usage_and_sums_known_retries(host_session):
+    service, run_id = host_session(profile="python_reviewer")
+
+    async def execute(job):
+        job.observation.input_tokens = 10 * job.attempt
+        job.observation.output_tokens = 2 * job.attempt
+        if job.attempt == 1:
+            raise RetryableProfileError("secret")
+        return report(job.profile)
+
+    result = await HostReviewAdapter(
+        service, HostExecutionPolicy(retry_delay_seconds=0)
+    ).run_primary_review(run_id, execute, lambda _: DeepReviewSignals())
+    assert [a.outcome for a in result.execution_attempts] == ["retryable_error", "completed"]
+    metrics = result.session.profile_reports[0].execution_metrics
+    assert metrics.input_tokens == 30
+    assert metrics.output_tokens == 6
+    assert metrics.attempts == result.execution_attempts
+    assert "secret" not in str(result.execution_attempts)
+
+
+async def test_cancelled_attempt_keeps_observed_usage_in_partial_result(host_session):
+    service, run_id = host_session(profile="python_reviewer")
+
+    async def execute(job):
+        job.observation.input_tokens = 17
+        await asyncio.Event().wait()
+
+    result = await HostReviewAdapter(
+        service, HostExecutionPolicy(run_timeout_seconds=0.02)
+    ).run_primary_review(run_id, execute, lambda _: DeepReviewSignals())
+    assert result.session.status == "partial"
+    assert result.execution_attempts[0].outcome == "cancelled"
+    assert result.execution_attempts[0].input_tokens == 17
+    assert result.execution_attempts[0].output_tokens is None
+
+
+async def test_attempt_ledger_reports_semaphore_wait(host_session):
+    service, run_id = host_session(bundle="python_backend")
+
+    async def execute(job):
+        await asyncio.sleep(0.01)
+        return report(job.profile)
+
+    result = await HostReviewAdapter(
+        service, HostExecutionPolicy(max_concurrency=1)
+    ).run_primary_review(run_id, execute, lambda _: DeepReviewSignals())
+    assert len(result.execution_attempts) == 3
+    assert max(a.queue_seconds for a in result.execution_attempts) >= 0.01
+    assert all(a.executor_seconds >= 0.01 for a in result.execution_attempts)
+
+
+async def test_caller_cancellation_exposes_ledger_on_cancelled_error(host_session):
+    service, run_id = host_session(profile="python_reviewer")
+    entered = asyncio.Event()
+
+    async def execute(job):
+        job.observation.input_tokens = 9
+        entered.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(HostReviewAdapter(service).run_primary_review(
+        run_id, execute, lambda _: DeepReviewSignals()))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await task
+    assert caught.value.execution_attempts[0].input_tokens == 9
+    assert caught.value.execution_attempts[0].outcome == "cancelled"
+
+
 async def test_successful_profile_is_checkpointed_before_its_wave_finishes(host_session, tmp_path):
     from qa_orchestrator.checkpoints import ProfileCheckpointStore
 

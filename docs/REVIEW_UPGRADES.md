@@ -134,6 +134,11 @@ host-default mode requires an explicit CLI model rather than guessing a provider
 default. `identity` identifies the implementation/overrides; append the installed
 CLI version and your instruction version before enabling checkpoints.
 
+The output schema requires an empty `finding_candidates` array for
+`pr_test_analyzer` and `code_explorer`, matching server-side role validation.
+Other profiles retain their existing finding limit. Executor identity v5
+invalidates checkpoints produced under the previous generation schema.
+
 Each call checks the packet hash and 2 MB input limit, starts a fresh temporary
 workspace without the target checkout or inherited MCP configuration, passes
 route/rules/context and previous reports, validates profile/evidence/locations,
@@ -154,3 +159,110 @@ Host risk assessment and final candidate dispositions still require source revie
 See [Host Adapter](HOST_ADAPTER.md), [Evidence Registry](EVIDENCE_REGISTRY.md) and
 [Benchmark](BENCHMARK.md). Official CLI reference:
 [Codex exec](https://learn.chatgpt.com/docs/developer-commands#codex-exec).
+
+## 6. Per-attempt observations
+
+`HostExecutionResult.execution_attempts` contains only fresh executor calls, in
+completion order. Each record identifies its profile, attempt, outcome, UTC
+interval, semaphore wait and executor duration. Report totals sum a token counter
+only when that counter is known for every attempt. Unknown is never zero. Failed
+and cancelled attempts remain visible; reused checkpoints have no fresh attempt
+record and remain separately identified by `reused_profiles`.
+
+Injected executors can populate `job.observation.input_tokens`, `output_tokens`,
+`cached_input_tokens` and phase durations before returning or raising. The Codex
+executor records preparation, its CLI/process interval (`model_seconds`, not
+provider-only inference latency), and validation, including failed phases. Usage
+comes from reported terminal CLI events, not estimates. A missing counter in any
+turn keeps the aggregate counter unknown. No money estimate, price table, raw
+exception, prompt or event body is retained.
+
+Whole-run timeout returns the attempt ledger with a partial result. Explicit
+caller cancellation still raises `asyncio.CancelledError`; after draining workers,
+its `execution_attempts` attribute exposes observations already available. A
+profile cancelled while waiting for a semaphore made no executor call and has no
+attempt record. Timing/usage from injected callbacks remains host-reported evidence.
+
+## 7. Exact context packing
+
+After building the complete evidence registry, create a packet and a newly bound
+context **before** starting the review session:
+
+```sh
+qa-orch evidence pack --context registered-context.json --repository /path/to/repo \
+  --plan host-context-plan.json --output context-packet.json \
+  --bound-context packed-context.json
+```
+
+The optional, explicitly host-supplied plan contains `optional_profiles`,
+`priorities` and `external_content`. Example:
+
+```json
+{"optional_profiles":{"E7":["pr_test_analyzer"]},
+ "priorities":{"E7":20},"external_content":{"E3":"Exact requirement text"}}
+```
+
+All refs are mandatory by default. A complete pack must contain a diff ref and
+registered source for every declared changed path (base source can represent a
+deleted file). Changed source, diff and supplied requirements cannot be optional.
+The host identifies necessary callers/contracts and leaves them mandatory; this
+tool does not infer completeness or replace CodeGraph. External content must be
+supplied explicitly and match its registered hash. Binary/non-UTF-8 material
+requires a separate host evidence flow, not lossy decoding.
+
+`ContextPacket` carries original source text, registered Git coordinates and
+SHA-256. It never strips comments/docstrings, summarizes or cuts a fragment.
+Selection is deterministic: mandatory first, then host priority and ref order.
+Identical metadata/content can share one block while retaining every ref alias.
+Optional fragments outside the profile or over budget are explicitly accounted
+for. Mandatory overflow prevents process launch and requires the host to split
+the review; it never becomes an empty successful review.
+
+The CLI executor recognizes this format automatically; legacy text packets remain
+supported. `max_context_bytes` (default 1,500,000) limits rendered fragment bytes,
+including headers; this is a byte budget, not a tokenizer or inference budget.
+The serialized input file remains limited to 2 MB. Changing the selection budget
+changes executor identity. A host-owned `context_selection` binds the original
+packet hash, selected text hash, included/omitted refs and byte counts. The server
+rejects reports citing omitted refs or claiming to omit mandatory refs. These
+assertions do not prove the model read or understood the bytes.
+
+For repeated packet construction, pass the same `PinnedSourceCache` to
+`build_context_packet`. It caches immutable Git blobs in memory, bounded by bytes
+and 128 entries, and validates each extracted fragment against the registry.
+Dirty worktree files are never read. There is no persistent learned review memory.
+
+## 8. Candidate counterevidence
+
+New review routes request paired `failure_condition` and `flip_condition` on
+defect candidates. They describe the actual failure preconditions and concrete
+evidence that would refute the claim. Both may be absent on legacy candidates;
+half-specified or blank conditions are rejected.
+
+For a candidate with conditions, the host must attach a `refutation` check to its
+final candidate decision. Construct one only after inspecting the evidence:
+
+```python
+from qa_orchestrator.refutation import make_refutation_check
+
+check = make_refutation_check(
+    context, candidate, status="not_refuted",
+    rationale="No deduplication guard precedes the side effect on the inspected path.",
+    evidence_refs=("E1",),
+)
+```
+
+Statuses are `refuted`, `not_refuted`, or `unverified`. They are host assessments,
+not proof of an independent agent run. Confirmation/duplicate linkage requires
+`not_refuted`; that status alone never confirms a defect. The existing source,
+impact, lineage and decision checks still apply. If evidence is unavailable,
+retain `unverified` and explain the gap. No obligatory second model pass is added.
+
+The check hashes the complete review context and exact profile-local candidate.
+Changed refs, revisions, rules, packet, coordinates or condition text invalidate
+it. Finalization rejects missing, stale and unknown-ref checks. The helper does
+not perform the counterevidence inspection, vote or automatically change verdicts.
+
+These mechanisms were implemented independently; no code from the researched
+third-party orchestrators was copied. Comparative latency/quality measurements
+are deferred; unit tests and protocol checks are not evidence of faster reviews.

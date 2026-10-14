@@ -303,13 +303,13 @@ def test_review_instructions_reuse_evidence_and_escalate_only_actionable_gaps():
     assert "carry the named unresolved question" in policy
 
 
-def test_readme_leads_with_pinned_uvx_and_a_short_ruby_example():
+def test_readme_documents_pinned_installation_and_review_layers():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     quick_start = readme.split("## Quick start", 1)[1].split("\n## ", 1)[0]
 
     assert "codex mcp add qa-orchestrator -- uvx" in quick_start
     assert re.search(
-        r"git\+https://github\.com/Rbkmen/qa-orchestrator\.git@[0-9a-f]{40}",
+        r"git\+https://github\.com/Rbkmen/qa-orchestrator\.git@<commit-sha>",
         quick_start,
     )
     assert "qa-orchestrator-mcp" in quick_start
@@ -319,8 +319,18 @@ def test_readme_leads_with_pinned_uvx_and_a_short_ruby_example():
     assert "advance_qa_orchestration" in readme
     assert "[bundle and profile catalog](docs/ORCHESTRATION_POLICY.md#fixed-bundles-and-profile-names)" in readme
     assert "[complete MCP tool contract](docs/ORCHESTRATION_POLICY.md#mcp-tools)" in readme
-    assert "## MCP interface" not in readme
-    assert len(readme.splitlines()) <= 120
+    for heading in (
+        "Architecture and responsibilities", "Review workflow", "Profiles and bundles",
+        "Evidence and context", "Findings and final decisions", "Host execution",
+        "Performance and evaluation", "MCP tools", "CLI tools", "Configuration",
+        "Storage and trust boundaries",
+    ):
+        assert f"## {heading}" in readme
+
+    from qa_orchestrator.contracts import ReviewAgent, ReviewBundle
+
+    for identifier in (*ReviewAgent, *ReviewBundle):
+        assert f"`{identifier.value}`" in readme
 
 
 def test_host_default_is_documented_as_the_no_setup_first_run():

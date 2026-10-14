@@ -119,6 +119,28 @@ def validate_registered_locations(
                 )
 
 
+def validate_context_selection(context: ReviewContext, report: ProfileReviewReport) -> None:
+    selection = report.context_selection
+    if selection is None:
+        return
+    if selection.source_packet_sha256 != context.evidence_packet_sha256:
+        raise ValueError("context selection packet hash mismatch")
+    if set(selection.included_refs) | set(selection.omitted_refs) != set(context.evidence_refs):
+        raise ValueError("context selection must account for all bound refs")
+    mandatory = {
+        entry.evidence_ref for entry in context.evidence_registry
+        if entry.kind in {"diff", "requirement"}
+        or entry.kind == "source" and entry.path in context.changed_files
+    }
+    if mandatory - set(selection.included_refs):
+        raise ValueError("context selection omits mandatory evidence")
+    cited = {ref for f in report.finding_candidates for ref in f.evidence_refs}
+    cited.update(ref for note in (*report.coverage_gaps, *report.unverified) for ref in note.evidence_refs)
+    cited.update(item.evidence_ref for item in report.evidence_map)
+    if cited - set(selection.included_refs):
+        raise ValueError("profile report cites evidence omitted from its context")
+
+
 def verify_evidence(
     context: ReviewContext,
     repository: Path,
@@ -175,7 +197,10 @@ def evidence_main(argv: list[str]) -> int:
     chunks.add_argument("--path", required=True)
     chunks.add_argument("--max-bytes", default=16000, type=int)
     chunks.add_argument("--output", type=Path)
-    for command in (build, verify):
+    pack = subparsers.add_parser("pack", help="Build exact profile-selectable context from pinned refs")
+    pack.add_argument("--plan", type=Path, help="Explicit host plan: optional_profiles, priorities, external_content")
+    pack.add_argument("--bound-context", required=True, type=Path)
+    for command in (build, verify, pack):
         command.add_argument("--context", required=True, type=Path)
         command.add_argument("--repository", required=True, type=Path)
         command.add_argument("--output", type=Path)
@@ -212,6 +237,22 @@ def evidence_main(argv: list[str]) -> int:
             print(output, end="")
         return 0
     context = ReviewContext.model_validate_json(args.context.read_bytes())
+    if args.command == "pack":
+        from qa_orchestrator.context_pack import build_context_packet
+
+        if args.output is None or args.output.resolve() == args.bound_context.resolve():
+            raise ValueError("pack requires distinct output and bound-context paths")
+        plan = json.loads(args.plan.read_text()) if args.plan else {}
+        packet = build_context_packet(context, args.repository, **plan)
+        data = packet.model_dump_json().encode("utf-8")
+        if len(data) > 2_000_000:
+            raise ValueError("context packet exceeds executor input size")
+        bound = ReviewContext.model_validate({
+            **context.model_dump(), "evidence_packet_sha256": hashlib.sha256(data).hexdigest()
+        })
+        args.output.write_bytes(data)
+        args.bound_context.write_text(bound.model_dump_json(), encoding="utf-8")
+        return 0
     if args.command == "build":
         payload = register_evidence(
             context, json.loads(args.records.read_text()), args.repository
