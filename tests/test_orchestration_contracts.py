@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -202,6 +203,75 @@ def test_profile_and_final_reports_have_serialized_size_limits():
             profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
             unverified=large_notes,
         )
+
+
+@pytest.mark.parametrize("report_type", [ProfileReviewReport, FinalReviewReport])
+def test_legacy_reports_near_the_old_size_limit_round_trip(report_type):
+    is_final = report_type is FinalReviewReport
+    candidates = []
+    for index in range(100):
+        candidate = {
+            "candidate_id": f"F-{index:02d}",
+            "title": "T" * 128,
+            "description": "D",
+            "confidence": "high",
+            "verification_gap": "V" * 128,
+            "evidence_refs": ["E1"],
+            "source_locations": [],
+            "affected_area": None,
+            "impact": None,
+            "failure_condition": None,
+            "flip_condition": None,
+        }
+        if is_final:
+            candidate.update(
+                severity=None,
+                source_profiles=[ReviewAgent.CODE_REVIEWER.value],
+                source_candidates=[],
+            )
+        candidates.append(candidate)
+
+    if is_final:
+        payload = {
+            "summary": "S",
+            "review_rules_sha256": None,
+            "profiles_reviewed": [ReviewAgent.CODE_REVIEWER.value],
+            "finding_candidates": candidates,
+            "coverage_gaps": [],
+            "unverified": [],
+            "candidate_decisions": [],
+        }
+    else:
+        payload = {
+            "profile": ReviewAgent.CODE_REVIEWER.value,
+            "context_selection": None,
+            "review_rules_sha256": None,
+            "scope": "S",
+            "finding_candidates": candidates,
+            "coverage_gaps": [],
+            "unverified": [],
+            "evidence_map": [],
+            "execution_metrics": None,
+        }
+
+    base_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    old_base_size = len(base_json.encode("utf-8"))
+    expanded_base_size = len(
+        report_type.model_validate_json(base_json).model_dump_json().encode("utf-8")
+    )
+    description_size = 1 + (64 * 1024 - old_base_size - 1) // len(candidates)
+    for candidate in candidates:
+        candidate["description"] = "D" * description_size
+
+    legacy_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    legacy_size = len(legacy_json.encode("utf-8"))
+    report = report_type.model_validate_json(legacy_json)
+    current_json = report.model_dump_json()
+    current_size = len(current_json.encode("utf-8"))
+
+    assert legacy_size <= 64 * 1024 < current_size <= 72 * 1024
+    assert report_type.model_validate_json(current_json) == report
+    assert expanded_base_size > old_base_size
 
 
 def test_session_has_an_aggregate_review_artifact_size_limit(bound_review_context):

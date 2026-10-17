@@ -7,6 +7,7 @@ from qa_orchestrator.benchmark import (
     BenchmarkDataset,
     BenchmarkResults,
     benchmark_main,
+    compare_speed,
     import_reviewbench,
     score_benchmark,
 )
@@ -271,3 +272,100 @@ async def test_repetition_runner_executes_all_requested_attempts(benchmark_input
     runs = await run_repetitions(BenchmarkDataset.model_validate(dataset), execute, repetitions=3)
     assert seen == [("case-1", 1), ("case-1", 2), ("case-1", 3)]
     assert len(runs.runs) == 3
+
+
+def test_speed_comparison_requires_same_model_packet_and_complete_repetitions(benchmark_inputs):
+    dataset_data, result_data = benchmark_inputs
+    baseline_times = (500, 600, 700)
+    candidate_times = (400, 500, 600)
+    runs = []
+    for configuration, times in (
+        ("baseline", baseline_times),
+        ("candidate", candidate_times),
+    ):
+        for attempt, elapsed_ms in enumerate(times, 1):
+            run = deepcopy(result_data["runs"][0])
+            run.update(
+                run_id=f"{configuration}-{attempt}",
+                configuration_id=configuration,
+                elapsed_ms=elapsed_ms,
+            )
+            runs.append(run)
+    dataset = BenchmarkDataset.model_validate(dataset_data)
+    results = BenchmarkResults.model_validate({"runs": runs})
+    comparison = compare_speed(
+        dataset,
+        results,
+        baseline_configuration="baseline",
+        candidate_configuration="candidate",
+        repetitions=3,
+    )
+    assert comparison["cases"][0]["baseline_median_ms"] == 600
+    assert comparison["cases"][0]["candidate_median_ms"] == 500
+    assert comparison["aggregate"]["median_speedup_ratio"] == 1.2
+    assert comparison["quality_by_configuration"]["baseline"]["precision"] == 1 / 3
+
+    changed = deepcopy(runs)
+    for run in changed[-3:]:
+        run["model"] = "other-model"
+    with pytest.raises(ValueError, match="same model"):
+        compare_speed(
+            dataset,
+            BenchmarkResults.model_validate({"runs": changed}),
+            baseline_configuration="baseline",
+            candidate_configuration="candidate",
+            repetitions=3,
+        )
+
+    changed_packets = deepcopy(runs)
+    for run in changed_packets[-3:]:
+        run["evidence_packet_sha256"] = "f" * 64
+    with pytest.raises(ValueError, match="same Evidence Packet across"):
+        compare_speed(
+            dataset,
+            BenchmarkResults.model_validate({"runs": changed_packets}),
+            baseline_configuration="baseline",
+            candidate_configuration="candidate",
+            repetitions=3,
+        )
+
+
+def test_speed_comparison_cli_writes_artifact(tmp_path, benchmark_inputs):
+    import json
+
+    dataset_data, result_data = benchmark_inputs
+    runs = []
+    for configuration, times in (("baseline", (100, 110)), ("candidate", (80, 90))):
+        for attempt, elapsed_ms in enumerate(times, 1):
+            run = deepcopy(result_data["runs"][0])
+            run.update(
+                run_id=f"{configuration}-{attempt}",
+                configuration_id=configuration,
+                elapsed_ms=elapsed_ms,
+            )
+            runs.append(run)
+    dataset_path = tmp_path / "dataset.json"
+    results_path = tmp_path / "results.json"
+    output_path = tmp_path / "comparison.json"
+    dataset_path.write_text(json.dumps(dataset_data), encoding="utf-8")
+    results_path.write_text(json.dumps({"runs": runs}), encoding="utf-8")
+
+    assert benchmark_main(
+        [
+            "compare",
+            "--dataset",
+            str(dataset_path),
+            "--results",
+            str(results_path),
+            "--baseline",
+            "baseline",
+            "--candidate",
+            "candidate",
+            "--repetitions",
+            "2",
+            "--output",
+            str(output_path),
+        ]
+    ) == 0
+    comparison = json.loads(output_path.read_text(encoding="utf-8"))
+    assert comparison["aggregate"]["median_improvement_percent"] == pytest.approx(19.0476190476)

@@ -51,8 +51,9 @@ type EvidenceRefId = Annotated[
 ]
 type ChangedFilePath = Annotated[str, Field(min_length=1, max_length=1024)]
 
-_MAX_PROFILE_REVIEW_REPORT_BYTES = 64 * 1024
-_MAX_FINAL_REVIEW_REPORT_BYTES = 64 * 1024
+# Added defaulted fields expand legacy persisted reports when they are loaded.
+_MAX_PROFILE_REVIEW_REPORT_BYTES = 72 * 1024
+_MAX_FINAL_REVIEW_REPORT_BYTES = 72 * 1024
 
 
 class EvidenceRecord(BaseModel):
@@ -261,6 +262,10 @@ class ReviewFindingCandidate(BaseModel):
     title: str = Field(min_length=1, max_length=256)
     description: str = Field(min_length=1, max_length=5000)
     confidence: Literal["high", "medium", "low"]
+    change_origin: Literal["introduced", "pre_existing", "unknown"] = Field(
+        default="unknown",
+        description="Whether the behavior is introduced by the reviewed change, pre-existing, or unknown.",
+    )
     verification_gap: str = Field(min_length=1, max_length=2000)
     evidence_refs: tuple[EvidenceRefId, ...] = Field(min_length=1, max_length=32)
     source_locations: tuple[ReviewFindingLocation, ...] = Field(
@@ -314,8 +319,14 @@ class ReviewFindingSource(BaseModel):
 
 
 class FinalReviewFinding(ReviewFindingCandidate):
-    severity: Literal["high", "medium", "low"] | None = Field(
+    severity: Literal["blocker", "high", "medium", "low"] | None = Field(
         default=None, description="Impact severity selected by the host for a confirmed finding."
+    )
+    next_step: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=2000,
+        description="Targeted correction or verification step, when selected by the host.",
     )
     source_profiles: tuple[ReviewAgent, ...] = Field(min_length=1)
     source_candidates: tuple[ReviewFindingSource, ...] = Field(

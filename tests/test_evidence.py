@@ -1,4 +1,5 @@
 import hashlib
+import json
 import subprocess
 
 import pytest
@@ -6,6 +7,7 @@ from pydantic import ValidationError
 
 from qa_orchestrator.contracts import EvidenceRecord, ReviewContext, ReviewFindingCandidate
 from qa_orchestrator.evidence import (
+    discover_neighbor_evidence,
     evidence_main,
     register_evidence,
     validate_registered_locations,
@@ -98,6 +100,15 @@ def test_content_packet_and_diff_mismatches_are_rejected(pinned_evidence):
     wrong_diff = ReviewContext.model_validate({**context.model_dump(), "diff_sha256": "f" * 64})
     with pytest.raises(ValueError, match="bound diff hash"):
         register_evidence(wrong_diff, definitions, repository)
+
+
+def test_changed_file_list_must_match_the_pinned_diff(pinned_evidence):
+    repository, _, context, definitions = pinned_evidence
+    wrong_paths = ReviewContext.model_validate(
+        {**context.model_dump(), "changed_files": ("src/other.py",)}
+    )
+    with pytest.raises(ValueError, match="changed_files do not match"):
+        register_evidence(wrong_paths, definitions, repository)
 
 
 def test_claimed_lines_must_use_a_supporting_head_ref_and_stay_in_bounds(pinned_evidence):
@@ -226,3 +237,80 @@ def test_evidence_cli_builds_and_verifies_a_registry(tmp_path, pinned_evidence):
         == 0
     )
     assert json.loads(output.read_text())["verified_refs"] == ["S1", "D1"]
+
+
+def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args])
+
+    git("init", "--quiet")
+    files = {
+        "src/service.py": "def calculate(value):\n    return value + 1\n",
+        "src/caller.py": "from src.service import calculate\nresult = calculate(2)\n",
+        "contracts/service_contract.py": "from src.service import calculate\n\nassert calculate(1) == 2\n",
+        "tests/test_service.py": "from src.service import calculate\n\ndef test_calculate():\n    assert calculate(1) == 2\n",
+    }
+    for path, content in files.items():
+        target = repository / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").decode().strip()
+
+    changed = repository / "src/service.py"
+    changed.write_text("def calculate(value):\n    return value + 2\n", encoding="utf-8")
+    git("add", "src/service.py")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "head")
+    head = git("rev-parse", "HEAD").decode().strip()
+    diff = git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head, "--")
+    context = ReviewContext(
+        repository="github.com/example/repo",
+        base_sha=base,
+        head_sha=head,
+        diff_sha256=hashlib.sha256(diff).hexdigest(),
+        evidence_packet_sha256=hashlib.sha256(b"packet").hexdigest(),
+        changed_files=("src/service.py",),
+        evidence_refs=("S1", "D1"),
+    )
+
+    # Dirty worktree edits must not affect candidate hashes or line matches.
+    caller = repository / "src/caller.py"
+    caller.write_text("unrelated dirty worktree contents\n", encoding="utf-8")
+    manifest = discover_neighbor_evidence(context, repository)
+    by_path = {entry["path"]: entry for entry in manifest["candidate_records"]}
+
+    assert set(by_path) == {
+        "contracts/service_contract.py",
+        "src/caller.py",
+        "tests/test_service.py",
+    }
+    assert "contract" in by_path["contracts/service_contract.py"]["categories"]
+    assert "test" in by_path["tests/test_service.py"]["categories"]
+    caller_entry = by_path["src/caller.py"]
+    assert caller_entry["matched_symbols"] == [
+        {"symbol": "calculate", "lines": [1, 2], "more_lines": False}
+    ]
+    pinned_caller = git("show", f"{head}:src/caller.py")
+    assert caller_entry["sha256"] == hashlib.sha256(pinned_caller).hexdigest()
+    assert caller_entry["record"]["revision"] == head
+    assert manifest["exhaustive"] is False
+
+    context_path = tmp_path / "context.json"
+    output_path = tmp_path / "neighbors.json"
+    context_path.write_text(context.model_dump_json(), encoding="utf-8")
+    assert evidence_main(
+        [
+            "discover",
+            "--context",
+            str(context_path),
+            "--repository",
+            str(repository),
+            "--output",
+            str(output_path),
+        ]
+    ) == 0
+    assert len(json.loads(output_path.read_text(encoding="utf-8"))["candidate_records"]) == 3

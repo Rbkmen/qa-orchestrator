@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from qa_orchestrator import contracts, review_profiles
@@ -69,6 +71,38 @@ def test_every_review_profile_returns_read_only_route(tmp_path):
         assert route.host_owns_decisions is True
         assert route.required_sections == expected_sections[profile]
         assert route.focus
+
+
+def test_every_profile_and_canonical_guidance_require_scenario_led_review(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    required_route_rules = (
+        "material requirements and MR claims as behavior scenarios",
+        "real invocation/update trigger",
+        "introduced, pre-existing, or of unknown origin",
+    )
+
+    for profile in ReviewAgent:
+        route = service.prepare_review_route(profile)
+        constraints = "\n".join(route.constraints)
+        for rule in required_route_rules:
+            assert rule in constraints
+
+    canonical_rules = " ".join(
+        (
+            Path(__file__).parents[1]
+            / "client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md"
+        )
+        .read_text(encoding="utf-8")
+        .split()
+    )
+    for rule in (
+        "start from the authoritative task/acceptance criteria",
+        "use the profile's `Scope` to name the expected observable result",
+        "real invocation or update trigger",
+        "distinguish source, test, and runtime evidence",
+        "supported candidate, refuted with counterevidence, or unverified",
+    ):
+        assert rule in canonical_rules
 
 
 def test_evidence_investigator_and_code_reviewer_have_distinct_outputs(tmp_path):

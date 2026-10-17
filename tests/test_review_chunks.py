@@ -1,5 +1,6 @@
 import hashlib
 
+import pytest
 from test_evidence import (
     pinned_evidence as pinned_evidence,  # noqa: PLC0414 -- pytest fixture export
 )
@@ -32,6 +33,13 @@ def test_syntax_errors_fall_back_visibly_without_losing_bytes():
     assert all(c.strategy == "lines_syntax_error" for c in chunks)
 
 
+def test_binary_source_has_an_explicit_chunking_error():
+    from qa_orchestrator.review_chunks import chunk_source
+
+    with pytest.raises(ValueError, match="binary or non-UTF-8 source cannot be chunked"):
+        chunk_source(b"\x89PNG\r\n\x1a\n\x00\xff", path="assets/logo.png")
+
+
 def test_same_line_statements_are_not_duplicated():
     from qa_orchestrator.review_chunks import chunk_source
 
@@ -49,6 +57,21 @@ def test_cr_only_source_uses_visible_fallback_and_git_line_coordinates():
     assert chunks[0].text.encode() == source
     assert chunks[0].start_line == chunks[0].end_line == 1
     assert chunks[0].strategy == "lines_non_lf_python"
+
+
+def test_import_context_is_bounded_across_all_chunks():
+    from qa_orchestrator.review_chunks import (
+        MAX_TOTAL_IMPORT_CONTEXT_BYTES,
+        chunk_source,
+    )
+
+    source = b"".join(f"import module_{i:05d}\n".encode() for i in range(1600))
+    chunks = chunk_source(source, path="api.py", max_bytes=32)
+    assert len(chunks) > 1
+    assert sum(len(chunk.import_context.encode()) for chunk in chunks) <= (
+        MAX_TOTAL_IMPORT_CONTEXT_BYTES
+    )
+    assert all(chunk.import_context_truncated for chunk in chunks)
 
 
 def test_chunk_cli_reads_pinned_git_blobs(tmp_path, pinned_evidence):

@@ -354,6 +354,126 @@ def score_reliability(
     }
 
 
+def compare_speed(
+    dataset: BenchmarkDataset,
+    results: BenchmarkResults,
+    *,
+    baseline_configuration: str,
+    candidate_configuration: str,
+    repetitions: int,
+) -> dict:
+    """Compare two host configurations on identical pinned inputs and model settings."""
+    if not 2 <= repetitions <= 20:
+        raise ValueError("repetitions must be between 2 and 20")
+    if baseline_configuration == candidate_configuration:
+        raise ValueError("baseline and candidate configurations must differ")
+
+    score_benchmark(dataset, results)
+    selected = tuple(
+        run
+        for run in results.runs
+        if run.configuration_id in {baseline_configuration, candidate_configuration}
+    )
+    by_configuration: dict[str, dict[str, list[BenchmarkRun]]] = {
+        baseline_configuration: defaultdict(list),
+        candidate_configuration: defaultdict(list),
+    }
+    for run in selected:
+        by_configuration[run.configuration_id][run.case_id].append(run)
+    if not all(by_configuration.values()):
+        raise ValueError("both benchmark configurations must have results")
+    expected_cases = {case.case_id for case in dataset.cases}
+    for cases in by_configuration.values():
+        if set(cases) != expected_cases:
+            raise ValueError("speed comparison requires complete coverage of the same dataset cases")
+        if any(len(runs) != repetitions for runs in cases.values()):
+            raise ValueError("each configuration and case must have exactly the declared repetitions")
+
+    def run_identity(run: BenchmarkRun) -> tuple:
+        return (
+            run.model,
+            run.reasoning,
+            run.checklist_sha256,
+            run.host_instructions_sha256,
+            run.review_rules_sha256,
+            run.adjudicator,
+        )
+
+    baseline_runs = [run for cases in by_configuration[baseline_configuration].values() for run in cases]
+    candidate_runs = [run for cases in by_configuration[candidate_configuration].values() for run in cases]
+    if len({run_identity(run) for run in baseline_runs + candidate_runs}) != 1:
+        raise ValueError(
+            "speed comparison requires the same model, reasoning, review instructions and adjudicator"
+        )
+
+    per_case = []
+    for case_id in sorted(expected_cases):
+        baseline = by_configuration[baseline_configuration][case_id]
+        candidate = by_configuration[candidate_configuration][case_id]
+        baseline_packets = {run.evidence_packet_sha256 for run in baseline}
+        candidate_packets = {run.evidence_packet_sha256 for run in candidate}
+        if len(baseline_packets) != 1 or len(candidate_packets) != 1:
+            raise ValueError("repetitions must use the same Evidence Packet within each configuration")
+        if baseline_packets != candidate_packets:
+            raise ValueError("speed comparison requires the same Evidence Packet across configurations")
+        baseline_median = statistics.median(run.elapsed_ms for run in baseline)
+        candidate_median = statistics.median(run.elapsed_ms for run in candidate)
+        per_case.append(
+            {
+                "case_id": case_id,
+                "repetitions": repetitions,
+                "evidence_packet_sha256": next(iter(baseline_packets)),
+                "baseline_median_ms": baseline_median,
+                "candidate_median_ms": candidate_median,
+                "speedup_ratio": (
+                    baseline_median / candidate_median if candidate_median > 0 else None
+                ),
+                "improvement_percent": (
+                    (baseline_median - candidate_median) / baseline_median * 100
+                    if baseline_median > 0
+                    else None
+                ),
+            }
+        )
+
+    score = score_benchmark(dataset, BenchmarkResults(runs=tuple(baseline_runs + candidate_runs)))
+    quality = {
+        configuration: {
+            key: score["configurations"][configuration][key]
+            for key in ("precision", "recall", "precision_is_lower_bound", "coverage_complete")
+        }
+        for configuration in (baseline_configuration, candidate_configuration)
+    }
+    ratios = [case["speedup_ratio"] for case in per_case if case["speedup_ratio"] is not None]
+    improvements = [
+        case["improvement_percent"]
+        for case in per_case
+        if case["improvement_percent"] is not None
+    ]
+    return {
+        "schema_version": 1,
+        "comparison": "same_model_same_pinned_input_host_elapsed_time",
+        "baseline_configuration": baseline_configuration,
+        "candidate_configuration": candidate_configuration,
+        "model": baseline_runs[0].model,
+        "reasoning": baseline_runs[0].reasoning,
+        "repetitions_per_case": repetitions,
+        "cases": per_case,
+        "aggregate": {
+            "median_speedup_ratio": statistics.median(ratios) if ratios else None,
+            "median_improvement_percent": statistics.median(improvements) if improvements else None,
+            "baseline_median_ms": statistics.median(
+                case["baseline_median_ms"] for case in per_case
+            ),
+            "candidate_median_ms": statistics.median(
+                case["candidate_median_ms"] for case in per_case
+            ),
+        },
+        "quality_by_configuration": quality,
+        "timing_scope": "host-reported elapsed_ms; callback must measure the same end-to-end scope",
+    }
+
+
 async def run_repetitions(
     dataset: BenchmarkDataset,
     execute: Callable[[BenchmarkCase, int], Awaitable[BenchmarkRun]],
@@ -457,6 +577,15 @@ def benchmark_main(argv: list[str]) -> int:
     reliability.add_argument("--results", required=True, type=Path)
     reliability.add_argument("--repetitions", required=True, type=int)
     reliability.add_argument("--output", type=Path)
+    compare = subparsers.add_parser(
+        "compare", help="Compare host elapsed time on identical cases, packets and model settings"
+    )
+    compare.add_argument("--dataset", required=True, type=Path)
+    compare.add_argument("--results", required=True, type=Path)
+    compare.add_argument("--baseline", required=True)
+    compare.add_argument("--candidate", required=True)
+    compare.add_argument("--repetitions", required=True, type=int)
+    compare.add_argument("--output", type=Path)
     prepare = subparsers.add_parser("import-reviewbench", help="Import one public golden case")
     prepare.add_argument("--golden", required=True, type=Path)
     prepare.add_argument("--repository", required=True, type=Path)
@@ -467,11 +596,18 @@ def benchmark_main(argv: list[str]) -> int:
     else:
         dataset = BenchmarkDataset.model_validate_json(args.dataset.read_bytes())
         results = BenchmarkResults.model_validate_json(args.results.read_bytes())
-        payload = (
-            score_reliability(dataset, results, expected_repetitions=args.repetitions)
-            if args.command == "reliability"
-            else score_benchmark(dataset, results)
-        )
+        if args.command == "reliability":
+            payload = score_reliability(dataset, results, expected_repetitions=args.repetitions)
+        elif args.command == "compare":
+            payload = compare_speed(
+                dataset,
+                results,
+                baseline_configuration=args.baseline,
+                candidate_configuration=args.candidate,
+                repetitions=args.repetitions,
+            )
+        else:
+            payload = score_benchmark(dataset, results)
     output = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if args.output:
         args.output.write_text(output, encoding="utf-8")

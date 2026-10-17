@@ -305,7 +305,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
                     "For a review-context-bound session, one structured result per completed profile, "
                     "in the same order. Every finding must cite Evidence Packet references. Optional "
                     "execution_metrics are host-reported and are not independently verified. Up to "
-                    "ten reports are accepted, with 64 KiB per report and 256 KiB combined per session. "
+                    "ten reports are accepted, with 72 KiB per report and 288 KiB combined per session. "
                     "Omit for legacy sessions without review_context."
                 )
             ),
@@ -481,7 +481,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
                     "and the original profile-local candidate IDs and evidence that support it. The report "
                     "must include one candidate_decisions entry per submitted candidate. Confirmed findings "
                     "require host severity, impact, affected area, and source locations. The report "
-                    "is limited to 64 KiB; profile plus final reports are limited to 256 KiB per session."
+                    "is limited to 72 KiB; profile plus final reports are limited to 288 KiB per session."
                 )
             ),
         ] = None,

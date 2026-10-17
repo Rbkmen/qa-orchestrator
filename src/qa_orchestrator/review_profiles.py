@@ -18,6 +18,9 @@ COMMON_CONSTRAINTS = (
     "Cite stable Evidence Packet references for every finding candidate.",
     "For code findings, include source locations; state the affected area and concrete impact when evidence supports them.",
     "For each new defect candidate, provide failure_condition and flip_condition: the exact precondition and source/contract evidence that would refute the claim. If the counterevidence is unavailable, retain that verification gap; do not invent a check or a verdict.",
+    "Review material requirements and MR claims as behavior scenarios, not only changed lines. Use Scope to name the expected observable result and evidence checked; start from the authoritative task/contract, not an assumed interpretation of the diff. Trace relevant unchanged callers or consumers only as far as needed to verify that scenario.",
+    "Within the profile's role, trace relevant input/state producer -> validation, predicates, defaults and normalization -> real invocation/update trigger -> consumers -> affected outputs and side effects. Compare relevant layers by accepted inputs and boundaries; compare initial execution with later updates and vary scenario-relevant inputs independently. State whether evidence is source, test, or runtime; helper tests alone do not establish real entry-point or integration coverage.",
+    "Resolve each concrete failure hypothesis as a supported candidate, refuted with counterevidence, or unverified with its trigger and missing check; carry material unresolved scenarios into synthesis. Compare base/head when available and state whether a relevant defect is introduced, pre-existing, or of unknown origin. Preserve relevant pre-existing defects; keep unrelated defects outside scope and preserve this profile's output boundary.",
     "Keep possible defects separate from coverage gaps; leave confirmation and final decisions to the host.",
     "Do not decide severity, priority, root cause, release readiness, or merge readiness.",
     "Do not perform external writes.",
@@ -52,7 +55,10 @@ REVIEW_PROFILES: Mapping[ReviewAgent, ReviewProfileDefinition] = MappingProxyTyp
             focus=(
                 "Inspect the changed surface for concrete failure modes and contract breaks. "
                 "Use the Evidence Map as context; add caller or dependency detail only when "
-                "needed to support a candidate, and do not repeat the map."
+                "needed to check a material scenario or support a candidate, and do not repeat the map. "
+                "Apply the shared scenario trace to every material requirement or claim. For example, "
+                "query-only navigation must update dependent metadata, just as a status-only change "
+                "must update dependent responses, caches or events."
             ),
             required_sections=("Scope", "Finding Candidates", "Coverage Gaps", "Unverified"),
             escalation_signals=(

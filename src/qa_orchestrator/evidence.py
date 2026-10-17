@@ -1,8 +1,10 @@
 """Host-local evidence construction and verification against pinned Git objects."""
 
 import argparse
+import ast
 import hashlib
 import json
+import re
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
@@ -13,6 +15,34 @@ from qa_orchestrator.contracts import (
     ProfileReviewReport,
     ReviewContext,
     ReviewFindingCandidate,
+)
+
+_DISCOVERY_MAX_SYMBOLS = 128
+_DISCOVERY_MAX_TRACKED_PATHS = 200_000
+_DISCOVERY_MAX_SOURCE_BYTES = 4_000_000
+_DISCOVERY_MAX_TOTAL_BYTES = 64_000_000
+_DISCOVERY_MAX_CANDIDATES = 200
+_IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]{2,127}$")
+_IGNORED_IDENTIFIERS = {
+    "call", "get", "init", "main", "run", "set", "test", "toString", "valueOf",
+}
+_IGNORED_PATH_TOKENS = {"app", "lib", "pkg", "packages", "spec", "specs", "src", "test", "tests"}
+_DECLARATION_PATTERNS = (
+    re.compile(
+        r"(?:^|\n)\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?"
+        r"(?:function|class|interface|type|enum|const|let|var)\s+([A-Za-z_$][\w$]*)",
+        re.MULTILINE,
+    ),
+    re.compile(r"(?:^|\n)\s*(?:async\s+)?def\s+([A-Za-z_]\w*)", re.MULTILINE),
+    re.compile(r"(?:^|\n)\s*(?:public\s+)?(?:func|type)\s+([A-Za-z_]\w*)", re.MULTILINE),
+    re.compile(r"(?:^|\n)\s*(?:def|class|module)\s+([A-Za-z_]\w*)", re.MULTILINE),
+)
+_TEST_PATH = re.compile(
+    r"(^|/)(tests?|specs?)(/|$)|(^|[._-])(test|spec)([._-]|$)", re.IGNORECASE
+)
+_CONTRACT_PATH = re.compile(
+    r"(^|/)(contracts?|schemas?|protocols?|types?|interfaces?|openapi|graphql|proto)(/|$)",
+    re.IGNORECASE,
 )
 
 
@@ -39,6 +69,21 @@ def _diff(context: ReviewContext, repository: Path) -> bytes:
     )
     if hashlib.sha256(data).hexdigest() != context.diff_sha256:
         raise ValueError("local diff does not match the bound diff hash")
+    changed = _git(
+        repository,
+        "diff",
+        "--name-only",
+        "-z",
+        context.base_sha,
+        context.head_sha,
+        "--",
+    )
+    try:
+        changed_paths = {path.decode("utf-8") for path in changed.split(b"\0") if path}
+    except UnicodeDecodeError as exc:
+        raise ValueError("changed file paths must be valid UTF-8") from exc
+    if changed_paths != set(context.changed_files):
+        raise ValueError("bound changed_files do not match the pinned diff paths")
     return data
 
 
@@ -182,6 +227,230 @@ def verify_evidence(
     }
 
 
+def _defined_symbols(path: str, source: bytes) -> tuple[str, ...]:
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError:
+        return ()
+    names: set[str] = set()
+    if path.endswith(".py"):
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            pass
+        else:
+            names.update(
+                node.name
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            )
+    if not names:
+        for pattern in _DECLARATION_PATTERNS:
+            names.update(pattern.findall(text))
+    return tuple(
+        sorted(
+            (
+                name
+                for name in names
+                if _IDENTIFIER.fullmatch(name) and name not in _IGNORED_IDENTIFIERS
+            ),
+            key=lambda name: (-len(name), name),
+        )[:_DISCOVERY_MAX_SYMBOLS]
+    )
+
+
+def _neighbor_categories(path: str) -> tuple[str, ...]:
+    tags = []
+    if _TEST_PATH.search(path):
+        tags.append("test")
+    if _CONTRACT_PATH.search(path):
+        tags.append("contract")
+    return tuple(tags or ("caller",))
+
+
+def _path_tokens(path: str) -> set[str]:
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", path)
+    return {
+        part.lower()
+        for part in re.findall(r"[A-Za-z0-9]+", separated)
+        if len(part) >= 3 and part.lower() not in _IGNORED_PATH_TOKENS
+    }
+
+
+def discover_neighbor_evidence(
+    context: ReviewContext,
+    repository: Path,
+    *,
+    max_candidates: int = 50,
+) -> dict:
+    """Suggest pinned callers, contract files and conventionally named tests.
+
+    This is a bounded Git text scan. It deliberately returns suggestions only: it
+    does not add them to the bound context or claim that the result is exhaustive.
+    """
+    if not 1 <= max_candidates <= _DISCOVERY_MAX_CANDIDATES:
+        raise ValueError("neighbor candidate limit must be between 1 and 200")
+    _diff(context, repository)
+    if _git(repository, "cat-file", "-t", context.head_sha).strip() != b"commit":
+        raise ValueError("bound head revision must identify a commit")
+
+    tracked_raw = _git(repository, "ls-tree", "-r", "--name-only", "-z", context.head_sha)
+    if len(tracked_raw) > _DISCOVERY_MAX_TOTAL_BYTES:
+        raise ValueError("neighbor scan exceeds the tracked-path output limit")
+    tracked = [part.decode("utf-8") for part in tracked_raw.split(b"\0") if part]
+    if len(tracked) > _DISCOVERY_MAX_TRACKED_PATHS:
+        raise ValueError("neighbor scan exceeds the tracked-path limit")
+    tracked_set = set(tracked)
+    changed = set(context.changed_files)
+    symbols: set[str] = set()
+    total_bytes = 0
+    scanned_sources = 0
+    skipped_by_limits = 0
+    for path in sorted(changed & tracked_set):
+        size = int(_git(repository, "cat-file", "-s", f"{context.head_sha}:{path}"))
+        if size > _DISCOVERY_MAX_SOURCE_BYTES or total_bytes + size > _DISCOVERY_MAX_TOTAL_BYTES:
+            skipped_by_limits += 1
+            continue
+        source = _git(repository, "show", f"{context.head_sha}:{path}")
+        total_bytes += len(source)
+        scanned_sources += 1
+        symbols.update(_defined_symbols(path, source))
+        if len(symbols) >= _DISCOVERY_MAX_SYMBOLS:
+            break
+    ordered_symbols = tuple(sorted(symbols, key=lambda name: (-len(name), name))[:_DISCOVERY_MAX_SYMBOLS])
+
+    grep_paths: set[str] = set()
+    if ordered_symbols:
+        command = ["git", "-C", str(repository), "grep", "-I", "-F", "-w", "-l", "-z"]
+        for symbol in ordered_symbols:
+            command.extend(("-e", symbol))
+        command.extend((context.head_sha, "--"))
+        result = subprocess.run(command, capture_output=True, check=False)
+        if result.returncode not in {0, 1}:
+            raise ValueError("pinned Git symbol search failed")
+        if len(result.stdout) > _DISCOVERY_MAX_TOTAL_BYTES:
+            raise ValueError("neighbor scan result exceeds the output limit")
+        try:
+            grep_paths = {
+                part.decode("utf-8").split(":", 1)[-1]
+                for part in result.stdout.split(b"\0")
+                if part
+            }
+        except UnicodeDecodeError as exc:
+            raise ValueError("neighbor paths must be valid UTF-8") from exc
+
+    changed_path_tokens = set().union(*(_path_tokens(path) for path in changed))
+    test_paths = {
+        path
+        for path in tracked
+        if _TEST_PATH.search(path) and (_path_tokens(path) & changed_path_tokens)
+    }
+    candidates = []
+    candidate_paths = sorted(
+        (grep_paths | test_paths) - changed,
+        key=lambda path: (
+            0 if "test" in _neighbor_categories(path) else
+            1 if "contract" in _neighbor_categories(path) else 2,
+            0 if path in grep_paths else 1,
+            path,
+        ),
+    )[:min(_DISCOVERY_MAX_CANDIDATES * 4, max_candidates * 4)]
+    for path in candidate_paths:
+        if path not in tracked_set:
+            continue
+        size = int(_git(repository, "cat-file", "-s", f"{context.head_sha}:{path}"))
+        if size > _DISCOVERY_MAX_SOURCE_BYTES or total_bytes + size > _DISCOVERY_MAX_TOTAL_BYTES:
+            skipped_by_limits += 1
+            continue
+        source = _git(repository, "show", f"{context.head_sha}:{path}")
+        total_bytes += len(source)
+        scanned_sources += 1
+        try:
+            text = source.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        matches_by_symbol: dict[str, list[int]] = {}
+        if ordered_symbols:
+            alternatives = "|".join(re.escape(symbol) for symbol in ordered_symbols)
+            expression = re.compile(
+                rf"(?<![A-Za-z0-9_$])(?P<symbol>{alternatives})(?![A-Za-z0-9_$])"
+            )
+            for line_number, line in enumerate(text.splitlines(), 1):
+                for match in expression.finditer(line):
+                    lines = matches_by_symbol.setdefault(match.group("symbol"), [])
+                    if (not lines or lines[-1] != line_number) and len(lines) < 9:
+                        lines.append(line_number)
+        matches = [
+            {"symbol": symbol, "lines": lines[:8], "more_lines": len(lines) > 8}
+            for symbol, lines in sorted(matches_by_symbol.items())
+        ]
+        categories = _neighbor_categories(path)
+        reasons = []
+        if matches:
+            reasons.append("symbol_reference")
+        if "test" in categories and path in test_paths:
+            reasons.append("test_path_convention")
+        if "contract" in categories and matches:
+            reasons.append("contract_path_and_symbol_reference")
+        if not reasons:
+            continue
+        candidates.append(
+            {
+                "path": path,
+                "categories": list(categories),
+                "matched_symbols": matches,
+                "reasons": reasons,
+                "size_bytes": len(source),
+                "sha256": hashlib.sha256(source).hexdigest(),
+            }
+        )
+
+    candidates.sort(
+        key=lambda item: (
+            0 if "test" in item["categories"] else 1 if "contract" in item["categories"] else 2,
+            item["path"],
+        )
+    )
+    candidates = candidates[:max_candidates]
+    used_refs = set(context.evidence_refs)
+    records = []
+    next_id = 1
+    for candidate in candidates:
+        while f"N{next_id:04d}" in used_refs:
+            next_id += 1
+        record = EvidenceRecord(
+            evidence_ref=f"N{next_id:04d}",
+            kind="source",
+            sha256=candidate["sha256"],
+            revision=context.head_sha,
+            path=candidate["path"],
+        )
+        used_refs.add(record.evidence_ref)
+        next_id += 1
+        records.append({**candidate, "record": record.model_dump(mode="json")})
+
+    return {
+        "schema_version": 1,
+        "method": "pinned_git_symbol_scan",
+        "base_sha": context.base_sha,
+        "head_sha": context.head_sha,
+        "diff_sha256": context.diff_sha256,
+        "changed_files": list(context.changed_files),
+        "defined_symbols": list(ordered_symbols),
+        "candidate_records": records,
+        "candidate_limit": max_candidates,
+        "candidate_scan_limit": min(_DISCOVERY_MAX_CANDIDATES * 4, max_candidates * 4),
+        "source_files_scanned": scanned_sources,
+        "sources_skipped_by_scan_limits": skipped_by_limits,
+        "exhaustive": False,
+        "notes": [
+            "These are host-review suggestions, not an evidence-completeness claim.",
+            "Review candidates and reconcile callers/contracts with CodeGraph before binding them.",
+            "Add accepted record objects and refs to the full registry before building the Evidence Packet.",
+        ],
+    }
+
+
 def evidence_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="qa-orch evidence")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -197,10 +466,14 @@ def evidence_main(argv: list[str]) -> int:
     chunks.add_argument("--path", required=True)
     chunks.add_argument("--max-bytes", default=16000, type=int)
     chunks.add_argument("--output", type=Path)
+    discover = subparsers.add_parser(
+        "discover", help="Suggest pinned caller, contract and test evidence around changed symbols"
+    )
+    discover.add_argument("--max-candidates", default=50, type=int)
     pack = subparsers.add_parser("pack", help="Build exact profile-selectable context from pinned refs")
     pack.add_argument("--plan", type=Path, help="Explicit host plan: optional_profiles, priorities, external_content")
     pack.add_argument("--bound-context", required=True, type=Path)
-    for command in (build, verify, pack):
+    for command in (build, verify, pack, discover):
         command.add_argument("--context", required=True, type=Path)
         command.add_argument("--repository", required=True, type=Path)
         command.add_argument("--output", type=Path)
@@ -237,15 +510,28 @@ def evidence_main(argv: list[str]) -> int:
             print(output, end="")
         return 0
     context = ReviewContext.model_validate_json(args.context.read_bytes())
+    if args.command == "discover":
+        payload = discover_neighbor_evidence(
+            context, args.repository, max_candidates=args.max_candidates
+        )
+        output = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        if args.output:
+            args.output.write_text(output, encoding="utf-8")
+        else:
+            print(output, end="")
+        return 0
     if args.command == "pack":
-        from qa_orchestrator.context_pack import build_context_packet
+        from qa_orchestrator.context_pack import (
+            MAX_CONTEXT_PACKET_BYTES,
+            build_context_packet,
+        )
 
         if args.output is None or args.output.resolve() == args.bound_context.resolve():
             raise ValueError("pack requires distinct output and bound-context paths")
         plan = json.loads(args.plan.read_text()) if args.plan else {}
         packet = build_context_packet(context, args.repository, **plan)
         data = packet.model_dump_json().encode("utf-8")
-        if len(data) > 2_000_000:
+        if len(data) > MAX_CONTEXT_PACKET_BYTES:
             raise ValueError("context packet exceeds executor input size")
         bound = ReviewContext.model_validate({
             **context.model_dump(), "evidence_packet_sha256": hashlib.sha256(data).hexdigest()

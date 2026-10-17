@@ -3,7 +3,12 @@ from datetime import UTC, datetime
 
 import pytest
 
-from qa_orchestrator.contracts import ProfileExecutionMetrics, ProfileReviewReport, ReviewAgent
+from qa_orchestrator.contracts import (
+    FinalReviewReport,
+    ProfileExecutionMetrics,
+    ProfileReviewReport,
+    ReviewAgent,
+)
 from qa_orchestrator.host import HostExecutionPolicy, HostReviewAdapter, RetryableProfileError
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
@@ -35,6 +40,54 @@ def host_session(tmp_path, bound_review_context):
 
 def report(profile):
     return ProfileReviewReport(profile=profile, scope="Pinned source inspected.")
+
+
+async def test_finish_review_exports_markdown_with_the_accepted_outcome(host_session, tmp_path):
+    service, run_id = host_session(profile="python_reviewer")
+    adapter = HostReviewAdapter(service)
+
+    async def execute(job):
+        return report(job.profile)
+
+    await adapter.run_primary_review(run_id, execute, lambda _: DeepReviewSignals())
+    current = service.get_qa_orchestration(run_id)
+    output = tmp_path / "review.md"
+    output.write_text("previous artifact", encoding="utf-8")
+    final_report = FinalReviewReport(
+        summary="Review completed against the pinned context.",
+        profiles_reviewed=(ReviewAgent.PYTHON_REVIEWER,),
+    )
+    with pytest.raises(OrchestrationError, match="outcome is not ready"):
+        adapter.finish_review(
+            run_id,
+            outcome="completed",
+            final_review_report=final_report,
+            markdown_output=output,
+        )
+    assert output.read_text(encoding="utf-8") == "previous artifact"
+    assert not list(tmp_path.glob(".review.md.*.tmp"))
+
+    service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=run_id,
+            completed_step="synthesis",
+            status="completed",
+            expected_revision=current.revision,
+        )
+    )
+    current = service.get_qa_orchestration(run_id)
+    finished = adapter.finish_review(
+        run_id,
+        outcome="completed",
+        final_review_report=final_report,
+        expected_revision=current.revision,
+        markdown_output=output,
+    )
+
+    assert finished.status == "completed"
+    assert finished.final_review_report == final_report
+    assert output.read_text(encoding="utf-8").startswith("# QA review\n")
+    assert "Review completed against the pinned context" in output.read_text(encoding="utf-8")
 
 
 async def test_attempt_ledger_preserves_failed_usage_and_sums_known_retries(host_session):

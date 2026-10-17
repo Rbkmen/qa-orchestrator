@@ -300,7 +300,7 @@ def test_finish_rejects_review_artifacts_over_the_session_size_limit(
         selected_bundle=ReviewBundle.WIDGET,
     )
     groups = bundle_execution_groups(ReviewBundle.WIDGET)
-    large_profile_gaps = tuple(ReviewNote(text="x" * 2000) for _ in range(25))
+    large_profile_gaps = tuple(ReviewNote(text="x" * 2000) for _ in range(29))
 
     for index, group in enumerate(groups):
         session = orchestrator.advance(

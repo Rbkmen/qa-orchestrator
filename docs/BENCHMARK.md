@@ -34,6 +34,27 @@ The output reports precision, recall against complete reference sets, missed hig
 
 Run matched configurations on the same cases and repetitions before comparing speed or quality. Preserve raw candidates, references and per-run scores locally outside the repository. Only aggregate, clearly labeled results should be published. See [Profile Evaluation](PROFILE_EVALUATION.md) for the benchmark protocol and Python schedule comparison.
 
+To compare two host configurations, keep the model, reasoning, checklist,
+instructions, review rules, Evidence Packet, adjudicator and pinned source the
+same. Use the same end-to-end timing scope in every callback, then run:
+
+```sh
+qa-orch benchmark compare --dataset dataset.json --results results.json \
+  --baseline sequential --candidate parallel --repetitions 3 \
+  --output speed-comparison.json
+```
+
+The comparison requires every dataset case and exactly the declared number of
+fresh runs per configuration. It rejects differences in model/prompt identity or
+Evidence Packet hashes, and reports per-case median milliseconds, median speedup
+and separately scored precision/recall. `elapsed_ms` is host-reported: measure
+the same end-to-end interval (including the same preparation and finalization
+work) in both callbacks. The command does not launch a model or verify that the
+host actually performed fresh independent reviews; use `run_repetitions` with a
+fresh-review callback, disable checkpoints, and keep gold hidden until each
+attempt finishes. A speed result alone does not establish acceptable review
+quality.
+
 For fresh repeated attempts, `run_repetitions` invokes a host-supplied execution and
 adjudication callback. `qa-orch benchmark reliability --dataset dataset.json
 --results results.json --repetitions 3 --output reliability.json` reports stable

@@ -169,10 +169,11 @@ Reads do not extend TTL. Deletion neither finalizes a review nor cancels host ex
 |---|---|
 | `qa-orch setup` / `setup --host-default` | Configure per-stage models or return to host settings |
 | `qa-orch config show` / `reload` | Inspect/validate the saved policy |
+| `qa-orch evidence discover` | Suggest pinned callers, contracts and conventionally named tests |
 | `qa-orch evidence build` / `verify` | Register/verify source and diff |
 | `qa-orch evidence pack` / `chunks` | Exact context packets/source chunks |
 | `qa-orch rules` | Bind explicit review rules |
-| `qa-orch benchmark import-reviewbench` / `score` / `reliability` | Import and score adjudicated runs |
+| `qa-orch benchmark import-reviewbench` / `score` / `reliability` / `compare` | Import, score repetitions and compare same-model speed runs |
 | `qa-orchestrator-doctor --json` | Read-only local diagnostics |
 
 `qa-orchestrator` aliases `qa-orch`. Running either without a subcommand starts the MCP server. These tools do not provide a one-command MR review and publication flow.

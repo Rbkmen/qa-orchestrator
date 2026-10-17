@@ -1,9 +1,12 @@
 """Host-side supervision of injected read-only profile executors."""
 
 import asyncio
+import os
+import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
 
@@ -11,10 +14,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from qa_orchestrator.checkpoints import ProfileCheckpointStore, checkpoint_key
 from qa_orchestrator.contracts import (
+    FinalReviewReport,
     ProfileAttemptMetrics,
     ProfileAttemptObservation,
     ProfileExecutionMetrics,
     ProfileReviewReport,
+    QaTaskOutcome,
     ReviewAgent,
     ReviewContext,
     ReviewRoute,
@@ -329,6 +334,63 @@ class HostReviewAdapter:
             tuple(p for p in session.review_profiles if p in reused),
             tuple(ledger),
         )
+
+    def finish_review(
+        self,
+        run_id: str,
+        *,
+        outcome: QaTaskOutcome,
+        final_review_report: FinalReviewReport | None = None,
+        expected_revision: int | None = None,
+        markdown_output: Path | None = None,
+    ) -> QaOrchestrationSession:
+        """Finalize host review and optionally write its bound Markdown report atomically."""
+        final_report = (
+            FinalReviewReport.model_validate(final_review_report)
+            if final_review_report is not None
+            else None
+        )
+        output_path = Path(markdown_output) if markdown_output is not None else None
+        staged_path: str | None = None
+        try:
+            if output_path is not None:
+                current = self.service.get_qa_orchestration(run_id)
+                if final_report is None or current.review_context is None:
+                    raise ValueError(
+                        "Markdown export requires a final report and bound review context"
+                    )
+                from qa_orchestrator.report import (
+                    render_final_report,
+                    validate_final_report_context,
+                )
+
+                validate_final_report_context(final_report, current.review_context)
+                rendered = render_final_report(final_report, context=current.review_context)
+                if output_path.exists() and output_path.is_dir():
+                    raise ValueError("Markdown output path must be a file")
+                descriptor, staged_path = tempfile.mkstemp(
+                    prefix=f".{output_path.name}.", suffix=".tmp", dir=output_path.parent
+                )
+                with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as staged:
+                    staged.write(rendered)
+                    staged.flush()
+                    os.fsync(staged.fileno())
+            session = self.service.finish_qa_orchestration(
+                run_id=run_id,
+                outcome=outcome,
+                final_review_report=final_report,
+                expected_revision=expected_revision,
+            )
+            if staged_path is not None and output_path is not None:
+                os.replace(staged_path, output_path)
+                staged_path = None
+            return session
+        finally:
+            if staged_path is not None:
+                try:
+                    os.unlink(staged_path)
+                except FileNotFoundError:
+                    pass
 
     @staticmethod
     def _validate_report(context: ReviewContext, profile: ReviewAgent, report: ProfileReviewReport):

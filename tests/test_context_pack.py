@@ -139,6 +139,122 @@ def test_changed_source_cannot_be_marked_optional(pinned_evidence):
         build_context_packet(context, repo, optional_profiles={"S1": ("pr_test_analyzer",)})
 
 
+def test_packet_marks_binary_source_as_omitted_and_keeps_raw_hash(pinned_evidence):
+    import subprocess
+
+    from qa_orchestrator.context_pack import (
+        _omitted_source_text,
+        build_context_packet,
+        select_context,
+        validate_packet_context,
+    )
+    from qa_orchestrator.contracts import ReviewContext
+
+    repo, _, context, _ = pinned_evidence
+    binary_path = repo / "assets/logo.png"
+    binary_path.parent.mkdir()
+    binary_path.write_bytes(b"\x89PNG\r\n\x1a\n\x00\xff")
+    subprocess.check_call(["git", "-C", str(repo), "add", "assets/logo.png"])
+    subprocess.check_call(
+        [
+            "git", "-C", str(repo), "-c", "user.name=Test", "-c",
+            "user.email=test@example.invalid", "commit", "-qm", "add binary",
+        ]
+    )
+    head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"]).decode().strip()
+    diff = subprocess.check_output(
+        ["git", "-C", str(repo), "diff", "--binary", context.base_sha, head, "--"]
+    )
+    context = ReviewContext.model_validate(
+        {
+            **context.model_dump(),
+            "head_sha": head,
+            "diff_sha256": hashlib.sha256(diff).hexdigest(),
+            "changed_files": ("src/api.py", "assets/logo.png"),
+            "evidence_refs": ("S1", "B1", "D1"),
+        }
+    )
+    definitions = [
+        {"evidence_ref": "S1", "kind": "source", "revision": head, "path": "src/api.py"},
+        {"evidence_ref": "B1", "kind": "source", "revision": head, "path": "assets/logo.png"},
+        {"evidence_ref": "D1", "kind": "diff", "revision": head},
+    ]
+    bound = register_evidence(context, definitions, repo)
+
+    packet = build_context_packet(bound, repo)
+    binary_fragment = next(f for f in packet.fragments if f.record.evidence_ref == "B1")
+    assert binary_fragment.text == _omitted_source_text(binary_fragment.record.sha256)
+    assert binary_fragment.record.sha256 == hashlib.sha256(binary_path.read_bytes()).hexdigest()
+    validate_packet_context(packet, bound)
+    packed = select_context(packet, "python_reviewer", max_bytes=2_000_000)
+    assert binary_fragment.text in packed.text
+
+
+def test_packet_size_limit_stops_before_reading_later_fragments(
+    pinned_evidence, monkeypatch
+):
+    from qa_orchestrator import context_pack
+    from qa_orchestrator.context_pack import PinnedSourceCache, build_context_packet
+
+    repo, _, context, definitions = pinned_evidence
+    large_text = "x" * 3000
+    extra_records = [
+        {
+            "evidence_ref": "R1",
+            "kind": "requirement",
+            "locator": "host:requirement",
+            "sha256": hashlib.sha256(large_text.encode()).hexdigest(),
+        },
+        {
+            "evidence_ref": "S2",
+            "kind": "source",
+            "revision": context.head_sha,
+            "path": "src/api.py",
+        },
+    ]
+    context = context.model_copy(
+        update={"evidence_refs": ("S1", "D1", "R1", "S2")}
+    )
+    bound = register_evidence(context, [*definitions, *extra_records], repo)
+    monkeypatch.setattr(context_pack, "MAX_CONTEXT_PACKET_BYTES", 2048, raising=False)
+
+    class TrackingCache(PinnedSourceCache):
+        def __init__(self):
+            super().__init__()
+            self.read_paths = []
+
+        def read(self, repository, entry):
+            self.read_paths.append(entry.path)
+            return super().read(repository, entry)
+
+    cache = TrackingCache()
+    with pytest.raises(ValueError, match="context packet exceeds executor input size"):
+        build_context_packet(
+            bound,
+            repo,
+            cache=cache,
+            external_content={"R1": large_text},
+        )
+    assert cache.read_paths == ["src/api.py"]
+
+
+def test_packet_limit_matches_exact_serialized_size(pinned_evidence, monkeypatch):
+    from qa_orchestrator import context_pack
+    from qa_orchestrator.context_pack import build_context_packet
+
+    repo, _, context, definitions = pinned_evidence
+    bound = register_evidence(context, definitions, repo)
+    packet = build_context_packet(bound, repo)
+    serialized_size = len(packet.model_dump_json().encode("utf-8"))
+    monkeypatch.setattr(context_pack, "MAX_CONTEXT_PACKET_BYTES", serialized_size)
+
+    assert build_context_packet(bound, repo) == packet
+
+    monkeypatch.setattr(context_pack, "MAX_CONTEXT_PACKET_BYTES", serialized_size - 1)
+    with pytest.raises(ValueError, match="context packet exceeds executor input size"):
+        build_context_packet(bound, repo)
+
+
 @pytest.mark.parametrize("index", [0, 1])
 def test_builder_rejects_missing_mandatory_artifact(pinned_evidence, index):
     from qa_orchestrator.context_pack import build_context_packet

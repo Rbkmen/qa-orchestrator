@@ -12,6 +12,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from qa_orchestrator.contracts import EvidenceRecord, ReviewAgent, ReviewContext
 from qa_orchestrator.evidence import _diff, _git, _source_lines
 
+MAX_CONTEXT_PACKET_BYTES = 2_000_000
+
+
+def _omitted_source_text(sha256: str) -> str:
+    return (
+        "[Source content omitted from text context (binary or non-UTF-8); "
+        f"sha256={sha256}]"
+    )
+
 
 class ContextFragment(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -24,7 +33,12 @@ class ContextFragment(BaseModel):
 
     @model_validator(mode="after")
     def validate_content(self) -> "ContextFragment":
-        if hashlib.sha256(self.text.encode()).hexdigest() != self.record.sha256:
+        text_sha256 = hashlib.sha256(self.text.encode()).hexdigest()
+        omitted_source = (
+            self.record.kind == "source"
+            and self.text == _omitted_source_text(self.record.sha256)
+        )
+        if text_sha256 != self.record.sha256 and not omitted_source:
             raise ValueError("context fragment content hash mismatch")
         if len(set(self.profiles)) != len(self.profiles):
             raise ValueError("context profiles must be unique")
@@ -46,6 +60,22 @@ class ContextPacket(BaseModel):
         if len(set(self.deleted_paths)) != len(self.deleted_paths):
             raise ValueError("deleted paths must be unique")
         return self
+
+
+def _packet_envelope_size(deleted_paths: tuple[str, ...]) -> int:
+    probe = ContextFragment(
+        record=EvidenceRecord(
+            evidence_ref="size-probe",
+            kind="other",
+            locator="host:size-probe",
+            sha256=hashlib.sha256(b"").hexdigest(),
+        ),
+        text="",
+    )
+    packet = ContextPacket(fragments=(probe,), deleted_paths=deleted_paths)
+    return len(packet.model_dump_json().encode("utf-8")) - len(
+        probe.model_dump_json().encode("utf-8")
+    )
 
 
 @dataclass(frozen=True)
@@ -184,6 +214,7 @@ def build_context_packet(
     )
     deleted = tuple(path for path in deleted if path in context.changed_files)
     _validate_mandatory_presence(context, deleted)
+    packet_size = _packet_envelope_size(deleted)
     cache = cache or PinnedSourceCache()
     optional_profiles, priorities, external_content = (
         optional_profiles or {},
@@ -202,22 +233,37 @@ def build_context_packet(
             if entry.kind == "source" and entry.path in context.changed_files:
                 raise ValueError("changed source must remain mandatory")
         if entry.kind == "source":
-            text = cache.read(repository, entry).decode("utf-8")
+            source = cache.read(repository, entry)
+            if hashlib.sha256(source).hexdigest() != entry.sha256:
+                raise ValueError(f"source evidence content hash mismatch: {entry.evidence_ref}")
+            try:
+                text = source.decode("utf-8")
+            except UnicodeDecodeError:
+                text = _omitted_source_text(entry.sha256)
+            else:
+                if "\x00" in text:
+                    text = _omitted_source_text(entry.sha256)
         elif entry.kind == "diff":
             text = diff.decode("utf-8")
         else:
             if entry.evidence_ref not in external_content:
                 raise ValueError("external evidence requires explicit host content")
             text = external_content[entry.evidence_ref]
-        fragments.append(
-            ContextFragment(
-                record=entry,
-                text=text,
-                required=entry.evidence_ref not in optional_profiles,
-                profiles=optional_profiles.get(entry.evidence_ref, ()),
-                priority=priorities.get(entry.evidence_ref, 0),
-            )
+        if packet_size + len(text.encode("utf-8")) > MAX_CONTEXT_PACKET_BYTES:
+            raise ValueError("context packet exceeds executor input size")
+        fragment = ContextFragment(
+            record=entry,
+            text=text,
+            required=entry.evidence_ref not in optional_profiles,
+            profiles=optional_profiles.get(entry.evidence_ref, ()),
+            priority=priorities.get(entry.evidence_ref, 0),
         )
+        fragment_size = len(fragment.model_dump_json().encode("utf-8"))
+        separator_size = 1 if fragments else 0
+        if packet_size + separator_size + fragment_size > MAX_CONTEXT_PACKET_BYTES:
+            raise ValueError("context packet exceeds executor input size")
+        packet_size += separator_size + fragment_size
+        fragments.append(fragment)
     return ContextPacket(
         fragments=tuple(sorted(fragments, key=lambda f: f.record.evidence_ref)),
         deleted_paths=deleted,

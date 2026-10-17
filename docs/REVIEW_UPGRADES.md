@@ -108,7 +108,9 @@ nodes on one line merge. Large units remain whole and explicitly `oversized`;
 the byte budget is a packing target, not a guarantee on one indivisible unit.
 Syntax errors, non-Python files and bare-CR Python use visible line fallbacks.
 CRLF and final-newline bytes are preserved. Imports are supplemental context,
-not part of the chunk content hash; they may add size beyond the packing target.
+not part of the chunk content hash. Repeated import context is capped at 64 KB
+across the result and each chunk marks truncated context; sources producing more
+than 10,000 chunks or 100,000 review units fail with an explicit error.
 The host still adds necessary caller/dependency evidence and declares omissions.
 Input must be UTF-8 and at most 4 MB; chunks do not themselves prove review coverage.
 
@@ -136,10 +138,11 @@ CLI version and your instruction version before enabling checkpoints.
 
 The output schema requires an empty `finding_candidates` array for
 `pr_test_analyzer` and `code_explorer`, matching server-side role validation.
-Other profiles retain their existing finding limit. Executor identity v5
-invalidates checkpoints produced under the previous generation schema.
+Other profiles retain their existing finding limit. Executor identity v6
+invalidates checkpoints produced under the previous generation schema and prompt budget.
 
-Each call checks the packet hash and 2 MB input limit, starts a fresh temporary
+Each call checks the packet hash, accounts for the complete prompt envelope, and
+keeps the combined prompt within 2 MB before launch. It starts a fresh temporary
 workspace without the target checkout or inherited MCP configuration, passes
 route/rules/context and previous reports, validates profile/evidence/locations,
 and captures reported token usage. Raw event bodies and stderr are not persisted
@@ -231,6 +234,47 @@ For repeated packet construction, pass the same `PinnedSourceCache` to
 `build_context_packet`. It caches immutable Git blobs in memory, bounded by bytes
 and 128 entries, and validates each extracted fragment against the registry.
 Dirty worktree files are never read. There is no persistent learned review memory.
+
+## 9. Neighbor evidence suggestions
+
+Before binding a review context, scan pinned changed symbols for likely callers,
+contract files and tests with:
+
+```sh
+qa-orch evidence discover --context registered-context.json \
+  --repository /path/to/repo --max-candidates 50 --output neighbor-candidates.json
+```
+
+The bounded scan reads only the pinned Git head, reports symbol matches and line
+numbers, and includes source records with content hashes that can be reviewed for
+the full evidence registry. It also suggests tests by repository path convention.
+These are candidates: review and reconcile them with CodeGraph, select the
+necessary paths, add their refs to the unbound context, and add their record
+objects to the full records list passed to `qa-orch evidence build`. Keep every
+existing record in that list because `build` replaces the registry. It does not
+read the dirty worktree, change the context, or claim that discovery is complete.
+Dynamic dispatch, generated code, cross-repository callers and language-specific
+dependency rules still require host investigation.
+
+## 10. Finalize and export in one host step
+
+After host synthesis, `HostReviewAdapter.finish_review` can validate and render
+the report against the bound context, finalize the session, and atomically write
+the Markdown artifact:
+
+```python
+session = adapter.finish_review(
+    run_id,
+    outcome="completed",
+    final_review_report=final_report,
+    expected_revision=current_revision,
+    markdown_output=Path("artifacts/review.md"),
+)
+```
+
+The export is staged before finalization and renamed into place only after the
+session accepts the report. If export fails after the session finishes, the
+retained structured report can be rendered again with `qa-orch report render`.
 
 ## 8. Candidate counterevidence
 

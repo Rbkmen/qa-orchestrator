@@ -63,7 +63,7 @@ def test_executor_schema_change_invalidates_previous_identity(executor_input):
     packet, _, _ = executor_input
     executor = CodexProfileExecutor(packet)
     old_identity = hashlib.sha256(json.dumps({
-        "implementation": "codex-packet-executor-v4",
+        "implementation": "codex-packet-executor-v5",
         "command": executor.command,
         "max_context_bytes": executor.max_context_bytes,
         "model": executor.model,
@@ -231,6 +231,29 @@ async def test_executor_refuses_changed_packet_before_process_launch(executor_in
     packet.write_text("tampered")
     with pytest.raises(ValueError, match="packet hash"):
         await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(job)
+
+
+async def test_executor_budgets_the_complete_prompt_before_launch(executor_input):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+
+    packet, job, script = executor_input
+    packet.write_bytes(b"x" * 1_999_900)
+    context = job.session.review_context.model_copy(
+        update={"evidence_packet_sha256": hashlib.sha256(packet.read_bytes()).hexdigest()}
+    )
+    job = replace(
+        job,
+        session=job.session.model_copy(update={"review_context": context}),
+    )
+
+    with pytest.raises(
+        ValueError, match="Evidence Packet exceeds the complete executor prompt budget"
+    ):
+        await CodexProfileExecutor(
+            packet,
+            command=(sys.executable, str(script)),
+            max_context_bytes=2_000_000,
+        )(job)
 
 
 @pytest.mark.parametrize(

@@ -151,7 +151,8 @@ class DeepReviewSignals(BaseModel):
         return self
 
 
-_MAX_SESSION_REVIEW_ARTIFACT_BYTES = 256 * 1024
+# Keep headroom for defaulted fields added to each persisted candidate.
+_MAX_SESSION_REVIEW_ARTIFACT_BYTES = 288 * 1024
 
 
 def _review_artifact_payload_size(

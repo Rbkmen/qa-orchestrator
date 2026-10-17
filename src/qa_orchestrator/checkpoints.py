@@ -8,7 +8,10 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from qa_orchestrator.contracts import ProfileReviewReport
+from qa_orchestrator.contracts import (
+    _MAX_PROFILE_REVIEW_REPORT_BYTES,
+    ProfileReviewReport,
+)
 
 
 def checkpoint_key(context, route, model_policy, previous_reports, executor_identity: str) -> str:
@@ -71,7 +74,10 @@ class ProfileCheckpointStore:
             ).fetchone()
         if row is None:
             return None
-        if len(row[0].encode()) > 65536 or hashlib.sha256(row[0].encode()).hexdigest() != row[1]:
+        if (
+            len(row[0].encode()) > _MAX_PROFILE_REVIEW_REPORT_BYTES
+            or hashlib.sha256(row[0].encode()).hexdigest() != row[1]
+        ):
             raise ValueError("checkpoint content hash mismatch")
         return ProfileReviewReport.model_validate_json(row[0])
 

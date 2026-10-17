@@ -645,9 +645,10 @@ def _help() -> int:
     print("  qa-orch setup --host-default  использовать модель хоста")
     print("  qa-orch config show    показать текущую модельную политику")
     print("  qa-orch reload         перечитать и проверить модельную политику")
-    print("  qa-orch benchmark      импортировать и оценить локальный benchmark")
-    print("  qa-orch evidence       собрать и проверить реестр evidence")
+    print("  qa-orch benchmark      импортировать, сравнить скорость и оценить локальный benchmark")
+    print("  qa-orch evidence       найти соседний код, собрать и проверить реестр evidence")
     print("  qa-orch rules          привязать явные правила к контексту ревью")
+    print("  qa-orch report render  вывести структурированный отчёт ревью в Markdown")
     print("  qa-orch                запустить MCP STDIO-сервер")
     return 0
 
@@ -672,6 +673,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             from qa_orchestrator.review_rules import rules_main
 
             return rules_main(args[1:])
+        if args[0] == "report":
+            from qa_orchestrator.report import report_main
+
+            return report_main(args[1:])
         if args[:2] == ["config", "show"]:
             return _show_config()
         if args in (["reload"], ["config", "reload"]):
@@ -683,7 +688,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("\nНастройка отменена.", file=sys.stderr)
         return 130
     except ValueError as exc:
-        print(f"Ошибка настройки: {exc}", file=sys.stderr)
+        print(f"Ошибка: {exc}", file=sys.stderr)
         return 2
     except OSError as exc:
         print(f"Ошибка доступа к файлу: {exc.strerror}", file=sys.stderr)

@@ -26,3 +26,11 @@ qa-orch evidence verify --context bound-context.json --repository /path/to/repo 
 The builder computes source/diff hashes from immutable Git objects. External content hashes are supplied by the host. Verification checks commit identities, the exact diff hash, source hashes and ranges, and optionally the packet hash and finding coordinates. It does not execute target code or modify the repository. External requirements/runtime records remain explicitly unverified by this local checker. A missing packet check is reported as unknown; mismatches fail instead of silently rebinding the input.
 
 The MCP server validates registry structure and citation/location membership. It cannot read the host's raw packet or prove evidence truth. The host may pass `evidence_verifier=lambda context: verify_evidence(context, repository, packet)` to `HostReviewAdapter` to verify before any workers launch. Legacy contexts without a registry remain accepted; local verification requires a registry.
+
+When a final report JSON is available, export a readable Markdown summary with its evidence refs resolved through the same bound context:
+
+```sh
+qa-orch report render --input final-report.json --context bound-context.json --output review.md
+```
+
+The renderer sorts findings by Blocker, High, Medium, Low, then unspecified severity; shows source locations, change origin, confidence, impact, verification gaps, and optional next steps; and keeps Coverage gaps and Unverified separate. The report model preserves legacy reports without `change_origin`, `next_step`, or severity by supplying an unknown/default display value.
