@@ -118,6 +118,42 @@ def test_evidence_investigator_and_code_reviewer_have_distinct_outputs(tmp_path)
     assert "do not repeat the map" in review_route.focus
 
 
+def test_code_reviewer_checks_api_client_completeness(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    focus = service.prepare_review_route(ReviewAgent.CODE_REVIEWER).focus.lower()
+
+    for check in (
+        "pagination",
+        "cursor termination",
+        "repeated reads of the same endpoint",
+        "current resource identity or version",
+        "early returns do not skip required side effects",
+    ):
+        assert check in focus
+
+
+def test_typescript_and_react_profiles_cover_contract_and_state_edges(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    typescript_focus = service.prepare_review_route(ReviewAgent.TYPESCRIPT_REVIEWER).focus.lower()
+    react_focus = service.prepare_review_route(ReviewAgent.REACT_REVIEWER).focus.lower()
+
+    for check in (
+        "null/undefined",
+        "discriminated-union narrowing",
+        "untrusted serialized data",
+        "cancellation",
+    ):
+        assert check in typescript_focus
+    for check in (
+        "hook dependencies",
+        "stale closures",
+        "effect cleanup",
+        "resource identity changes",
+        "accessibility",
+    ):
+        assert check in react_focus
+
+
 def test_unknown_review_profile_is_rejected(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
@@ -222,6 +258,10 @@ def test_changed_file_hints_follow_confirmed_language_and_test_paths():
     assert review_profiles.recommended_profiles_for_changed_files(("backend/api.py",)) == (
         ReviewAgent.PYTHON_REVIEWER,
     )
+    assert review_profiles.recommended_profiles_for_changed_files(("tests/test_api.py",)) == (
+        ReviewAgent.PYTHON_REVIEWER,
+        ReviewAgent.PR_TEST_ANALYZER,
+    )
     assert review_profiles.recommended_profiles_for_changed_files(
         ("android/app/src/MainActivity.kt",)
     ) == (ReviewAgent.MOBILE_REVIEWER,)
@@ -233,6 +273,43 @@ def test_changed_file_hints_follow_confirmed_language_and_test_paths():
         ReviewAgent.MOBILE_REVIEWER,
     )
     assert review_profiles.recommended_profiles_for_changed_files(("src/service.js",)) == ()
+
+
+def test_changed_files_append_matching_stack_bundles_to_task_shortlist():
+    assert review_profiles.recommended_bundles_for(
+        "ordinary_review", ("src/components/Checkout.tsx",)
+    ) == (ReviewBundle.ORDINARY_MR, ReviewBundle.WIDGET)
+    assert review_profiles.recommended_bundles_for(
+        "ordinary_review", ("src/components/Checkout.jsx",)
+    ) == (ReviewBundle.ORDINARY_MR, ReviewBundle.WIDGET_JS)
+    assert review_profiles.recommended_bundles_for(
+        "widget_review", ("src/components/Checkout.tsx",)
+    ) == (ReviewBundle.WIDGET,)
+    assert review_profiles.recommended_bundles_for(
+        "widget_review", ("src/components/Checkout.jsx",)
+    ) == (ReviewBundle.WIDGET_JS,)
+    assert review_profiles.recommended_bundles_for(
+        "widget_review", ("mobile-apps/apps/mrbit/src/App.tsx",)
+    ) == (ReviewBundle.MOBILE,)
+    assert review_profiles.recommended_bundles_for(
+        "ordinary_review",
+        ("mobile-apps/apps/mrbit/src/App.tsx", "web/src/Checkout.tsx"),
+    ) == (ReviewBundle.ORDINARY_MR, ReviewBundle.WIDGET, ReviewBundle.MOBILE)
+    assert review_profiles.recommended_bundles_for(
+        "ordinary_review", ("mobile-apps/apps/mrbit/src/App.tsx",)
+    ) == (ReviewBundle.ORDINARY_MR, ReviewBundle.MOBILE)
+    assert review_profiles.recommended_bundles_for(
+        "ordinary_review", ("tests/test_api.py",)
+    ) == (ReviewBundle.ORDINARY_MR, ReviewBundle.PYTHON_BACKEND)
+    assert review_profiles.recommended_bundles_for(
+        "ordinary_review", ("backend/test_orders.rb",)
+    ) == (ReviewBundle.ORDINARY_MR, ReviewBundle.RUBY_BACKEND)
+    assert review_profiles.recommended_bundles_for(
+        "ordinary_review", ("android/app/src/MainActivity.kt",)
+    ) == (ReviewBundle.ORDINARY_MR, ReviewBundle.MOBILE)
+    assert review_profiles.recommended_bundles_for(
+        "ordinary_review", ("README.md",)
+    ) == (ReviewBundle.ORDINARY_MR,)
 
 
 def test_catalog_responses_do_not_share_mutable_routing_definitions(tmp_path):

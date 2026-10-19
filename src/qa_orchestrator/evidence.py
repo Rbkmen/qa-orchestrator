@@ -7,7 +7,7 @@ import json
 import re
 import subprocess
 from collections.abc import Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from qa_orchestrator.contracts import (
     EvidenceRecord,
@@ -22,6 +22,10 @@ _DISCOVERY_MAX_TRACKED_PATHS = 200_000
 _DISCOVERY_MAX_SOURCE_BYTES = 4_000_000
 _DISCOVERY_MAX_TOTAL_BYTES = 64_000_000
 _DISCOVERY_MAX_CANDIDATES = 200
+_DISCOVERY_MAX_CANDIDATE_SCAN_PATHS = 200
+_DISCOVERY_MAX_SYMBOL_SEARCH_PATHS = 32
+_DISCOVERY_MAX_SYMBOL_SEARCH_BYTES = 16_000_000
+_DISCOVERY_SYMBOL_SEARCH_BATCH_SIZE = 32
 _IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]{2,127}$")
 _IGNORED_IDENTIFIERS = {
     "call", "get", "init", "main", "run", "set", "test", "toString", "valueOf",
@@ -44,6 +48,36 @@ _CONTRACT_PATH = re.compile(
     r"(^|/)(contracts?|schemas?|protocols?|types?|interfaces?|openapi|graphql|proto)(/|$)",
     re.IGNORECASE,
 )
+_TS_IMPORT = re.compile(
+    r"\bimport\s+(?P<bindings>[^;]*?)\s+from\s*['\"](?P<module>[^'\"]+)['\"]",
+    re.DOTALL,
+)
+_JS_TEST_MANIFESTS = {
+    "package.json",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+}
+_TEST_DEPENDENCY_MANIFESTS = {
+    ".py": {
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "tox.ini",
+        "pytest.ini",
+        "Pipfile",
+        "Pipfile.lock",
+    },
+    ".js": _JS_TEST_MANIFESTS,
+    ".jsx": _JS_TEST_MANIFESTS,
+    ".ts": _JS_TEST_MANIFESTS,
+    ".tsx": _JS_TEST_MANIFESTS,
+    ".go": {"go.mod"},
+    ".rb": {"Gemfile", "Gemfile.lock"},
+    ".rs": {"Cargo.toml", "Cargo.lock"},
+    ".java": {"pom.xml", "build.gradle", "build.gradle.kts"},
+}
 
 
 def _git(repository: Path, *args: str) -> bytes:
@@ -105,6 +139,14 @@ def _source_lines(data: bytes) -> list[bytes]:
     return [part + b"\n" for part in parts[:-1]] + ([parts[-1]] if parts[-1] else [])
 
 
+def _is_text_source(data: bytes) -> bool:
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return "\x00" not in text
+
+
 def register_evidence(
     context: ReviewContext,
     records: Sequence[dict],
@@ -127,7 +169,18 @@ def register_evidence(
                 raise ValueError("external evidence requires a host-supplied content hash")
             entries.append(entry)
             continue
-        entries.append(entry.model_copy(update={"sha256": hashlib.sha256(data).hexdigest()}))
+        entries.append(
+            entry.model_copy(
+                update={
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    **(
+                        {"source_text_available": _is_text_source(data)}
+                        if entry.kind == "source"
+                        else {}
+                    ),
+                }
+            )
+        )
     return ReviewContext.model_validate({**context.model_dump(), "evidence_registry": entries})
 
 
@@ -145,6 +198,10 @@ def validate_registered_locations(
             if ref in registry
             and registry[ref].kind == "source"
             and registry[ref].revision == context.head_sha
+                # Records written before the text-availability flag are legacy
+                # metadata. Preserve their historical citation behavior; new
+                # registrations always write an explicit True/False value.
+                and registry[ref].source_text_available is not False
         ]
         for location in candidate.source_locations:
             if not any(
@@ -175,7 +232,6 @@ def validate_context_selection(context: ReviewContext, report: ProfileReviewRepo
     mandatory = {
         entry.evidence_ref for entry in context.evidence_registry
         if entry.kind in {"diff", "requirement"}
-        or entry.kind == "source" and entry.path in context.changed_files
     }
     if mandatory - set(selection.included_refs):
         raise ValueError("context selection omits mandatory evidence")
@@ -196,13 +252,25 @@ def verify_evidence(
         raise ValueError("evidence_registry is required for local verification")
     diff = _diff(context, repository)
     verified, unverified = [], []
+    verified_entries = []
     for entry in context.evidence_registry:
         if entry.kind == "source":
             data = _source_bytes(entry, repository)
+            source_text_available = _is_text_source(data)
+            if (
+                entry.source_text_available is not None
+                and entry.source_text_available != source_text_available
+            ):
+                raise ValueError(f"source text availability metadata mismatch: {entry.evidence_ref}")
+            verified_entries.append(
+                entry.model_copy(update={"source_text_available": source_text_available})
+            )
         elif entry.kind == "diff":
             data = diff
+            verified_entries.append(entry)
         else:
             unverified.append(entry.evidence_ref)
+            verified_entries.append(entry)
             continue
         if hashlib.sha256(data).hexdigest() != entry.sha256:
             raise ValueError(f"evidence content hash mismatch: {entry.evidence_ref}")
@@ -212,7 +280,8 @@ def verify_evidence(
         and hashlib.sha256(packet.read_bytes()).hexdigest() != context.evidence_packet_sha256
     ):
         raise ValueError("Evidence Packet hash mismatch")
-    validate_registered_locations(context, candidates)
+    verified_context = context.model_copy(update={"evidence_registry": tuple(verified_entries)})
+    validate_registered_locations(verified_context, candidates)
     for candidate in candidates:
         for location in candidate.source_locations:
             data = _git(repository, "show", f"{context.head_sha}:{location.path}")
@@ -259,6 +328,208 @@ def _defined_symbols(path: str, source: bytes) -> tuple[str, ...]:
     )
 
 
+def _local_module_exists(module: str, tracked_paths: set[str]) -> bool:
+    module_path = module.replace(".", "/").strip("/")
+    if not module_path:
+        return False
+    return (
+        f"{module_path}.py" in tracked_paths
+        or f"{module_path}.pyi" in tracked_paths
+        or f"{module_path}/__init__.py" in tracked_paths
+    )
+
+
+def _relative_python_module(path: str, module: str | None, level: int) -> str:
+    if not level:
+        return (module or "").replace(".", "/")
+    parent = PurePosixPath(path).parent.parts
+    retained = max(0, len(parent) - level + 1)
+    module_parts = tuple(module.split(".")) if module else ()
+    parts = parent[:retained] + module_parts
+    return "/".join(part for part in parts if part)
+
+
+def _tracked_module_paths(module: str, tracked_paths: set[str]) -> set[str]:
+    module_path = module.replace(".", "/").strip("/")
+    if not module_path:
+        return set()
+    return {
+        candidate
+        for candidate in (
+            f"{module_path}.py",
+            f"{module_path}.pyi",
+            f"{module_path}/__init__.py",
+        )
+        if candidate in tracked_paths
+    }
+
+
+def _referenced_module_paths(path: str, source: bytes, tracked_paths: set[str]) -> set[str]:
+    """Resolve exact local Python modules imported by a changed source file."""
+    if not path.endswith(".py"):
+        return set()
+    try:
+        tree = ast.parse(source.decode("utf-8"))
+    except (UnicodeDecodeError, SyntaxError):
+        return set()
+
+    paths: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = _relative_python_module(path, node.module, node.level)
+            paths.update(_tracked_module_paths(module, tracked_paths))
+            for alias in node.names:
+                paths.update(_tracked_module_paths(f"{module}/{alias.name}", tracked_paths))
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                paths.update(_tracked_module_paths(alias.name, tracked_paths))
+    return paths
+
+
+def _local_dotted_symbol(target: str, tracked_paths: set[str]) -> str | None:
+    parts = target.replace(":", ".").split(".")
+    for index in range(len(parts) - 1, 0, -1):
+        if _local_module_exists(".".join(parts[:index]), tracked_paths):
+            symbol = parts[index]
+            return symbol if _IDENTIFIER.fullmatch(symbol) else None
+    return None
+
+
+def _attribute_chain(expression: ast.expr) -> tuple[str, ...]:
+    parts = []
+    while isinstance(expression, ast.Attribute):
+        parts.append(expression.attr)
+        expression = expression.value
+    if isinstance(expression, ast.Name):
+        return tuple(reversed((*parts, expression.id)))
+    return ()
+
+
+def _referenced_symbols(path: str, source: bytes, tracked_paths: set[str]) -> tuple[str, ...]:
+    """Return locally imported or mocked symbols referenced by changed files."""
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError:
+        return ()
+
+    names: set[str] = set()
+    if path.endswith(".py"):
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            return ()
+        module_aliases: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = _relative_python_module(path, node.module, node.level)
+                if module and _local_module_exists(module, tracked_paths):
+                    for alias in node.names:
+                        if alias.name == "*":
+                            continue
+                        names.add(alias.name)
+                        child = f"{module}.{alias.name}"
+                        if _local_module_exists(child, tracked_paths):
+                            module_aliases[alias.asname or alias.name] = child
+                else:
+                    for alias in node.names:
+                        child = f"{module}.{alias.name}" if module else alias.name
+                        if _local_module_exists(child, tracked_paths):
+                            names.add(alias.name)
+                            module_aliases[alias.asname or alias.name] = child
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if _local_module_exists(alias.name, tracked_paths):
+                        binding = alias.asname or alias.name.split(".", 1)[0]
+                        if alias.asname or "." not in alias.name:
+                            names.add(binding)
+                        module_aliases[binding] = alias.name if alias.asname else binding
+
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Attribute):
+                chain = _attribute_chain(node.func)
+                if chain and chain[0] in module_aliases:
+                    target = ".".join((module_aliases[chain[0]], *chain[1:]))
+                    symbol = _local_dotted_symbol(target, tracked_paths)
+                    if symbol:
+                        names.add(symbol)
+            if isinstance(node.func, ast.Name):
+                call_name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                call_name = node.func.attr
+            else:
+                call_name = ""
+            target_nodes = node.args[:1] if call_name == "patch" else ()
+            if call_name == "setattr" and node.args:
+                if isinstance(node.args[0], ast.Constant):
+                    target_nodes = node.args[:1]
+                elif (
+                    len(node.args) > 1
+                    and isinstance(node.args[0], ast.Name)
+                    and node.args[0].id in module_aliases
+                    and isinstance(node.args[1], ast.Constant)
+                    and isinstance(node.args[1].value, str)
+                ):
+                    target = f"{module_aliases[node.args[0].id]}.{node.args[1].value}"
+                    symbol = _local_dotted_symbol(target, tracked_paths)
+                    if symbol:
+                        names.add(symbol)
+            for target_node in target_nodes:
+                if isinstance(target_node, ast.Constant) and isinstance(target_node.value, str):
+                    symbol = _local_dotted_symbol(target_node.value, tracked_paths)
+                    if symbol:
+                        names.add(symbol)
+    elif PurePosixPath(path).suffix.lower() in {".js", ".jsx", ".ts", ".tsx"}:
+        for match in _TS_IMPORT.finditer(text):
+            module = match.group("module")
+            if not (
+                module.startswith((".", "@/", "~/", "src/"))
+                or _local_module_exists(module, tracked_paths)
+            ):
+                continue
+            names.update(
+                name
+                for name in re.findall(r"[A-Za-z_$][A-Za-z0-9_$]*", match.group("bindings"))
+                if name not in {"as", "type"}
+            )
+
+    return tuple(
+        sorted(
+            (
+                name for name in names
+                if _IDENTIFIER.fullmatch(name) and name not in _IGNORED_IDENTIFIERS
+            ),
+            key=lambda name: (-len(name), name),
+        )[:_DISCOVERY_MAX_SYMBOLS]
+    )
+
+
+def _test_dependency_manifests(changed_paths: set[str], tracked_paths: set[str]) -> set[str]:
+    manifests: set[str] = set()
+    changed_tests = [path for path in changed_paths if _TEST_PATH.search(path)]
+    manifests_by_suffix = {suffix: set() for suffix in _TEST_DEPENDENCY_MANIFESTS}
+    for candidate in tracked_paths:
+        name = candidate.rsplit("/", 1)[-1]
+        for suffix, names in _TEST_DEPENDENCY_MANIFESTS.items():
+            if name in names or (
+                suffix == ".py" and name.startswith("requirements") and name.endswith(".txt")
+            ):
+                manifests_by_suffix[suffix].add(candidate)
+    for changed_path in changed_tests:
+        suffix = PurePosixPath(changed_path).suffix.lower()
+        candidates = manifests_by_suffix.get(suffix, set())
+        test_parent = PurePosixPath(changed_path).parent.parts
+        for candidate in candidates:
+            candidate_path = PurePosixPath(candidate)
+            manifest_parent = candidate_path.parent.parts
+            if (
+                len(manifest_parent) <= len(test_parent)
+                and test_parent[: len(manifest_parent)] == manifest_parent
+            ):
+                manifests.add(candidate)
+    return manifests
+
+
 def _neighbor_categories(path: str) -> tuple[str, ...]:
     tags = []
     if _TEST_PATH.search(path):
@@ -269,7 +540,8 @@ def _neighbor_categories(path: str) -> tuple[str, ...]:
 
 
 def _path_tokens(path: str) -> set[str]:
-    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", path)
+    path_without_suffix = PurePosixPath(path).with_suffix("").as_posix()
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", path_without_suffix)
     return {
         part.lower()
         for part in re.findall(r"[A-Za-z0-9]+", separated)
@@ -283,7 +555,7 @@ def discover_neighbor_evidence(
     *,
     max_candidates: int = 50,
 ) -> dict:
-    """Suggest pinned callers, contract files and conventionally named tests.
+    """Suggest pinned declarations, callers, contracts, tests and test manifests.
 
     This is a bounded Git text scan. It deliberately returns suggestions only: it
     does not add them to the bound context or claim that the result is exhaustive.
@@ -302,7 +574,9 @@ def discover_neighbor_evidence(
         raise ValueError("neighbor scan exceeds the tracked-path limit")
     tracked_set = set(tracked)
     changed = set(context.changed_files)
-    symbols: set[str] = set()
+    defined_symbols: set[str] = set()
+    referenced_symbols: set[str] = set()
+    referenced_module_paths: set[str] = set()
     total_bytes = 0
     scanned_sources = 0
     skipped_by_limits = 0
@@ -314,52 +588,121 @@ def discover_neighbor_evidence(
         source = _git(repository, "show", f"{context.head_sha}:{path}")
         total_bytes += len(source)
         scanned_sources += 1
-        symbols.update(_defined_symbols(path, source))
-        if len(symbols) >= _DISCOVERY_MAX_SYMBOLS:
+        defined_symbols.update(_defined_symbols(path, source))
+        referenced_symbols.update(_referenced_symbols(path, source, tracked_set))
+        referenced_module_paths.update(_referenced_module_paths(path, source, tracked_set))
+        if len(defined_symbols | referenced_symbols) >= _DISCOVERY_MAX_SYMBOLS:
             break
-    ordered_symbols = tuple(sorted(symbols, key=lambda name: (-len(name), name))[:_DISCOVERY_MAX_SYMBOLS])
+    ordered_defined_symbols = tuple(
+        sorted(defined_symbols, key=lambda name: (-len(name), name))[:_DISCOVERY_MAX_SYMBOLS]
+    )
+    ordered_referenced_symbols = tuple(
+        sorted(referenced_symbols, key=lambda name: (-len(name), name))[:_DISCOVERY_MAX_SYMBOLS]
+    )
+    ordered_symbols = tuple(
+        dict.fromkeys((*ordered_referenced_symbols, *ordered_defined_symbols))
+    )[:_DISCOVERY_MAX_SYMBOLS]
+
+    changed_path_tokens = set().union(*(_path_tokens(path) for path in changed)) if changed else set()
+    symbol_path_tokens = (
+        set().union(*(_path_tokens(symbol) for symbol in ordered_symbols))
+        if ordered_symbols
+        else set()
+    )
+    changed_directories = {PurePosixPath(path).parent for path in changed}
+    dependency_manifest_paths = _test_dependency_manifests(changed, tracked_set)
+
+    test_paths = set()
+    ranked_symbol_paths = []
+    for path in tracked:
+        path_tokens = _path_tokens(path)
+        if _TEST_PATH.search(path) and (path_tokens & changed_path_tokens):
+            test_paths.add(path)
+        if path in changed or (not ordered_symbols and path not in referenced_module_paths):
+            continue
+        changed_matches = path_tokens & changed_path_tokens
+        symbol_matches = path_tokens & symbol_path_tokens
+        same_directory = PurePosixPath(path).parent in changed_directories
+        if not (path in referenced_module_paths or changed_matches or symbol_matches or same_directory):
+            continue
+        categories = _neighbor_categories(path)
+        priority = (
+            0 if path in referenced_module_paths else
+            1 if "test" in categories and changed_matches else
+            2 if "contract" in categories and (changed_matches or symbol_matches) else
+            3 if symbol_matches else
+            4 if same_directory else 5
+        )
+        ranked_symbol_paths.append(
+            (priority, -len(symbol_matches), -len(changed_matches), path)
+        )
+    ranked_symbol_paths.sort()
+    symbol_search_candidate_paths = tuple(item[3] for item in ranked_symbol_paths)
+    ranked_search_paths = symbol_search_candidate_paths[:_DISCOVERY_MAX_SYMBOL_SEARCH_PATHS]
+    symbol_search_paths = []
+    symbol_search_bytes = 0
+    symbol_search_paths_skipped_by_size = 0
+    for path in ranked_search_paths:
+        size = int(_git(repository, "cat-file", "-s", f"{context.head_sha}:{path}"))
+        if (
+            size > _DISCOVERY_MAX_SOURCE_BYTES
+            or symbol_search_bytes + size > _DISCOVERY_MAX_SYMBOL_SEARCH_BYTES
+            or total_bytes + symbol_search_bytes + size > _DISCOVERY_MAX_TOTAL_BYTES
+        ):
+            skipped_by_limits += 1
+            symbol_search_paths_skipped_by_size += 1
+            continue
+        symbol_search_paths.append(path)
+        symbol_search_bytes += size
+    symbol_search_paths = tuple(symbol_search_paths)
 
     grep_paths: set[str] = set()
-    if ordered_symbols:
-        command = ["git", "-C", str(repository), "grep", "-I", "-F", "-w", "-l", "-z"]
-        for symbol in ordered_symbols:
-            command.extend(("-e", symbol))
-        command.extend((context.head_sha, "--"))
-        result = subprocess.run(command, capture_output=True, check=False)
-        if result.returncode not in {0, 1}:
-            raise ValueError("pinned Git symbol search failed")
-        if len(result.stdout) > _DISCOVERY_MAX_TOTAL_BYTES:
-            raise ValueError("neighbor scan result exceeds the output limit")
-        try:
-            grep_paths = {
-                part.decode("utf-8").split(":", 1)[-1]
-                for part in result.stdout.split(b"\0")
-                if part
-            }
-        except UnicodeDecodeError as exc:
-            raise ValueError("neighbor paths must be valid UTF-8") from exc
+    if ordered_symbols and symbol_search_paths:
+        grep_output_bytes = 0
+        for start in range(0, len(symbol_search_paths), _DISCOVERY_SYMBOL_SEARCH_BATCH_SIZE):
+            path_batch = symbol_search_paths[
+                start : start + _DISCOVERY_SYMBOL_SEARCH_BATCH_SIZE
+            ]
+            command = ["git", "-C", str(repository), "grep", "-I", "-F", "-w", "-l", "-z"]
+            for symbol in ordered_symbols:
+                command.extend(("-e", symbol))
+            command.extend((context.head_sha, "--"))
+            command.extend(f":(literal){path}" for path in path_batch)
+            result = subprocess.run(command, capture_output=True, check=False)
+            if result.returncode not in {0, 1}:
+                raise ValueError("pinned Git symbol search failed")
+            grep_output_bytes += len(result.stdout)
+            if grep_output_bytes > _DISCOVERY_MAX_TOTAL_BYTES:
+                raise ValueError("neighbor scan result exceeds the output limit")
+            try:
+                grep_paths.update(
+                    part.decode("utf-8").split(":", 1)[-1]
+                    for part in result.stdout.split(b"\0")
+                    if part
+                )
+            except UnicodeDecodeError as exc:
+                raise ValueError("neighbor paths must be valid UTF-8") from exc
 
-    changed_path_tokens = set().union(*(_path_tokens(path) for path in changed))
-    test_paths = {
-        path
-        for path in tracked
-        if _TEST_PATH.search(path) and (_path_tokens(path) & changed_path_tokens)
-    }
     candidates = []
     candidate_paths = sorted(
-        (grep_paths | test_paths) - changed,
+        (grep_paths | referenced_module_paths | test_paths | dependency_manifest_paths) - changed,
         key=lambda path: (
-            0 if "test" in _neighbor_categories(path) else
-            1 if "contract" in _neighbor_categories(path) else 2,
-            0 if path in grep_paths else 1,
+            0 if path in dependency_manifest_paths else
+            1 if path in referenced_module_paths else
+            2 if path in grep_paths and "test" in _neighbor_categories(path) else
+            3 if path in grep_paths and "contract" in _neighbor_categories(path) else
+            4 if path in grep_paths else 5,
             path,
         ),
-    )[:min(_DISCOVERY_MAX_CANDIDATES * 4, max_candidates * 4)]
+    )[:min(_DISCOVERY_MAX_CANDIDATE_SCAN_PATHS, max_candidates * 2)]
     for path in candidate_paths:
         if path not in tracked_set:
             continue
         size = int(_git(repository, "cat-file", "-s", f"{context.head_sha}:{path}"))
-        if size > _DISCOVERY_MAX_SOURCE_BYTES or total_bytes + size > _DISCOVERY_MAX_TOTAL_BYTES:
+        if (
+            size > _DISCOVERY_MAX_SOURCE_BYTES
+            or total_bytes + symbol_search_bytes + size > _DISCOVERY_MAX_TOTAL_BYTES
+        ):
             skipped_by_limits += 1
             continue
         source = _git(repository, "show", f"{context.head_sha}:{path}")
@@ -384,14 +727,30 @@ def discover_neighbor_evidence(
             {"symbol": symbol, "lines": lines[:8], "more_lines": len(lines) > 8}
             for symbol, lines in sorted(matches_by_symbol.items())
         ]
-        categories = _neighbor_categories(path)
+        categories = list(_neighbor_categories(path))
+        declarations = set(matches_by_symbol) & set(_defined_symbols(path, source))
+        if declarations and categories == ["caller"]:
+            categories = ["declaration"]
+        elif declarations:
+            categories.append("declaration")
+        if path in dependency_manifest_paths:
+            if categories == ["caller"]:
+                categories = ["dependency"]
+            else:
+                categories.append("dependency")
         reasons = []
         if matches:
             reasons.append("symbol_reference")
+        if declarations:
+            reasons.append("symbol_declaration")
         if "test" in categories and path in test_paths:
             reasons.append("test_path_convention")
         if "contract" in categories and matches:
             reasons.append("contract_path_and_symbol_reference")
+        if path in dependency_manifest_paths:
+            reasons.append("test_dependency_manifest")
+        if path in referenced_module_paths:
+            reasons.append("local_module_import")
         if not reasons:
             continue
         candidates.append(
@@ -407,7 +766,10 @@ def discover_neighbor_evidence(
 
     candidates.sort(
         key=lambda item: (
-            0 if "test" in item["categories"] else 1 if "contract" in item["categories"] else 2,
+            0 if "dependency" in item["categories"] else
+            1 if "declaration" in item["categories"] else
+            2 if "test" in item["categories"] else
+            3 if "contract" in item["categories"] else 4,
             item["path"],
         )
     )
@@ -424,6 +786,7 @@ def discover_neighbor_evidence(
             sha256=candidate["sha256"],
             revision=context.head_sha,
             path=candidate["path"],
+            source_text_available=True,
         )
         used_refs.add(record.evidence_ref)
         next_id += 1
@@ -436,16 +799,31 @@ def discover_neighbor_evidence(
         "head_sha": context.head_sha,
         "diff_sha256": context.diff_sha256,
         "changed_files": list(context.changed_files),
-        "defined_symbols": list(ordered_symbols),
+        "defined_symbols": list(ordered_defined_symbols),
+        "referenced_symbols": list(ordered_referenced_symbols),
+        "referenced_module_paths": sorted(referenced_module_paths),
+        "searched_symbols": list(ordered_symbols),
         "candidate_records": records,
         "candidate_limit": max_candidates,
-        "candidate_scan_limit": min(_DISCOVERY_MAX_CANDIDATES * 4, max_candidates * 4),
+        "candidate_scan_limit": min(_DISCOVERY_MAX_CANDIDATE_SCAN_PATHS, max_candidates * 2),
+        "symbol_search_scope": "ranked_path_candidates",
+        "symbol_search_path_limit": _DISCOVERY_MAX_SYMBOL_SEARCH_PATHS,
+        "symbol_search_bytes_limit": _DISCOVERY_MAX_SYMBOL_SEARCH_BYTES,
+        "symbol_search_bytes_considered": symbol_search_bytes,
+        "symbol_search_candidate_paths": len(symbol_search_candidate_paths),
+        "symbol_search_paths_considered": len(symbol_search_paths),
+        "symbol_search_paths_skipped_by_size": symbol_search_paths_skipped_by_size,
+        "symbol_search_paths_omitted_by_limit": (
+            len(symbol_search_candidate_paths) - len(symbol_search_paths)
+        ),
+        "symbol_search_exhaustive": False,
         "source_files_scanned": scanned_sources,
         "sources_skipped_by_scan_limits": skipped_by_limits,
         "exhaustive": False,
         "notes": [
             "These are host-review suggestions, not an evidence-completeness claim.",
-            "Review candidates and reconcile callers/contracts with CodeGraph before binding them.",
+            "Symbol search is limited to ranked path-related files; missing callers are not evidence of absence.",
+            "Reconcile callers/contracts with CodeGraph before binding neighbor evidence.",
             "Add accepted record objects and refs to the full registry before building the Evidence Packet.",
         ],
     }
@@ -467,7 +845,8 @@ def evidence_main(argv: list[str]) -> int:
     chunks.add_argument("--max-bytes", default=16000, type=int)
     chunks.add_argument("--output", type=Path)
     discover = subparsers.add_parser(
-        "discover", help="Suggest pinned caller, contract and test evidence around changed symbols"
+        "discover",
+        help="Suggest pinned declarations, callers, contracts, tests and test dependency manifests",
     )
     discover.add_argument("--max-candidates", default=50, type=int)
     pack = subparsers.add_parser("pack", help="Build exact profile-selectable context from pinned refs")

@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import statistics
 import subprocess
 from collections import defaultdict
@@ -11,7 +12,14 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from qa_orchestrator.contracts import GitObjectId, ReviewFindingCandidate, Sha256Digest
 
@@ -26,6 +34,19 @@ class GoldFinding(BaseModel):
     path: str = Field(min_length=1, max_length=1024)
     start_line: int = Field(ge=1)
     end_line: int = Field(ge=1)
+    scope: Literal["introduced-by-pr", "exacerbated-by-pr", "pre-existing"] | None = None
+    difficulty: Literal["easy", "medium", "hard"] | None = None
+    context_required: Literal[
+        "diff-only", "diff-plus-related-files", "broader-project-context"
+    ] | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_optional_reviewbench_metadata(self, handler):
+        payload = handler(self)
+        for field in ("scope", "difficulty", "context_required"):
+            if getattr(self, field) is None:
+                payload.pop(field, None)
+        return payload
 
     @model_validator(mode="after")
     def valid_range(self) -> "GoldFinding":
@@ -42,16 +63,41 @@ class BenchmarkCase(BaseModel):
     base_sha: GitObjectId
     head_sha: GitObjectId
     diff_sha256: Sha256Digest
+    task_title: str | None = Field(default=None, max_length=4000)
+    task_body: str | None = Field(default=None, max_length=30000)
+    pull_request_url: str | None = Field(default=None, max_length=2048)
+    language: str | None = Field(default=None, max_length=128)
+    diff_bytes: int | None = Field(default=None, ge=0)
+    task_context_sha256: Sha256Digest | None = None
     gold: tuple[GoldFinding, ...] = Field(max_length=1000)
     gold_complete: bool = False
 
-    @field_validator("base_sha", "head_sha", "diff_sha256")
+    @model_serializer(mode="wrap")
+    def serialize_optional_reviewbench_context(self, handler):
+        payload = handler(self)
+        for field in (
+            "task_title", "task_body", "pull_request_url", "language", "diff_bytes",
+            "task_context_sha256",
+        ):
+            if getattr(self, field) is None:
+                payload.pop(field, None)
+        return payload
+
+    @field_validator("base_sha", "head_sha", "diff_sha256", "task_context_sha256")
     @classmethod
-    def normalize_hashes(cls, value: str) -> str:
-        return value.lower()
+    def normalize_hashes(cls, value: str | None) -> str | None:
+        return value.lower() if value is not None else None
 
     @model_validator(mode="after")
     def unique_gold(self) -> "BenchmarkCase":
+        if (self.task_title is not None or self.task_body is not None) != (
+            self.task_context_sha256 is not None
+        ):
+            raise ValueError("task title/body and task context hash must be provided together")
+        if self.task_context_sha256 is not None and self.task_context_sha256 != (
+            _task_context_sha256(self.task_title, self.task_body)
+        ):
+            raise ValueError("task context hash does not match the pinned title/body")
         if self.base_sha == self.head_sha:
             raise ValueError("benchmark revisions must differ")
         if len({finding.gold_id for finding in self.gold}) != len(self.gold):
@@ -62,17 +108,29 @@ class BenchmarkCase(BaseModel):
 class BenchmarkDataset(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     kind: Literal["synthetic", "reviewbench_reference", "curated"]
     source: str = Field(min_length=1, max_length=1024)
     source_sha256: Sha256Digest | None = None
+    source_revision_status: Literal["caller_supplied_unverified"] | None = None
     cases: tuple[BenchmarkCase, ...] = Field(min_length=1, max_length=1000)
 
     @model_validator(mode="after")
     def unique_cases(self) -> "BenchmarkDataset":
         if len({case.case_id for case in self.cases}) != len(self.cases):
             raise ValueError("case IDs must be unique")
+        if self.schema_version == 1 and self.source_revision_status is not None:
+            raise ValueError("schema version 1 cannot declare source revision status")
+        if self.schema_version == 2 and self.source_revision_status != "caller_supplied_unverified":
+            raise ValueError("schema version 2 requires explicit source revision status")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_revision_status(self, handler):
+        payload = handler(self)
+        if self.source_revision_status is None:
+            payload.pop("source_revision_status", None)
+        return payload
 
 
 class CandidateAdjudication(BaseModel):
@@ -111,6 +169,7 @@ class BenchmarkRun(BaseModel):
     checklist_sha256: Sha256Digest
     host_instructions_sha256: Sha256Digest
     review_rules_sha256: Sha256Digest | None = None
+    task_context_sha256: Sha256Digest | None = None
     base_sha: GitObjectId
     head_sha: GitObjectId
     diff_sha256: Sha256Digest
@@ -122,6 +181,13 @@ class BenchmarkRun(BaseModel):
     adjudicator: str = Field(min_length=1, max_length=256)
     adjudications: tuple[CandidateAdjudication, ...] = Field(default=(), max_length=1000)
 
+    @model_serializer(mode="wrap")
+    def serialize_optional_task_context(self, handler):
+        payload = handler(self)
+        if self.task_context_sha256 is None:
+            payload.pop("task_context_sha256", None)
+        return payload
+
     @field_validator(
         "base_sha",
         "head_sha",
@@ -130,6 +196,7 @@ class BenchmarkRun(BaseModel):
         "checklist_sha256",
         "host_instructions_sha256",
         "review_rules_sha256",
+        "task_context_sha256",
     )
     @classmethod
     def normalize_hashes(cls, value: str | None) -> str | None:
@@ -180,17 +247,57 @@ class BenchmarkResults(BaseModel):
         return self
 
 
+def check_diff_budget(dataset: BenchmarkDataset, *, max_context_bytes: int) -> dict:
+    """Identify raw diffs that cannot fit; a pass does not guarantee packet fit."""
+    if type(max_context_bytes) is not int or max_context_bytes < 1:
+        raise ValueError("max_context_bytes must be a positive integer")
+
+    cases = []
+    over_budget_case_ids = []
+    unknown_case_ids = []
+    for case in dataset.cases:
+        if case.diff_bytes is None:
+            status = "unknown"
+            unknown_case_ids.append(case.case_id)
+        elif case.diff_bytes > max_context_bytes:
+            status = "raw_diff_over_budget"
+            over_budget_case_ids.append(case.case_id)
+        else:
+            status = "raw_diff_within_budget"
+        cases.append(
+            {"case_id": case.case_id, "diff_bytes": case.diff_bytes, "status": status}
+        )
+
+    return {
+        "schema_version": 1,
+        "max_context_bytes": max_context_bytes,
+        "case_count": len(cases),
+        "over_budget_case_ids": over_budget_case_ids,
+        "unknown_case_ids": unknown_case_ids,
+        "scope": (
+            "Checks raw diff bytes only. A raw diff over budget cannot fit; a diff within "
+            "budget does not confirm that the serialized packet, source excerpts, or full "
+            "executor prompt fit."
+        ),
+        "cases": cases,
+    }
+
+
 def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dict:
     cases = {case.case_id: case for case in dataset.cases}
     summaries = []
     for run in results.runs:
         case = cases.get(run.case_id)
-        if case is None or (case.base_sha, case.head_sha, case.diff_sha256) != (
-            run.base_sha,
-            run.head_sha,
-            run.diff_sha256,
-        ):
+        if case is None:
+            raise ValueError("benchmark run references an unknown dataset case")
+        if (case.base_sha, case.head_sha) != (run.base_sha, run.head_sha):
             raise ValueError("benchmark run does not match a pinned dataset case")
+        if case.diff_sha256 != run.diff_sha256:
+            raise ValueError("benchmark run diff does not match the pinned dataset case")
+        if case.task_context_sha256 is not None and run.task_context_sha256 != (
+            case.task_context_sha256
+        ):
+            raise ValueError("benchmark run task context does not match the pinned dataset case")
         gold = {finding.gold_id: finding for finding in case.gold}
         if any(
             gold_id is not None and gold_id not in gold
@@ -225,6 +332,7 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
                 "case_id": run.case_id,
                 "configuration_id": run.configuration_id,
                 "evidence_packet_sha256": run.evidence_packet_sha256,
+                "task_context_sha256": run.task_context_sha256,
                 "candidates": len(run.candidates),
                 "valid": valid,
                 "matched_gold": len(matched),
@@ -245,13 +353,51 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
             }
         )
     by_configuration = defaultdict(list)
+    runs_by_configuration = defaultdict(list)
     for summary in summaries:
         by_configuration[summary["configuration_id"]].append(summary)
+    for run in results.runs:
+        runs_by_configuration[run.configuration_id].append(run)
     aggregates = {}
     for configuration, rows in by_configuration.items():
         count = sum(r["candidates"] for r in rows)
         missing_cases = sorted(set(cases) - {r["case_id"] for r in rows})
         gold_count = sum(r["gold_count"] for r in rows)
+        selected_runs = runs_by_configuration[configuration]
+        stratified_gold_recall = {}
+        for dimension in (
+            "severity",
+            "category",
+            "scope",
+            "difficulty",
+            "context_required",
+        ):
+            buckets = defaultdict(lambda: {"matched_gold": 0, "gold_count": 0})
+            for run in selected_runs:
+                case = cases[run.case_id]
+                matched_ids = {
+                    gold_id
+                    for decision in run.adjudications
+                    if decision.verdict == "matched"
+                    for gold_id in (decision.gold_id, *decision.additional_gold_ids)
+                }
+                for finding in case.gold:
+                    value = getattr(finding, dimension) or "unknown"
+                    buckets[value]["gold_count"] += 1
+                    buckets[value]["matched_gold"] += finding.gold_id in matched_ids
+            stratified_gold_recall[dimension] = {
+                value: {
+                    **counts,
+                    "recall": (
+                        counts["matched_gold"] / counts["gold_count"]
+                        if not missing_cases
+                        and all(cases[run.case_id].gold_complete for run in selected_runs)
+                        and counts["gold_count"]
+                        else None
+                    ),
+                }
+                for value, counts in sorted(buckets.items())
+            }
         aggregates[configuration] = {
             "runs": len(rows),
             "cases": sorted({r["case_id"] for r in rows}),
@@ -269,6 +415,7 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
             "output_tokens": sum(r["output_tokens"] for r in rows)
             if all(r["output_tokens"] is not None for r in rows)
             else None,
+            "gold_recall_by": stratified_gold_recall,
         }
     return {
         "schema_version": 1,
@@ -295,6 +442,10 @@ def score_reliability(
     for (configuration, case_id), runs in sorted(grouped.items()):
         if len({r.evidence_packet_sha256 for r in runs}) != 1:
             raise ValueError("repetitions must use the same Evidence Packet")
+        if len({r.task_context_sha256 for r in runs}) != 1:
+            raise ValueError("repetitions must use the same pinned task context")
+        if len({r.adjudicator for r in runs}) != 1:
+            raise ValueError("repetitions must use the same adjudicator")
         if len(runs) > expected_repetitions:
             raise ValueError("more attempts than the declared repetition budget")
         sets = [
@@ -407,6 +558,11 @@ def compare_speed(
         )
 
     per_case = []
+
+    def median_usage(runs: list[BenchmarkRun], field: str) -> float | None:
+        values = [getattr(run, field) for run in runs]
+        return statistics.median(values) if all(value is not None for value in values) else None
+
     for case_id in sorted(expected_cases):
         baseline = by_configuration[baseline_configuration][case_id]
         candidate = by_configuration[candidate_configuration][case_id]
@@ -416,15 +572,34 @@ def compare_speed(
             raise ValueError("repetitions must use the same Evidence Packet within each configuration")
         if baseline_packets != candidate_packets:
             raise ValueError("speed comparison requires the same Evidence Packet across configurations")
+        baseline_tasks = {run.task_context_sha256 for run in baseline}
+        candidate_tasks = {run.task_context_sha256 for run in candidate}
+        if len(baseline_tasks) != 1 or len(candidate_tasks) != 1 or baseline_tasks != candidate_tasks:
+            raise ValueError("speed comparison requires the same task context per case")
         baseline_median = statistics.median(run.elapsed_ms for run in baseline)
         candidate_median = statistics.median(run.elapsed_ms for run in candidate)
+        baseline_input_tokens = median_usage(baseline, "input_tokens")
+        candidate_input_tokens = median_usage(candidate, "input_tokens")
+        input_token_savings_percent = (
+            (baseline_input_tokens - candidate_input_tokens) / baseline_input_tokens * 100
+            if baseline_input_tokens is not None
+            and candidate_input_tokens is not None
+            and baseline_input_tokens > 0
+            else None
+        )
         per_case.append(
             {
                 "case_id": case_id,
                 "repetitions": repetitions,
                 "evidence_packet_sha256": next(iter(baseline_packets)),
+                "task_context_sha256": next(iter(baseline_tasks)),
                 "baseline_median_ms": baseline_median,
                 "candidate_median_ms": candidate_median,
+                "baseline_median_input_tokens": baseline_input_tokens,
+                "candidate_median_input_tokens": candidate_input_tokens,
+                "input_token_savings_percent": input_token_savings_percent,
+                "baseline_median_output_tokens": median_usage(baseline, "output_tokens"),
+                "candidate_median_output_tokens": median_usage(candidate, "output_tokens"),
                 "speedup_ratio": (
                     baseline_median / candidate_median if candidate_median > 0 else None
                 ),
@@ -450,6 +625,26 @@ def compare_speed(
         for case in per_case
         if case["improvement_percent"] is not None
     ]
+    baseline_input_total = (
+        sum(run.input_tokens for run in baseline_runs)
+        if all(run.input_tokens is not None for run in baseline_runs)
+        else None
+    )
+    candidate_input_total = (
+        sum(run.input_tokens for run in candidate_runs)
+        if all(run.input_tokens is not None for run in candidate_runs)
+        else None
+    )
+    baseline_output_total = (
+        sum(run.output_tokens for run in baseline_runs)
+        if all(run.output_tokens is not None for run in baseline_runs)
+        else None
+    )
+    candidate_output_total = (
+        sum(run.output_tokens for run in candidate_runs)
+        if all(run.output_tokens is not None for run in candidate_runs)
+        else None
+    )
     return {
         "schema_version": 1,
         "comparison": "same_model_same_pinned_input_host_elapsed_time",
@@ -468,9 +663,26 @@ def compare_speed(
             "candidate_median_ms": statistics.median(
                 case["candidate_median_ms"] for case in per_case
             ),
+            "baseline_total_input_tokens": baseline_input_total,
+            "candidate_total_input_tokens": candidate_input_total,
+            "input_token_savings": (
+                baseline_input_total - candidate_input_total
+                if baseline_input_total is not None and candidate_input_total is not None
+                else None
+            ),
+            "input_token_savings_percent": (
+                (baseline_input_total - candidate_input_total) / baseline_input_total * 100
+                if baseline_input_total is not None
+                and candidate_input_total is not None
+                and baseline_input_total > 0
+                else None
+            ),
+            "baseline_total_output_tokens": baseline_output_total,
+            "candidate_total_output_tokens": candidate_output_total,
         },
         "quality_by_configuration": quality,
         "timing_scope": "host-reported elapsed_ms; callback must measure the same end-to-end scope",
+        "usage_scope": "host-reported token counters; missing values are not treated as zero",
     }
 
 
@@ -505,16 +717,189 @@ def import_reviewbench(golden_path: Path, repository_path: Path) -> BenchmarkDat
         raise ValueError("invalid ReviewBench golden document") from exc
 
 
+def import_reviewbench_test_set(
+    test_set_path: Path,
+    findings_path: Path,
+    repositories_root: Path,
+    *,
+    source_revision: str,
+) -> BenchmarkDataset:
+    return import_reviewbench_case_set(
+        test_set_path,
+        findings_path,
+        repositories_root,
+        source_revision=source_revision,
+    )
+
+
+def import_reviewbench_case_set(
+    tasks_path: Path,
+    findings_path: Path,
+    repositories_root: Path,
+    *,
+    source_revision: str,
+    source_path: str = "corpus/test",
+) -> BenchmarkDataset:
+    if (
+        not isinstance(source_path, str)
+        or not re.fullmatch(r"corpus(?:/[A-Za-z0-9_.-]+)*", source_path)
+        or any(part in {".", ".."} for part in source_path.split("/"))
+    ):
+        raise ValueError("ReviewBench source path must be inside corpus")
+    try:
+        return _import_reviewbench_case_set(
+            tasks_path,
+            findings_path,
+            repositories_root,
+            source_revision=source_revision,
+            source_path=source_path,
+        )
+    except (KeyError, TypeError) as exc:
+        raise ValueError("invalid ReviewBench case-set documents") from exc
+
+
+def _import_reviewbench_case_set(
+    tasks_path: Path,
+    findings_path: Path,
+    repositories_root: Path,
+    *,
+    source_revision: str,
+    source_path: str,
+) -> BenchmarkDataset:
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", source_revision):
+        raise ValueError("ReviewBench source revision must be a full commit SHA")
+
+    tasks_raw = tasks_path.read_bytes()
+    findings_raw = findings_path.read_bytes()
+    tasks = json.loads(tasks_raw)
+    findings_by_case = json.loads(findings_raw)
+    if not isinstance(tasks, list) or not tasks or not isinstance(findings_by_case, dict):
+        raise ValueError("invalid ReviewBench case-set documents")
+
+    case_ids = set()
+    validated_tasks = []
+    for task in tasks:
+        nwo = task["nwo"]
+        if not isinstance(nwo, str) or not re.fullmatch(
+            r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", nwo
+        ):
+            raise ValueError("invalid ReviewBench repository identity")
+        owner, repository_name = nwo.split("/")
+        if owner in {".", ".."} or repository_name in {".", ".."}:
+            raise ValueError("invalid ReviewBench repository identity")
+        pr_number = task["pr_number"]
+        base_sha = task["base"]
+        head_sha = task["head"]
+        if type(pr_number) is not int or pr_number < 1:
+            raise ValueError("invalid ReviewBench pull-request number")
+        if not all(
+            isinstance(revision, str) and re.fullmatch(r"[0-9a-fA-F]{40}", revision)
+            for revision in (base_sha, head_sha)
+        ):
+            raise ValueError("ReviewBench base and head must be full commit SHAs")
+        case_id = f"{owner}_{repository_name}_{pr_number}-{head_sha[:8]}"
+        if case_id in case_ids:
+            raise ValueError("duplicate ReviewBench test-set case")
+        case_ids.add(case_id)
+        if task["repo"] != f"https://github.com/{nwo}":
+            raise ValueError("ReviewBench repository URL does not match its identity")
+        pull_request_url = task.get("pr_url")
+        if pull_request_url is not None and pull_request_url != (
+            f"https://github.com/{nwo}/pull/{pr_number}"
+        ):
+            raise ValueError("ReviewBench pull-request URL does not match its identity")
+        for field in ("title", "body", "language"):
+            if task.get(field) is not None and not isinstance(task[field], str):
+                raise ValueError(f"ReviewBench {field} must be a string")
+        validated_tasks.append((case_id, task, owner, repository_name))
+
+    missing_findings = sorted(case_ids - set(findings_by_case))
+    if missing_findings:
+        raise ValueError(f"missing ReviewBench findings for {missing_findings[0]}")
+    if set(findings_by_case) != case_ids:
+        raise ValueError("ReviewBench findings keys do not match the test-set cases")
+
+    cases = []
+    for case_id, task, owner, repository_name in validated_tasks:
+        case_findings = findings_by_case[case_id]
+        if not isinstance(case_findings, list):
+            raise TypeError(f"ReviewBench findings for {case_id} must be a list")
+        repository_path = repositories_root / f"{owner}_{repository_name}"
+        if not repository_path.is_dir():
+            raise ValueError(f"missing local ReviewBench mirror for {case_id}")
+        cases.append(
+            _build_reviewbench_case(
+                case_id=case_id,
+                repository=task["repo"],
+                base_sha=task["base"],
+                head_sha=task["head"],
+                findings=case_findings,
+                repository_path=repository_path,
+                task_title=task.get("title"),
+                task_body=task.get("body"),
+                pull_request_url=task.get("pr_url"),
+                language=task.get("language"),
+            )
+        )
+
+    return BenchmarkDataset(
+        schema_version=2,
+        kind="reviewbench_reference",
+        source=(
+            "https://github.com/review-bench/ReviewBench/tree/"
+            f"{source_revision.lower()}/{source_path}"
+        ),
+        source_sha256=hashlib.sha256(tasks_raw + b"\0" + findings_raw).hexdigest(),
+        source_revision_status="caller_supplied_unverified",
+        cases=tuple(cases),
+    )
+
+
 def _import_reviewbench(golden_path: Path, repository_path: Path) -> BenchmarkDataset:
     raw = golden_path.read_bytes()
     document = json.loads(raw)
     pr = document["pr"]
     # Validate revisions before passing them as git arguments.
-    case = BenchmarkCase(
+    case = _build_reviewbench_case(
         case_id=document["pr_key"],
         repository=pr["repo"],
         base_sha=pr["base"],
         head_sha=pr["head"],
+        findings=document["findings"],
+        repository_path=repository_path,
+        task_title=pr.get("title"),
+        task_body=pr.get("body"),
+        pull_request_url=pr.get("url"),
+        language=pr.get("language"),
+    )
+
+    return BenchmarkDataset(
+        kind="reviewbench_reference",
+        source="https://github.com/review-bench/ReviewBench",
+        source_sha256=hashlib.sha256(raw).hexdigest(),
+        cases=(case,),
+    )
+
+
+def _build_reviewbench_case(
+    *,
+    case_id: str,
+    repository: str,
+    base_sha: str,
+    head_sha: str,
+    findings: list[dict],
+    repository_path: Path,
+    task_title: str | None = None,
+    task_body: str | None = None,
+    pull_request_url: str | None = None,
+    language: str | None = None,
+) -> BenchmarkCase:
+    # Validate revisions before passing them as git arguments.
+    case = BenchmarkCase(
+        case_id=case_id,
+        repository=repository,
+        base_sha=base_sha,
+        head_sha=head_sha,
         diff_sha256="0" * 64,
         gold=(),
     )
@@ -545,24 +930,38 @@ def _import_reviewbench(golden_path: Path, repository_path: Path) -> BenchmarkDa
             path=finding["file"],
             start_line=finding["start_line"],
             end_line=finding["end_line"],
+            scope=finding.get("scope"),
+            difficulty=finding.get("difficulty"),
+            context_required=finding.get("context_required"),
         )
-        for index, finding in enumerate(document["findings"], start=1)
-        if finding["tp_fp"] == "tp"
+        for index, finding in enumerate(findings, start=1)
+        if finding.get("tp_fp", "tp") == "tp"
     )
-    return BenchmarkDataset(
-        kind="reviewbench_reference",
-        source="https://github.com/review-bench/ReviewBench",
-        source_sha256=hashlib.sha256(raw).hexdigest(),
-        cases=(
-            case.model_copy(
-                update={
-                    "diff_sha256": hashlib.sha256(result.stdout).hexdigest(),
-                    "gold": gold,
-                    "gold_complete": True,
-                }
-            ),
-        ),
+    return BenchmarkCase.model_validate(
+        {
+            **case.model_dump(mode="python"),
+            "diff_sha256": hashlib.sha256(result.stdout).hexdigest(),
+            "task_title": task_title,
+            "task_body": task_body,
+            "pull_request_url": pull_request_url,
+            "language": language,
+            "diff_bytes": len(result.stdout),
+            "task_context_sha256": _task_context_sha256(task_title, task_body),
+            "gold": gold,
+            "gold_complete": True,
+        }
     )
+
+
+def _task_context_sha256(title: str | None, body: str | None) -> str | None:
+    if title is None and body is None:
+        return None
+    context = json.dumps(
+        {"title": title or "", "body": body or ""},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(context).hexdigest()
 
 
 def benchmark_main(argv: list[str]) -> int:
@@ -590,9 +989,39 @@ def benchmark_main(argv: list[str]) -> int:
     prepare.add_argument("--golden", required=True, type=Path)
     prepare.add_argument("--repository", required=True, type=Path)
     prepare.add_argument("--output", required=True, type=Path)
+    prepare_set = subparsers.add_parser(
+        "import-reviewbench-set", help="Import a ReviewBench case-set dataset"
+    )
+    prepare_set.add_argument("--test-set", "--tasks", dest="test_set", required=True, type=Path)
+    prepare_set.add_argument("--findings", required=True, type=Path)
+    prepare_set.add_argument("--repositories-root", required=True, type=Path)
+    prepare_set.add_argument(
+        "--source-revision",
+        required=True,
+        help="Full commit SHA supplied by caller; not verified against the checkout",
+    )
+    prepare_set.add_argument("--source-path", default="corpus/test")
+    prepare_set.add_argument("--output", required=True, type=Path)
+    diff_budget = subparsers.add_parser(
+        "diff-budget", help="Flag raw diffs that exceed a supplied context byte budget"
+    )
+    diff_budget.add_argument("--dataset", required=True, type=Path)
+    diff_budget.add_argument("--max-context-bytes", required=True, type=int)
+    diff_budget.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     if args.command == "import-reviewbench":
         payload = import_reviewbench(args.golden, args.repository).model_dump(mode="json")
+    elif args.command == "import-reviewbench-set":
+        payload = import_reviewbench_case_set(
+            args.test_set,
+            args.findings,
+            args.repositories_root,
+            source_revision=args.source_revision,
+            source_path=args.source_path,
+        ).model_dump(mode="json")
+    elif args.command == "diff-budget":
+        dataset = BenchmarkDataset.model_validate_json(args.dataset.read_bytes())
+        payload = check_diff_budget(dataset, max_context_bytes=args.max_context_bytes)
     else:
         dataset = BenchmarkDataset.model_validate_json(args.dataset.read_bytes())
         results = BenchmarkResults.model_validate_json(args.results.read_bytes())

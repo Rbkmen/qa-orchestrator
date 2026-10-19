@@ -4,7 +4,7 @@ import json
 import pytest
 from test_evidence import pinned_evidence as pinned_evidence  # noqa: PLC0414
 
-from qa_orchestrator.contracts import EvidenceRecord
+from qa_orchestrator.contracts import EvidenceRecord, ReviewAgent
 from qa_orchestrator.evidence import register_evidence
 
 
@@ -63,6 +63,36 @@ def test_packet_rejects_tampered_content_and_duplicate_refs():
         ContextPacket(fragments=(bad,))
     with pytest.raises(ValueError, match="unique"):
         ContextPacket(fragments=(item, item))
+
+
+def test_source_text_status_must_match_omission_marker_and_excerpt():
+    from qa_orchestrator.context_pack import ContextFragment
+
+    omitted_text = (
+        "[Source content omitted from text context (binary or non-UTF-8); "
+        f"sha256={'a' * 64}]"
+    )
+    record = EvidenceRecord(
+        evidence_ref="S1",
+        kind="source",
+        revision="1" * 40,
+        path="assets/logo.png",
+        sha256="a" * 64,
+        source_text_available=True,
+    )
+    with pytest.raises(ValueError, match="omission marker conflicts"):
+        ContextFragment(record=record, text=omitted_text)
+
+    legacy_record = record.model_copy(update={"source_text_available": None})
+    ContextFragment(record=legacy_record, text=omitted_text)
+
+    unavailable_record = record.model_copy(update={"source_text_available": False})
+    excerpt = "actual source text"
+    unavailable_record = unavailable_record.model_copy(
+        update={"sha256": hashlib.sha256(excerpt.encode()).hexdigest()}
+    )
+    with pytest.raises(ValueError, match="marked unavailable"):
+        ContextFragment(record=unavailable_record, text=excerpt)
 
 
 def test_dedup_preserves_aliases_and_optional_overflow_is_explicit():
@@ -130,13 +160,31 @@ def test_source_builder_reads_git_and_cache_never_reads_dirty_worktree(pinned_ev
     assert source.record.start_line == 2
 
 
-def test_changed_source_cannot_be_marked_optional(pinned_evidence):
-    from qa_orchestrator.context_pack import build_context_packet
+def test_changed_source_can_be_omitted_by_profile_or_budget(pinned_evidence):
+    from qa_orchestrator.context_pack import (
+        ContextPacket,
+        build_context_packet,
+        select_context,
+        validate_packet_context,
+    )
 
     repo, _, context, definitions = pinned_evidence
     context = register_evidence(context, definitions, repo)
-    with pytest.raises(ValueError, match="changed source"):
-        build_context_packet(context, repo, optional_profiles={"S1": ("pr_test_analyzer",)})
+    packet = build_context_packet(
+        context,
+        repo,
+        optional_profiles={"S1": (ReviewAgent.CODE_REVIEWER,)},
+    )
+    validate_packet_context(packet, context)
+    source_fragment = next(fragment for fragment in packet.fragments if fragment.record.evidence_ref == "S1")
+    assert not source_fragment.required
+
+    diff_fragment = next(fragment for fragment in packet.fragments if fragment.record.evidence_ref == "D1")
+    diff_only = ContextPacket(fragments=(diff_fragment,), deleted_paths=packet.deleted_paths)
+    budget = len(select_context(diff_only, ReviewAgent.CODE_REVIEWER, max_bytes=2_000_000).text.encode())
+    selected = select_context(packet, ReviewAgent.CODE_REVIEWER, max_bytes=budget)
+    assert "D1" in selected.included_refs
+    assert "S1" in selected.budget_omitted_refs
 
 
 def test_packet_marks_binary_source_as_omitted_and_keeps_raw_hash(pinned_evidence):
@@ -185,6 +233,7 @@ def test_packet_marks_binary_source_as_omitted_and_keeps_raw_hash(pinned_evidenc
     binary_fragment = next(f for f in packet.fragments if f.record.evidence_ref == "B1")
     assert binary_fragment.text == _omitted_source_text(binary_fragment.record.sha256)
     assert binary_fragment.record.sha256 == hashlib.sha256(binary_path.read_bytes()).hexdigest()
+    assert binary_fragment.record.model_dump().get("source_text_available") is False
     validate_packet_context(packet, bound)
     packed = select_context(packet, "python_reviewer", max_bytes=2_000_000)
     assert binary_fragment.text in packed.text
@@ -255,16 +304,21 @@ def test_packet_limit_matches_exact_serialized_size(pinned_evidence, monkeypatch
         build_context_packet(bound, repo)
 
 
-@pytest.mark.parametrize("index", [0, 1])
-def test_builder_rejects_missing_mandatory_artifact(pinned_evidence, index):
+def test_builder_requires_diff_but_allows_missing_changed_source(pinned_evidence):
     from qa_orchestrator.context_pack import build_context_packet
 
     repo, _, context, definitions = pinned_evidence
-    record = definitions[index]
-    context = context.model_copy(update={"evidence_refs": (record["evidence_ref"],)})
-    context = register_evidence(context, [record], repo)
-    with pytest.raises(ValueError, match="mandatory"):
-        build_context_packet(context, repo)
+    diff_record = definitions[1]
+    diff_only_context = context.model_copy(update={"evidence_refs": (diff_record["evidence_ref"],)})
+    diff_only_context = register_evidence(diff_only_context, [diff_record], repo)
+    packet = build_context_packet(diff_only_context, repo)
+    assert [fragment.record.evidence_ref for fragment in packet.fragments] == ["D1"]
+
+    source_record = definitions[0]
+    source_only_context = context.model_copy(update={"evidence_refs": (source_record["evidence_ref"],)})
+    source_only_context = register_evidence(source_only_context, [source_record], repo)
+    with pytest.raises(ValueError, match="mandatory diff"):
+        build_context_packet(source_only_context, repo)
 
 
 def test_modified_file_requires_head_source(pinned_evidence):
@@ -273,7 +327,7 @@ def test_modified_file_requires_head_source(pinned_evidence):
     repo, _, context, definitions = pinned_evidence
     definitions[0]["revision"] = context.base_sha
     context = register_evidence(context, definitions, repo)
-    with pytest.raises(ValueError, match="mandatory.*revision"):
+    with pytest.raises(ValueError, match="pinned revision"):
         build_context_packet(context, repo)
 
 

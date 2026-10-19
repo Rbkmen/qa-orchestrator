@@ -198,8 +198,9 @@ def build_server(service: OrchestratorService) -> FastMCP:
                     "Broad request category: ordinary_review for implementation review, widget_review "
                     "for widget changes, epic_analysis for broad exploration, requirements_analysis "
                     "for requirement review, qa_planning for coverage planning, autotest_implementation "
-                    "for automation work, or other. This affects recommended_bundles only; the host "
-                    "chooses the route from changed files and evidence; it is not a risk level."
+                    "for automation work, or other. This shapes the task-type shortlist; review_context may "
+                    "append stack-matched bundles. The host chooses the route from changed files and evidence; "
+                    "this is not a risk level."
                 )
             ),
         ],
@@ -210,7 +211,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
                     "Optional immutable repository, base/head, changed-file, diff, and Evidence Packet identity. "
                     "When supplied, every completed profile must include a structured report whose "
                     "evidence references belong to this packet; completed outcomes require a final report. "
-                    "The response may include file-type-based recommended_profiles as non-binding hints."
+                    "The response may include file-type-based recommended_profiles and stack-matched "
+                    "recommended_bundles as non-binding hints."
                     " Optional evidence_registry metadata binds each ref to a source kind, revision, "
                     "coordinates and content hash. The host verifies actual content locally."
                 )
@@ -417,7 +419,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
 
     @mcp.tool(title="Inspect one QA session", annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def get_qa_orchestration(run_id: RunId) -> QaOrchestrationSession:
-        """Read one retained run_id's state, including bound review context and structured reports.
+        """Read one retained run_id's state, audit trace, bound context and structured reports.
 
         Use run_id on the server retaining that session to resume or reconcile a lost
         advance_qa_orchestration response. Reads do not extend expires_at. Errors `unknown run_id` or

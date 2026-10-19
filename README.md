@@ -111,11 +111,11 @@ The Python bundle starts all profiles together; required context must be supplie
 
 ## Evidence and context
 
-A bound `ReviewContext` pins repository identity, full base/head commits, diff and packet SHA-256, changed paths, and evidence IDs. Optional registry metadata adds source hashes, coordinates and external locators. Bound profiles submit structured reports; finding coordinates must be supported by cited head-source records when a registry is supplied.
+A bound `ReviewContext` pins repository identity, full base/head commits, diff and packet SHA-256, changed paths, and evidence IDs. Optional registry metadata adds source hashes, coordinates, text availability and external locators. Binary and non-UTF-8 source stays hash-bound but cannot support source coordinates. Bound profiles submit structured reports; finding coordinates must be supported by cited, text-available head-source records when a registry is supplied.
 
 Local utilities verify immutable Git bytes, hashes and coordinates. External requirements/runtime evidence remains unverified by the Git checker. The MCP server validates identifiers and citations; it does not read the raw packet.
 
-Exact context packing retains original UTF-8 fragments without summarizing or truncating them. Changed source, diff and supplied requirements remain mandatory. Optional omissions are declared; mandatory overflow fails before execution. Reports cannot cite omitted refs. The Codex executor defaults to 1,500,000 rendered bytes and a 2 MB serialized packet limit, not token limits. Source caching is bounded and in memory; Python AST chunks preserve source coordinates.
+Exact context packing retains original UTF-8 fragments without summarizing or truncating them. The bound diff and supplied requirements remain mandatory; changed-source excerpts can be omitted or made profile-optional when the diff covers the change. Optional omissions are declared, and reports cannot cite omitted refs. A precise finding location still requires a cited head-source excerpt for that path. Mandatory overflow fails before execution. The Codex executor keeps a 1,000,000-byte context budget and a 2 MB serialized packet limit, while capping the complete CLI prompt at 1,000,000 UTF-8 bytes to stay below Codex CLI's 1,048,576-character input limit. These are byte/character limits, not token limits. Source caching is bounded and in memory; Python AST chunks preserve source coordinates.
 
 See [Evidence Registry](docs/EVIDENCE_REGISTRY.md) and [context packing](docs/REVIEW_UPGRADES.md#7-exact-context-packing).
 
@@ -169,11 +169,11 @@ Reads do not extend TTL. Deletion neither finalizes a review nor cancels host ex
 |---|---|
 | `qa-orch setup` / `setup --host-default` | Configure per-stage models or return to host settings |
 | `qa-orch config show` / `reload` | Inspect/validate the saved policy |
-| `qa-orch evidence discover` | Suggest pinned callers, contracts and conventionally named tests |
+| `qa-orch evidence discover` | Suggest pinned declarations, imported modules, callers, contracts, tests and test dependency manifests |
 | `qa-orch evidence build` / `verify` | Register/verify source and diff |
 | `qa-orch evidence pack` / `chunks` | Exact context packets/source chunks |
 | `qa-orch rules` | Bind explicit review rules |
-| `qa-orch benchmark import-reviewbench` / `score` / `reliability` / `compare` | Import, score repetitions and compare same-model speed runs |
+| `qa-orch benchmark import-reviewbench` / `import-reviewbench-set` / `diff-budget` / `score` / `reliability` / `compare` | Import references, preflight raw diff budgets, score repetitions and compare same-model speed runs |
 | `qa-orchestrator-doctor --json` | Read-only local diagnostics |
 
 `qa-orchestrator` aliases `qa-orch`. Running either without a subcommand starts the MCP server. These tools do not provide a one-command MR review and publication flow.

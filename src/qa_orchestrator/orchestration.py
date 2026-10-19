@@ -317,11 +317,122 @@ class QaTransitionReceipt(BaseModel):
     applied_revision: int = Field(ge=1)
 
 
+class QaAuditEvent(BaseModel):
+    """Hash-chained record of one host-submitted orchestration transition."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: str = Field(pattern=r"^qar-[0-9a-f]{32}$")
+    sequence: int = Field(ge=1)
+    event_type: Literal["session_started", "transition_applied", "session_finalized"]
+    revision: int = Field(ge=0)
+    recorded_at: AwareDatetime
+    from_status: OrchestrationStatus | None = None
+    to_status: OrchestrationStatus
+    from_step: OrchestrationStep | None = None
+    to_step: OrchestrationStep
+    selected_bundle: ReviewBundle | None = None
+    selected_profile: ReviewAgent | None = None
+    current_profile: ReviewAgent | None = None
+    completed_profiles: tuple[ReviewAgent, ...] = ()
+    request_id: str | None = None
+    request_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    previous_event_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    event_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def verify_event_hash(self) -> "QaAuditEvent":
+        if self.event_type == "session_started":
+            if (
+                self.revision != 0
+                or self.from_status is not None
+                or self.from_step is not None
+                or self.request_sha256 is None
+                or self.to_status is not OrchestrationStatus.ACTIVE
+                or self.to_step is not OrchestrationStep.TRIAGE
+                or self.selected_bundle is not None
+                or self.selected_profile is not None
+                or self.current_profile is not None
+                or self.completed_profiles
+            ):
+                raise ValueError("session-start audit event has invalid source state")
+        elif (
+            self.from_status is None
+            or self.from_step is None
+            or self.request_sha256 is None
+        ):
+            raise ValueError("transition audit event is missing source state or request hash")
+        elif self.event_type == "session_finalized" and self.to_status not in {
+            OrchestrationStatus.COMPLETED,
+            OrchestrationStatus.PARTIAL,
+            OrchestrationStatus.BLOCKED,
+        }:
+            raise ValueError("session-finalized audit event has a nonterminal status")
+        if self.event_sha256 != _audit_event_sha256(self):
+            raise ValueError("QA audit event hash mismatch")
+        return self
+
+
+def _audit_event_sha256(event: QaAuditEvent) -> str:
+    payload = event.model_dump(mode="json", exclude={"event_sha256"})
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _stable_json_sha256(payload: dict) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _append_audit_event(
+    session: "QaOrchestrationSession",
+    *,
+    event_type: Literal["session_started", "transition_applied", "session_finalized"],
+    revision: int,
+    recorded_at: datetime,
+    from_status: OrchestrationStatus | None,
+    from_step: OrchestrationStep | None,
+    request_id: str | None = None,
+    request_sha256: str | None = None,
+) -> "QaOrchestrationSession":
+    events = session.audit_events
+    event = QaAuditEvent.model_construct(
+        run_id=session.run_id,
+        sequence=len(events) + 1,
+        event_type=event_type,
+        revision=revision,
+        recorded_at=recorded_at,
+        from_status=from_status,
+        to_status=session.status,
+        from_step=from_step,
+        to_step=session.current_step,
+        selected_bundle=session.selected_bundle,
+        selected_profile=session.selected_profile,
+        current_profile=session.current_profile,
+        completed_profiles=tuple(session.completed_profiles),
+        request_id=request_id,
+        request_sha256=request_sha256,
+        previous_event_sha256=events[-1].event_sha256 if events else None,
+        event_sha256="0" * 64,
+    )
+    event = event.model_copy(update={"event_sha256": _audit_event_sha256(event)})
+    return session.model_copy(update={"audit_events": [*events, event]})
+
+
 class QaOrchestrationSession(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     run_id: str = Field(pattern=r"^qar-[0-9a-f]{32}$")
     revision: int = Field(default=0, ge=0, description="Workflow revision for conditional writes.")
+    audit_trace_complete: bool = Field(
+        default=False,
+        description="True when the retained audit trace starts with session creation.",
+    )
+    audit_events: list[QaAuditEvent] = Field(
+        default_factory=list,
+        max_length=256,
+        description="Bounded hash-chained host-submitted workflow trace; no raw request bodies.",
+    )
     transition_receipts: list[QaTransitionReceipt] = Field(
         default_factory=list, max_length=128,
         description="Bounded request hashes for safe replay; no raw transition payloads are stored."
@@ -331,7 +442,10 @@ class QaOrchestrationSession(BaseModel):
     current_step: OrchestrationStep
     allowed_profiles: list[ReviewAgent] = Field(default_factory=lambda: list(ReviewAgent))
     allowed_bundles: list[ReviewBundle] = Field(default_factory=lambda: list(REVIEW_BUNDLES))
-    recommended_bundles: list[ReviewBundle] = Field(default_factory=list)
+    recommended_bundles: list[ReviewBundle] = Field(
+        default_factory=list,
+        description="Task- and changed-file-based shortlists only; the host selects the route.",
+    )
     recommended_profiles: list[ReviewAgent] = Field(
         default_factory=list,
         description="File-type-based profile hints only; the host selects the route.",
@@ -355,10 +469,57 @@ class QaOrchestrationSession(BaseModel):
 
     @model_validator(mode="after")
     def validate_review_artifacts(self) -> "QaOrchestrationSession":
+        previous_event_sha256 = None
+        previous_event_revision = None
+        previous_event = None
+        for sequence, event in enumerate(self.audit_events, start=1):
+            if event.run_id != self.run_id:
+                raise ValueError("QA audit event belongs to a different session")
+            if event.sequence != sequence:
+                raise ValueError("QA audit event sequence is not contiguous")
+            if event.previous_event_sha256 != previous_event_sha256:
+                raise ValueError("QA audit event chain is broken")
+            if previous_event is not None and (
+                event.from_status is not previous_event.to_status
+                or event.from_step is not previous_event.to_step
+            ):
+                raise ValueError("QA audit event source state does not match prior state")
+            if event.revision > self.revision:
+                raise ValueError("QA audit event cannot exceed the session revision")
+            if (
+                previous_event_revision is not None
+                and event.revision != previous_event_revision + 1
+            ):
+                raise ValueError("QA audit event revisions are not contiguous")
+            previous_event = event
+            previous_event_sha256 = event.event_sha256
+            previous_event_revision = event.revision
+        if self.audit_events:
+            if self.audit_trace_complete and (
+                self.audit_events[0].event_type != "session_started"
+                or self.audit_events[0].revision != 0
+                or self.audit_events[0].from_status is not None
+                or self.audit_events[0].from_step is not None
+            ):
+                raise ValueError("complete QA audit trace must begin with session creation")
+            latest = self.audit_events[-1]
+            if latest.revision != self.revision:
+                raise ValueError("latest QA audit event must match the session revision")
+            if (
+                latest.to_status is not self.status
+                or latest.to_step is not self.current_step
+                or latest.selected_bundle is not self.selected_bundle
+                or latest.selected_profile is not self.selected_profile
+                or latest.current_profile is not self.current_profile
+                or latest.completed_profiles != tuple(self.completed_profiles)
+            ):
+                raise ValueError("latest QA audit event does not match current session state")
         if len({r.request_id for r in self.transition_receipts}) != len(self.transition_receipts):
             raise ValueError("transition receipt request IDs must be unique")
         if any(r.applied_revision > self.revision for r in self.transition_receipts):
             raise ValueError("transition receipts cannot exceed the session revision")
+        if self.audit_trace_complete and not self.audit_events:
+            raise ValueError("complete QA audit trace cannot be empty")
         if self.review_context is None and (self.profile_reports or self.final_review_report):
             raise ValueError("review artifacts require a bound review context")
         if self.profile_reports and tuple(report.profile for report in self.profile_reports) != tuple(
@@ -618,7 +779,14 @@ class QaOrchestrator:
                 current_step=OrchestrationStep.TRIAGE,
                 allowed_profiles=list(ReviewAgent),
                 allowed_bundles=list(REVIEW_BUNDLES),
-                recommended_bundles=list(recommended_bundles_for(validated_task_type)),
+                recommended_bundles=list(
+                    recommended_bundles_for(
+                        validated_task_type,
+                        validated_review_context.changed_files
+                        if validated_review_context is not None
+                        else (),
+                    )
+                ),
                 recommended_profiles=list(
                     recommended_profiles_for_changed_files(
                         validated_review_context.changed_files
@@ -631,6 +799,26 @@ class QaOrchestrator:
                 next_action=_NEXT_ACTIONS[OrchestrationStep.TRIAGE],
                 expires_at=now + timedelta(seconds=self._ttl_seconds),
             )
+            start_sha256 = _stable_json_sha256(
+                {
+                    "task_type": str(validated_task_type),
+                    "review_context": (
+                        validated_review_context.model_dump(mode="json")
+                        if validated_review_context is not None
+                        else None
+                    ),
+                }
+            )
+            session = _append_audit_event(
+                session,
+                event_type="session_started",
+                revision=session.revision,
+                recorded_at=now,
+                from_status=None,
+                from_step=None,
+                request_sha256=start_sha256,
+            )
+            session = session.model_copy(update={"audit_trace_complete": True})
             self._save_session(session)
             return self._copy(session)
 
@@ -702,7 +890,9 @@ class QaOrchestrator:
                     ),
                     now,
                 )
-                updated = self._record_transition(session, updated, request, request_sha256)
+                updated = self._record_transition(
+                    session, updated, request, request_sha256, recorded_at=now
+                )
                 self._save_session(updated)
                 return self._copy(updated)
 
@@ -714,7 +904,9 @@ class QaOrchestrator:
                 raise OrchestrationError("changed profile after triage")
 
             updated = self._refresh_expiry(self._completed_transition(session, request), now)
-            updated = self._record_transition(session, updated, request, request_sha256)
+            updated = self._record_transition(
+                session, updated, request, request_sha256, recorded_at=now
+            )
             self._save_session(updated)
             return self._copy(updated)
 
@@ -722,6 +914,8 @@ class QaOrchestrator:
     def _record_transition(
         previous: QaOrchestrationSession, updated: QaOrchestrationSession,
         request: AdvanceQaOrchestrationRequest, request_sha256: str,
+        *,
+        recorded_at: datetime,
     ) -> QaOrchestrationSession:
         revision = previous.revision + 1
         receipts = list(previous.transition_receipts)
@@ -729,7 +923,17 @@ class QaOrchestrator:
             receipts.append(QaTransitionReceipt(request_id=request.request_id,
                                                request_sha256=request_sha256,
                                                applied_revision=revision))
-        return updated.model_copy(update={"revision": revision, "transition_receipts": receipts})
+        updated = updated.model_copy(update={"revision": revision, "transition_receipts": receipts})
+        return _append_audit_event(
+            updated,
+            event_type="transition_applied",
+            revision=revision,
+            recorded_at=recorded_at,
+            from_status=previous.status,
+            from_step=previous.current_step,
+            request_id=request.request_id,
+            request_sha256=request_sha256,
+        )
 
     def renew(self, run_id: str, expected_revision: int | None = None) -> QaOrchestrationSession:
         """Refresh only an active lease; workflow revision and reports stay unchanged."""
@@ -983,6 +1187,17 @@ class QaOrchestrator:
                                 "confirmed findings require severity, source locations, affected area, and impact"
                             )
 
+            finish_sha256 = _stable_json_sha256(
+                {
+                    "outcome": final_status.value,
+                    "final_review_report": (
+                        validated_report.model_dump(mode="json")
+                        if validated_report is not None
+                        else None
+                    ),
+                }
+            )
+
             if session.status in _TERMINAL_SESSION_STATUSES:
                 if session.status is not final_status:
                     raise OrchestrationError("conflicting final outcome")
@@ -1004,6 +1219,15 @@ class QaOrchestrator:
                     }
                 )
                 updated = self._refresh_expiry(updated, now)
+                updated = _append_audit_event(
+                    updated,
+                    event_type="session_finalized",
+                    revision=updated.revision,
+                    recorded_at=now,
+                    from_status=session.status,
+                    from_step=session.current_step,
+                    request_sha256=finish_sha256,
+                )
                 self._save_session(
                     updated,
                     persist=bool(updated.profile_reports or updated.final_review_report),
@@ -1034,6 +1258,15 @@ class QaOrchestrator:
                     }
                 ),
                 now,
+            )
+            updated = _append_audit_event(
+                updated,
+                event_type="session_finalized",
+                revision=updated.revision,
+                recorded_at=now,
+                from_status=session.status,
+                from_step=session.current_step,
+                request_sha256=finish_sha256,
             )
             self._save_session(
                 updated,

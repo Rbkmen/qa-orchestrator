@@ -61,7 +61,7 @@ The GPT-6 catalog source and last-review date live beside `MODEL_CATALOGS` in `s
 5. After deep review, the host uses the returned synthesis policy or its own configured model in `host_default` mode.
 6. After synthesis or the eligible clean single-profile fast path, the state becomes `awaiting_host_outcome`; the host completes its final QA validation and calls `finish_qa_orchestration` with the same `run_id` and a status of `completed`, `partial`, or `blocked`. The orchestrator moves the session to its final status. For an early stop, first pass `partial` or `blocked` to `advance_qa_orchestration`, then finish the session with that same status.
 
-`recommended_bundles` in the initial session is a task-type-based shortlist: ordinary reviews recommend `ordinary_mr`; widget reviews recommend `widget` and `widget_js`; epic, requirements, and QA-planning tasks recommend `requirements`; autotest implementation recommends `autotest` and `ordinary_mr`; `other` has no shortlist. These suggestions never restrict `allowed_bundles`; the host selects based on changed paths and confirmed stack.
+`recommended_bundles` starts with a task-type shortlist: ordinary reviews recommend `ordinary_mr`; widget reviews recommend `widget` and `widget_js`; epic, requirements, and QA-planning tasks recommend `requirements`; autotest implementation recommends `autotest` and `ordinary_mr`; `other` has no base shortlist. Changed web TSX files add `widget`; web JSX files add `widget_js`. Mobile-only React paths suppress those web bundles and add `mobile`; a mixed MR keeps hints for both stacks. Python, Ruby, and other recognized mobile paths add the matching stack bundle. These suggestions never restrict `allowed_bundles` or select a route; the host confirms the stack from source and manifests before choosing. Plain `.js` remains ambiguous and gets no React hint from its extension alone.
 
 Allowed transitions:
 
@@ -124,7 +124,7 @@ Use a fixed bundle when the scope is broad, crosses concerns, or needs evidence 
 
 Select profiles from the changed paths and confirmed manifests, not the repository name alone: monorepos can mix Ruby, legacy JavaScript, TypeScript, React Native, native mobile, and infrastructure files. When one diff spans multiple stacks, choose the fixed bundle matching its broadest or highest-risk changed surface; keep uncovered stack-specific checks in the host's verification plan. Do not submit a custom profile list.
 
-The `autotest` bundle includes `typescript_reviewer`; use it for broad TypeScript automation changes. For broad non-TypeScript automation, use `ordinary_mr`; for a narrow test-only change, use `pr_test_analyzer`. The `widget` bundle is for TypeScript React changes; use `widget_js` for broad JavaScript React changes, and `react_reviewer` for a narrow React-only change. Use `ruby_backend` for broad Ruby backend changes and `ruby_reviewer` for a narrow Ruby-specific review. Use `python_backend` for broad Python/MCP changes and `python_reviewer` for a narrow Python/MCP review. Use `mobile` for broad React Native/native mobile changes and `mobile_reviewer` for a narrow platform-specific change. Apply Rails checks only when Rails is confirmed, and job checks only when the repository uses a background-job library. See the [offline evaluation cases](PROFILE_EVALUATION.md) for the selection checks.
+The `autotest` bundle includes `typescript_reviewer`; use it for broad TypeScript automation changes. For broad non-TypeScript automation, use `ordinary_mr`; for a narrow test-only change, use `pr_test_analyzer`. The `widget` bundle is for broad TypeScript React changes; use `widget_js` for broad JavaScript React changes, and `react_reviewer` for a narrow React-only change. Web TSX/JSX file hints add the corresponding bundle to the shortlist, while mobile-only React Native paths recommend `mobile`; mixed MRs can suggest both stacks. A plain `.js` extension does not prove React; confirm it from imports or the package manifest. Use `ruby_backend` for broad Ruby backend changes and `ruby_reviewer` for a narrow Ruby-specific review. Use `python_backend` for broad Python/MCP changes and `python_reviewer` for a narrow Python/MCP review. Use `mobile` for broad React Native/native mobile changes and `mobile_reviewer` for a narrow platform-specific change. Apply Rails checks only when Rails is confirmed, and job checks only when the repository uses a background-job library. See the [offline evaluation cases](PROFILE_EVALUATION.md) for the selection checks.
 
 ### Compact review context
 
@@ -133,6 +133,17 @@ The host inspects the full diff once and keeps one per-task Evidence Packet with
 ### Bound and retained review artifacts
 
 For a reproducible review record, pass `review_context` when starting the session. It binds the run to a repository, distinct base and head commit IDs, the SHA-256 of the exact diff, the SHA-256 of the compact Evidence Packet, the changed paths, and the packet's stable evidence-reference IDs. Hash the exact bytes used by the host; do not include credentials in the repository identifier. The server stores these identifiers and the submitted structured reports, not the raw diff or full Evidence Packet.
+
+New sessions expose `audit_events` and `audit_trace_complete`: a bounded, ordered trace for session start,
+each accepted workflow transition, and finalization. Events record the server
+timestamp, revision, from/to stage and status, selected route, completed
+profiles, request ID where supplied, and a hash of the submitted transition or
+final report. Each event hash includes the session `run_id` and prior event
+hash; loading a session validates session binding, sequence, chain links, and
+from/to state continuity. Raw transition payloads are not duplicated in the
+trace. Lease renewals do not advance the workflow revision and are omitted.
+This records what the host submitted; it does not prove that a model or review
+worker actually ran. Sessions persisted by older versions may have no trace.
 
 For every completed primary-review profile, pass one `profile_reports` item in the same order as `completed_profile` or `completed_profiles`. A report records the profile, reviewed scope, finding candidates, coverage gaps, unverified items, and evidence map. Each finding candidate must cite one or more IDs from `review_context.evidence_refs`; the server rejects unknown IDs and reports for the wrong profile. Optional `execution_metrics` may record host-observed start/completion timestamps and input/output token counts; these measurements are host-reported and are not verified by the server. `code_explorer` and `pr_test_analyzer` cannot submit implementation finding candidates.
 

@@ -34,7 +34,9 @@ An optional `evidence_verifier` callback validates the pinned input before execu
 
 The review identity is a repository plus an explicit base/head commit pair; it is not tied to a GitLab MR. A host can review a branch, release delta, or any other commit range by binding those two commits and the exact diff. The local evidence checker also verifies that `changed_files` matches the paths in that pinned diff. It does not read an editor buffer or an uncommitted working tree: the host must first materialize a stable Git snapshot and bind its commit SHA.
 
-To inspect code around the change, add the relevant unchanged caller, consumer, contract, configuration, or test files as source evidence at the bound base/head revision. Keep the changed source, diff, and requirements mandatory. Add adjacent source only when it can confirm or refute a concrete behavior scenario; record anything needed but unavailable under Coverage gaps or Unverified. The packet builder enforces the 2 MB limit but does not infer whether the host selected enough context.
+To inspect code around the change, add relevant unchanged callers, consumers, contracts, configuration, or tests as source evidence at the bound base/head revision. Keep the diff and requirements mandatory. Changed-source excerpts are optional context: include the paths needed to understand the scenario, and mark lower-priority excerpts optional when the byte budget is tight. A precise finding location still requires a cited head-source excerpt for that path; the bound diff remains usable evidence without one. Record anything needed but unavailable under Coverage gaps or Unverified. The packet builder enforces the 2 MB limit but does not infer whether the host selected enough context.
+
+For structured packets, the CLI executor records how many changed paths have source excerpts in the packet and how many remain in the profile's selected subset. These are host-side coverage indicators, not a completeness score: review the diff and scenario context, and report missing callers or contracts as coverage gaps. Legacy text packets do not carry these counts.
 
 ## Findings and speed
 

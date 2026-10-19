@@ -1,0 +1,26 @@
+[
+  {
+    "case_id": "test-assert-is-not-production-authorization",
+    "path": "tests/test_login.py",
+    "line": 18,
+    "title": "Authorization relies on an optimizable assert",
+    "description": "The cited assert checks the login response, so optimized Python could remove the production authorization check.",
+    "failure_condition": "A production request handler uses assert as its only authorization check.",
+    "flip_condition": "The cited assert is only a test expectation and production authorization uses an explicit runtime guard.",
+    "guard_condition": "The only cited assert is in a test file and no production authorization path is evidenced.",
+    "guard_text": "Do not infer that production authorization uses assert from an assertion in a test.",
+    "rejection_rationale": "E1 locates the assertion in the login test; it verifies the expected response and is not a production authorization check."
+  },
+  {
+    "case_id": "empty-search-result-is-a-supported-response",
+    "path": "src/search.py",
+    "line": 44,
+    "title": "Empty search results are treated as success",
+    "description": "The search handler returns an empty list when no records match instead of reporting a missing resource.",
+    "failure_condition": "The API contract requires a missing-resource error when a search returns no matches.",
+    "flip_condition": "The API contract defines an empty list as the response for zero matches and the caller handles it accordingly.",
+    "guard_condition": "The pinned search contract explicitly defines an empty list for zero matching records.",
+    "guard_text": "Do not report an empty search result as a failure when the contract defines it as a successful no-match response.",
+    "rejection_rationale": "E1 is the pinned search contract and specifies an empty list for zero matches; the candidate assumes an unsupported 404 requirement."
+  }
+]

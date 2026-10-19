@@ -39,6 +39,14 @@ reports bind the complete ruleset digest, including rules outside the current
 scope. The server rejects profile and final reports carrying another digest. Legacy contexts
 without rules remain supported. Rule changes require a new bound session.
 
+The contract-level rejected-finding regressions in
+`tests/fixtures/rejected_findings.json` cover two common mistakes: treating a
+test assertion as a production authorization check, and treating a documented
+empty search result as an error. The tests retain each profile candidate and
+its evidence-backed `rejected` disposition, then assert that no final finding
+is emitted. These examples check report handling and refutation linkage; they
+are not model recall measurements.
+
 ## 2. Per-profile checkpoints
 
 ```python
@@ -205,10 +213,14 @@ The optional, explicitly host-supplied plan contains `optional_profiles`,
  "priorities":{"E7":20},"external_content":{"E3":"Exact requirement text"}}
 ```
 
-All refs are mandatory by default. A complete pack must contain a diff ref and
-registered source for every declared changed path (base source can represent a
-deleted file). Changed source, diff and supplied requirements cannot be optional.
-The host identifies necessary callers/contracts and leaves them mandatory; this
+All refs are mandatory by default. The bound diff and supplied requirements
+remain mandatory. Changed-source excerpts are optional context, so a pack does
+not need one source record for every changed path when the exact diff covers the
+change. Any changed-source record that is supplied must use the pinned head
+(base source can represent a deleted file). Hosts can make lower-priority
+excerpts profile-optional; omissions are explicit, and reports cannot cite
+omitted refs. A precise finding location still requires a cited head-source
+excerpt for that path. The host identifies necessary callers/contracts; this
 tool does not infer completeness or replace CodeGraph. External content must be
 supplied explicitly and match its registered hash. Binary/non-UTF-8 material
 requires a separate host evidence flow, not lossy decoding.
@@ -222,13 +234,19 @@ for. Mandatory overflow prevents process launch and requires the host to split
 the review; it never becomes an empty successful review.
 
 The CLI executor recognizes this format automatically; legacy text packets remain
-supported. `max_context_bytes` (default 1,500,000) limits rendered fragment bytes,
+supported. `max_context_bytes` (default 1,000,000) limits rendered fragment bytes,
 including headers; this is a byte budget, not a tokenizer or inference budget.
 The serialized input file remains limited to 2 MB. Changing the selection budget
 changes executor identity. A host-owned `context_selection` binds the original
 packet hash, selected text hash, included/omitted refs and byte counts. The server
 rejects reports citing omitted refs or claiming to omit mandatory refs. These
 assertions do not prove the model read or understood the bytes.
+
+For structured CLI reviews, `context_selection` also reports `changed_files_count`,
+`source_excerpt_files_available` and `source_excerpt_files_included`. The executor
+tells the reviewer how many changed paths have source excerpts available and how
+many survive profile selection. These host-derived counts expose context gaps;
+they do not measure whether the excerpts are sufficient to review the scenario.
 
 For repeated packet construction, pass the same `PinnedSourceCache` to
 `build_context_packet`. It caches immutable Git blobs in memory, bounded by bytes
@@ -247,13 +265,25 @@ qa-orch evidence discover --context registered-context.json \
 
 The bounded scan reads only the pinned Git head, reports symbol matches and line
 numbers, and includes source records with content hashes that can be reviewed for
-the full evidence registry. It also suggests tests by repository path convention.
-These are candidates: review and reconcile them with CodeGraph, select the
-necessary paths, add their refs to the unbound context, and add their record
+the full evidence registry. Symbol search checks up to 32 deterministic,
+path-related files, in batches, instead of scanning every tracked blob. Candidate
+search reads are capped at 32 paths and 16 MB total (with a per-file size limit);
+candidate source reads are also capped at twice the requested result count, up to 200.
+The manifest reports both limits and the number of symbol-search paths omitted
+by the cap. A missing match does not prove that a caller is absent; reconcile
+likely callers with CodeGraph. For changed Python and JavaScript/TypeScript files,
+it follows local Python imports, relative or common root-alias JS/TS imports, and
+common Python mock targets to matching references and declarations. Exact local
+Python module paths from imports are prioritized even when the module filename
+shares no tokens with the changed test or imported symbol. For changed
+test files, it also suggests applicable ancestor package and test dependency
+manifests. It continues to suggest tests by repository path convention. These are
+candidates: review and reconcile them with CodeGraph, select
+the necessary paths, add their refs to the unbound context, and add their record
 objects to the full records list passed to `qa-orch evidence build`. Keep every
 existing record in that list because `build` replaces the registry. It does not
 read the dirty worktree, change the context, or claim that discovery is complete.
-Dynamic dispatch, generated code, cross-repository callers and language-specific
+Dynamic dispatch, generated code, cross-repository callers, and language-specific
 dependency rules still require host investigation.
 
 ## 10. Finalize and export in one host step

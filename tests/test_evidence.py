@@ -5,8 +5,15 @@ import subprocess
 import pytest
 from pydantic import ValidationError
 
-from qa_orchestrator.contracts import EvidenceRecord, ReviewContext, ReviewFindingCandidate
+from qa_orchestrator.contracts import (
+    EvidenceRecord,
+    ProfileReviewReport,
+    ReviewAgent,
+    ReviewContext,
+    ReviewFindingCandidate,
+)
 from qa_orchestrator.evidence import (
+    _path_tokens,
     discover_neighbor_evidence,
     evidence_main,
     register_evidence,
@@ -77,10 +84,27 @@ def candidate(line=2, evidence_ref="S1"):
     )
 
 
+def test_legacy_source_record_keeps_its_wire_shape(pinned_evidence):
+    _, _, context, _ = pinned_evidence
+    record = EvidenceRecord(
+        evidence_ref="S1",
+        kind="source",
+        revision=context.head_sha,
+        path="src/api.py",
+        sha256="0" * 64,
+    )
+
+    assert record.source_text_available is None
+    assert "source_text_available" not in record.model_dump(mode="json")
+
+
 def test_registry_hashes_exact_bytes_and_verifies_packet_and_locations(pinned_evidence):
     repository, packet, context, definitions = pinned_evidence
     bound = register_evidence(context, definitions, repository)
     assert bound.evidence_registry[0].sha256 == hashlib.sha256(b"changed\r\nlast").hexdigest()
+    assert bound.evidence_registry[0].source_text_available is True
+    assert bound.evidence_registry[1].source_text_available is None
+    assert "source_text_available" not in bound.evidence_registry[1].model_dump(mode="json")
     result = verify_evidence(bound, repository, packet, (candidate(),))
     assert result["verified_refs"] == ["S1", "D1"]
     assert result["packet_hash_verified"] is True
@@ -123,6 +147,151 @@ def test_claimed_lines_must_use_a_supporting_head_ref_and_stay_in_bounds(pinned_
     entire_file = register_evidence(context, definitions, repository)
     with pytest.raises(ValueError, match="outside the pinned head"):
         verify_evidence(entire_file, repository, candidates=(candidate(line=99),))
+
+
+def test_legacy_source_record_without_text_status_keeps_previous_location_behavior(
+    pinned_evidence,
+):
+    repository, _, context, definitions = pinned_evidence
+    bound = register_evidence(context, definitions, repository)
+    legacy = ReviewContext.model_validate_json(bound.model_dump_json())
+    record = legacy.evidence_registry[0].model_dump(mode="python")
+    record.pop("source_text_available", None)
+    legacy = ReviewContext.model_validate(
+        {
+            **legacy.model_dump(mode="python"),
+            "evidence_registry": (record, *legacy.evidence_registry[1:]),
+        }
+    )
+
+    assert legacy.evidence_registry[0].source_text_available is None
+    validate_registered_locations(legacy, (candidate(),))
+
+
+def test_legacy_text_source_session_can_finish_with_its_existing_location(
+    pinned_evidence, make_final_review_report
+):
+    repository, _, context, definitions = pinned_evidence
+    bound = register_evidence(context, definitions, repository)
+    registry = [record.model_dump(mode="python") for record in bound.evidence_registry]
+    registry[0].pop("source_text_available", None)
+    legacy = ReviewContext.model_validate(
+        {**bound.model_dump(mode="python"), "evidence_registry": registry}
+    )
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    legacy_candidate = candidate().model_copy(
+        update={
+            "affected_area": "API response",
+            "impact": "The caller can receive a wrong response.",
+        }
+    )
+    session = orchestrator.start("ordinary_review", legacy)
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step="triage",
+        status="completed",
+        selected_profile=ReviewAgent.CODE_REVIEWER,
+    )
+    orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=session.current_step,
+        status="completed",
+        completed_profile=ReviewAgent.CODE_REVIEWER,
+        profile_reports=(
+            ProfileReviewReport(
+                profile=ReviewAgent.CODE_REVIEWER,
+                scope="Pinned head source review",
+                finding_candidates=(legacy_candidate,),
+            ),
+        ),
+        risk_signals=DeepReviewSignals(),
+    )
+    session = orchestrator.get(session.run_id)
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=session.current_step,
+        status="completed",
+    )
+    final_report = make_final_review_report(
+        (ReviewAgent.CODE_REVIEWER,),
+        findings=((legacy_candidate, (ReviewAgent.CODE_REVIEWER,)),),
+    )
+
+    finished = orchestrator.finish(
+        run_id=session.run_id,
+        outcome="completed",
+        final_review_report=final_report,
+    )
+
+    assert finished.final_review_report == final_report
+
+
+def test_binary_source_cannot_support_a_claimed_source_location(pinned_evidence):
+    repository, _, context, definitions = pinned_evidence
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args])
+
+    binary = repository / "assets/logo.png"
+    binary.parent.mkdir()
+    binary.write_bytes(b"\x89PNG\r\n\x1a\n\x00\xff")
+    git("add", "assets/logo.png")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "binary")
+    head = git("rev-parse", "HEAD").decode().strip()
+    diff = git("diff", "--binary", "--no-ext-diff", "--no-textconv", context.base_sha, head, "--")
+    changed_files = tuple(
+        item.decode("utf-8")
+        for item in git("diff", "--name-only", "-z", context.base_sha, head, "--").split(b"\0")
+        if item
+    )
+    updated_context = ReviewContext.model_validate(
+        {
+            **context.model_dump(),
+            "head_sha": head,
+            "diff_sha256": hashlib.sha256(diff).hexdigest(),
+            "changed_files": changed_files,
+            "evidence_refs": ("S1", "B1", "D1"),
+        }
+    )
+    records = [
+        {**definitions[0], "revision": head},
+        {"evidence_ref": "B1", "kind": "source", "revision": head, "path": "assets/logo.png"},
+        {"evidence_ref": "D1", "kind": "diff", "revision": head},
+    ]
+    bound = register_evidence(updated_context, records, repository)
+    assert bound.evidence_registry[1].source_text_available is False
+    binary_candidate = ReviewFindingCandidate(
+        candidate_id="F-02",
+        title="Binary location claim",
+        description="The binary file has a line-level problem.",
+        confidence="high",
+        verification_gap="No runtime check",
+        evidence_refs=("B1",),
+        source_locations=({"path": "assets/logo.png", "start_line": 1},),
+    )
+
+    with pytest.raises(ValueError, match="registered head source evidence"):
+        validate_registered_locations(bound, (binary_candidate,))
+
+    legacy_payload = bound.model_dump(mode="python")
+    legacy_payload["evidence_registry"] = tuple(
+        {
+            **record.model_dump(mode="python"),
+            **({} if record.kind != "source" else {"source_text_available": None}),
+        }
+        for record in bound.evidence_registry
+    )
+    with pytest.raises(ValueError, match="registered head source evidence"):
+        verify_evidence(
+            ReviewContext.model_validate(legacy_payload),
+            repository,
+            candidates=(binary_candidate,),
+        )
+
+    tampered = bound.model_dump(mode="python")
+    tampered["evidence_registry"][1]["source_text_available"] = True
+    with pytest.raises(ValueError, match="source text availability metadata mismatch"):
+        verify_evidence(ReviewContext.model_validate(tampered), repository)
 
 
 def test_registry_is_complete_and_paths_are_repository_relative(pinned_evidence):
@@ -239,7 +408,10 @@ def test_evidence_cli_builds_and_verifies_a_registry(tmp_path, pinned_evidence):
     assert json.loads(output.read_text())["verified_refs"] == ["S1", "D1"]
 
 
-def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path):
+def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeypatch):
+    import qa_orchestrator.evidence as evidence_module
+
+    monkeypatch.setattr(evidence_module, "_DISCOVERY_MAX_SYMBOL_SEARCH_PATHS", 3)
     repository = tmp_path / "repo"
     repository.mkdir()
 
@@ -250,6 +422,7 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path):
     files = {
         "src/service.py": "def calculate(value):\n    return value + 1\n",
         "src/caller.py": "from src.service import calculate\nresult = calculate(2)\n",
+        "src/irrelevant.py": "unrelated = True\n",
         "contracts/service_contract.py": "from src.service import calculate\n\nassert calculate(1) == 2\n",
         "tests/test_service.py": "from src.service import calculate\n\ndef test_calculate():\n    assert calculate(1) == 2\n",
     }
@@ -298,6 +471,11 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path):
     assert caller_entry["sha256"] == hashlib.sha256(pinned_caller).hexdigest()
     assert caller_entry["record"]["revision"] == head
     assert manifest["exhaustive"] is False
+    assert manifest["symbol_search_scope"] == "ranked_path_candidates"
+    assert manifest["symbol_search_paths_considered"] == 3
+    assert manifest["symbol_search_paths_omitted_by_limit"] >= 1
+    assert manifest["symbol_search_exhaustive"] is False
+    assert manifest["candidate_scan_limit"] == 100
 
     context_path = tmp_path / "context.json"
     output_path = tmp_path / "neighbors.json"
@@ -314,3 +492,238 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path):
         ]
     ) == 0
     assert len(json.loads(output_path.read_text(encoding="utf-8"))["candidate_records"]) == 3
+
+
+def test_path_tokens_ignore_file_extensions():
+    tokens = _path_tokens("src/components/LayerAtom.tsx")
+
+    assert "layer" in tokens
+    assert "atom" in tokens
+    assert "tsx" not in tokens
+
+
+def test_discovery_follows_test_imports_and_suggests_dependency_manifest(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args])
+
+    git("init", "--quiet")
+    files = {
+        "pyproject.toml": "[project.optional-dependencies]\ntest = ['pytest-mock', 'pytest-asyncio']\n",
+        "src/fetching.py": (
+            "async def send_request_to_open_ai(client, prompt):\n"
+            "    return await client.send(prompt)\n\n"
+            "def get_chat_completion(client, prompt):\n"
+            "    return client.complete(prompt)\n\n"
+            "def build_chat_response(completion):\n"
+            "    return {'message': completion}\n\n"
+            "def resolve_chat_request(client):\n"
+            "    return client.complete()\n"
+        ),
+        "tests/test_fetching.py": (
+            "from src.fetching import send_request_to_open_ai\n"
+            "import src.fetching as fetching\n"
+            "from unittest.mock import patch\n\n"
+            "@patch('src.fetching.get_chat_completion')\n"
+            "def test_request(mock_request, monkeypatch):\n"
+            "    monkeypatch.setattr(fetching, 'build_chat_response', mock_request)\n"
+            "    return fetching.resolve_chat_request(send_request_to_open_ai(mock_request))\n"
+        ),
+    }
+    for path, content in files.items():
+        target = repository / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").decode().strip()
+
+    changed = repository / "tests/test_fetching.py"
+    changed.write_text(
+        files["tests/test_fetching.py"].replace(
+            "send_request_to_open_ai(mock_request)",
+            "send_request_to_open_ai(mock_request, 'prompt')",
+        ),
+        encoding="utf-8",
+    )
+    git("add", "tests/test_fetching.py")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "head")
+    head = git("rev-parse", "HEAD").decode().strip()
+    diff = git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head, "--")
+    context = ReviewContext(
+        repository="github.com/example/repo",
+        base_sha=base,
+        head_sha=head,
+        diff_sha256=hashlib.sha256(diff).hexdigest(),
+        evidence_packet_sha256=hashlib.sha256(b"packet").hexdigest(),
+        changed_files=("tests/test_fetching.py",),
+        evidence_refs=("S1", "D1"),
+    )
+
+    manifest = discover_neighbor_evidence(context, repository)
+    by_path = {entry["path"]: entry for entry in manifest["candidate_records"]}
+
+    assert "send_request_to_open_ai" in manifest["referenced_symbols"]
+    assert "get_chat_completion" in manifest["referenced_symbols"]
+    assert "build_chat_response" in manifest["referenced_symbols"]
+    assert "resolve_chat_request" in manifest["referenced_symbols"]
+    assert "src/fetching.py" in by_path
+    assert "send_request_to_open_ai" in {
+        symbol["symbol"] for symbol in by_path["src/fetching.py"]["matched_symbols"]
+    }
+    assert by_path["src/fetching.py"]["categories"] == ["declaration"]
+    assert "pyproject.toml" in by_path
+    assert by_path["pyproject.toml"]["categories"] == ["dependency"]
+
+
+def test_discovery_searches_local_module_import_paths_without_token_overlap(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args])
+
+    git("init", "--quiet")
+    files = {
+        "src/auth_service.py": "def validate(user):\n    return bool(user)\n",
+        "tests/test_login.py": (
+            "from src.auth_service import validate\n\n"
+            "def test_login():\n    assert validate('user')\n"
+        ),
+    }
+    for path, content in files.items():
+        target = repository / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").decode().strip()
+
+    changed_test = repository / "tests/test_login.py"
+    changed_test.write_text(
+        files["tests/test_login.py"].replace("validate('user')", "validate('')"),
+        encoding="utf-8",
+    )
+    git("add", "tests/test_login.py")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "head")
+    head = git("rev-parse", "HEAD").decode().strip()
+    diff = git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head, "--")
+    context = ReviewContext(
+        repository="github.com/example/repo",
+        base_sha=base,
+        head_sha=head,
+        diff_sha256=hashlib.sha256(diff).hexdigest(),
+        evidence_packet_sha256=hashlib.sha256(b"packet").hexdigest(),
+        changed_files=("tests/test_login.py",),
+        evidence_refs=("S1", "D1"),
+    )
+
+    manifest = discover_neighbor_evidence(context, repository)
+
+    by_path = {entry["path"]: entry for entry in manifest["candidate_records"]}
+    assert "src/auth_service.py" in by_path
+    assert "validate" in {item["symbol"] for item in by_path["src/auth_service.py"]["matched_symbols"]}
+
+
+def test_discovery_follows_local_typescript_imports_to_action_contract(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args])
+
+    git("init", "--quiet")
+    files = {
+        "src/Layer.tsx": (
+            'import { layerAtom } from "./layerAtom";\n'
+            "export function clearLayer() { return layerAtom.actions.clear(); }\n"
+        ),
+        "src/layerAtom.ts": (
+            "export const layerAtom = atom({\n"
+            "  actions: { clear: () => ({ type: 'clear' }) },\n"
+            "});\n"
+        ),
+    }
+    for path, content in files.items():
+        target = repository / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").decode().strip()
+
+    changed = repository / "src/Layer.tsx"
+    changed.write_text(files["src/Layer.tsx"].replace("clear()", "clear(prompt = 'confirm')"), encoding="utf-8")
+    git("add", "src/Layer.tsx")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "head")
+    head = git("rev-parse", "HEAD").decode().strip()
+    diff = git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head, "--")
+    context = ReviewContext(
+        repository="github.com/example/repo",
+        base_sha=base,
+        head_sha=head,
+        diff_sha256=hashlib.sha256(diff).hexdigest(),
+        evidence_packet_sha256=hashlib.sha256(b"packet").hexdigest(),
+        changed_files=("src/Layer.tsx",),
+        evidence_refs=("S1", "D1"),
+    )
+
+    manifest = discover_neighbor_evidence(context, repository)
+    by_path = {entry["path"]: entry for entry in manifest["candidate_records"]}
+
+    assert "layerAtom" in manifest["referenced_symbols"]
+    assert "src/layerAtom.ts" in by_path
+    assert "layerAtom" in {
+        symbol["symbol"] for symbol in by_path["src/layerAtom.ts"]["matched_symbols"]
+    }
+
+
+def test_discovery_skips_symbol_search_when_neighbor_file_exceeds_byte_cap(
+    tmp_path, monkeypatch
+):
+    import qa_orchestrator.evidence as evidence_module
+
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args])
+
+    git("init", "--quiet")
+    files = {
+        "src/service.py": "def calculate(value):\n    return value + 1\n",
+        "src/large_caller.py": "from service import calculate\n" + "# filler\n" * 100,
+    }
+    for path, content in files.items():
+        target = repository / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").decode().strip()
+
+    changed = repository / "src/service.py"
+    changed.write_text(files["src/service.py"].replace("value + 1", "value + 2"), encoding="utf-8")
+    git("add", "src/service.py")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "head")
+    head = git("rev-parse", "HEAD").decode().strip()
+    diff = git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head, "--")
+    context = ReviewContext(
+        repository="github.com/example/repo",
+        base_sha=base,
+        head_sha=head,
+        diff_sha256=hashlib.sha256(diff).hexdigest(),
+        evidence_packet_sha256=hashlib.sha256(b"packet").hexdigest(),
+        changed_files=("src/service.py",),
+        evidence_refs=("S1", "D1"),
+    )
+    monkeypatch.setattr(evidence_module, "_DISCOVERY_MAX_SOURCE_BYTES", 128)
+
+    manifest = discover_neighbor_evidence(context, repository)
+
+    assert manifest["symbol_search_candidate_paths"] == 1
+    assert manifest["symbol_search_paths_considered"] == 0
+    assert manifest["symbol_search_paths_skipped_by_size"] == 1
+    assert manifest["candidate_records"] == []

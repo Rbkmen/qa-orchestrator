@@ -1,8 +1,18 @@
+import json
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
-from qa_orchestrator.contracts import FinalReviewReport, ReviewAgent, ReviewCandidateDecision
+from qa_orchestrator.contracts import (
+    FinalReviewReport,
+    ReviewAgent,
+    ReviewCandidateDecision,
+    ReviewFindingLocation,
+)
 from qa_orchestrator.orchestration import DeepReviewSignals, OrchestrationError, QaOrchestrator
+from qa_orchestrator.refutation import make_refutation_check
+from qa_orchestrator.review_rules import ReviewRuleset
 
 
 @pytest.fixture
@@ -99,6 +109,96 @@ def test_rejected_candidate_is_retained_without_a_final_finding(reviewed_candida
     result = orchestrator.finish(run_id=run_id, outcome="completed", final_review_report=payload)
     assert result.final_review_report.finding_candidates == ()
     assert result.final_review_report.candidate_decisions[0].verdict == "rejected"
+
+
+@pytest.mark.parametrize(
+    "example",
+    json.loads((Path(__file__).parent / "fixtures/rejected_findings.json").read_text()),
+    ids=lambda example: example["case_id"],
+)
+def test_rejected_finding_regressions_keep_counterevidence_and_no_final_finding(
+    example,
+    bound_review_context,
+    review_finding_candidate,
+    make_profile_review_report,
+):
+    rules = ReviewRuleset(
+        rules=(
+            {
+                "rule_id": example["case_id"],
+                "kind": "guard",
+                "paths": [example["path"]],
+                "condition": example["guard_condition"],
+                "text": example["guard_text"],
+                "rationale": example["rejection_rationale"],
+            },
+        )
+    )
+    context = bound_review_context.model_copy(
+        update={"changed_files": (example["path"],), "review_rules": rules}
+    )
+    assert rules.for_paths(context.changed_files).rules == rules.rules
+    candidate = review_finding_candidate.model_copy(
+        update={
+            "title": example["title"],
+            "description": example["description"],
+            "failure_condition": example["failure_condition"],
+            "flip_condition": example["flip_condition"],
+            "source_locations": (ReviewFindingLocation(path=example["path"], start_line=example["line"]),),
+        }
+    )
+    profile_report = make_profile_review_report(
+        ReviewAgent.CODE_REVIEWER, findings=(candidate,)
+    ).model_copy(update={"review_rules_sha256": rules.digest})
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review", context)
+    orchestrator.advance(
+        run_id=session.run_id,
+        completed_step="triage",
+        status="completed",
+        selected_profile=ReviewAgent.CODE_REVIEWER,
+    )
+    orchestrator.advance(
+        run_id=session.run_id,
+        completed_step="primary_review",
+        status="completed",
+        completed_profile=ReviewAgent.CODE_REVIEWER,
+        profile_reports=[profile_report],
+        risk_signals=DeepReviewSignals(),
+    )
+    orchestrator.advance(run_id=session.run_id, completed_step="synthesis", status="completed")
+
+    refutation = make_refutation_check(
+        context,
+        candidate,
+        status="refuted",
+        rationale=example["rejection_rationale"],
+        evidence_refs=("E1",),
+    )
+    final_report = FinalReviewReport(
+        review_rules_sha256=rules.digest,
+        summary="The candidate was checked against its counterevidence and rejected.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        candidate_decisions=(
+            ReviewCandidateDecision(
+                source={"profile": "code_reviewer", "candidate_id": candidate.candidate_id},
+                verdict="rejected",
+                rationale=example["rejection_rationale"],
+                evidence_refs=("E1",),
+                refutation=refutation,
+            ),
+        ),
+    )
+    finished = orchestrator.finish(
+        run_id=session.run_id, outcome="completed", final_review_report=final_report
+    )
+
+    assert finished.profile_reports[0].finding_candidates == (candidate,)
+    assert finished.final_review_report.finding_candidates == ()
+    decision = finished.final_review_report.candidate_decisions[0]
+    assert decision.verdict == "rejected"
+    assert decision.refutation.status == "refuted"
+    assert decision.rationale == example["rejection_rationale"]
 
 
 def test_candidate_refutation_conditions_require_a_complete_nonblank_pair(review_finding_candidate):

@@ -2,7 +2,15 @@ from enum import StrEnum
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from qa_orchestrator.review_rules import ReviewRuleset
 
@@ -69,6 +77,7 @@ class EvidenceRecord(BaseModel):
     start_line: int | None = Field(default=None, ge=1)
     end_line: int | None = Field(default=None, ge=1)
     locator: str | None = Field(default=None, min_length=1, max_length=1024)
+    source_text_available: bool | None = None
 
     @field_validator("sha256", "revision")
     @classmethod
@@ -94,6 +103,8 @@ class EvidenceRecord(BaseModel):
                 self.start_line is None or self.end_line < self.start_line
             ):
                 raise ValueError("invalid evidence source line range")
+        elif self.source_text_available is True:
+            raise ValueError("source text availability applies only to source evidence")
         elif self.path is not None or self.start_line is not None or self.end_line is not None:
             raise ValueError("source coordinates are allowed only for source evidence")
         if self.kind == "diff" and self.revision is None:
@@ -101,6 +112,13 @@ class EvidenceRecord(BaseModel):
         if self.kind not in {"source", "diff"} and not self.locator:
             raise ValueError("external evidence requires a stable locator")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_source_text_status(self, handler):
+        payload = handler(self)
+        if self.source_text_available is None:
+            payload.pop("source_text_available", None)
+        return payload
 
 
 class ReviewContext(BaseModel):
@@ -375,6 +393,9 @@ class ProfileContextSelection(BaseModel):
     included_refs: tuple[EvidenceRefId, ...] = Field(max_length=1000)
     omitted_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=1000)
     budget_omitted_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=1000)
+    changed_files_count: int = Field(default=0, ge=0, le=10000)
+    source_excerpt_files_available: int = Field(default=0, ge=0, le=10000)
+    source_excerpt_files_included: int = Field(default=0, ge=0, le=10000)
     max_bytes: int = Field(ge=1, le=2_000_000)
     selected_bytes: int = Field(ge=0, le=2_000_000)
 
@@ -388,6 +409,12 @@ class ProfileContextSelection(BaseModel):
             or not set(self.budget_omitted_refs).issubset(self.omitted_refs)
         ):
             raise ValueError("context selection refs must be a unique partition")
+        if not (
+            self.source_excerpt_files_included
+            <= self.source_excerpt_files_available
+            <= self.changed_files_count
+        ):
+            raise ValueError("source excerpt coverage counts are inconsistent")
         if self.selected_bytes > self.max_bytes:
             raise ValueError("context selection exceeds byte budget")
         return self

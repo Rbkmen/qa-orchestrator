@@ -10,7 +10,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from qa_orchestrator.contracts import EvidenceRecord, ReviewAgent, ReviewContext
-from qa_orchestrator.evidence import _diff, _git, _source_lines
+from qa_orchestrator.evidence import _diff, _git, _is_text_source, _source_lines
 
 MAX_CONTEXT_PACKET_BYTES = 2_000_000
 
@@ -38,6 +38,14 @@ class ContextFragment(BaseModel):
             self.record.kind == "source"
             and self.text == _omitted_source_text(self.record.sha256)
         )
+        if omitted_source and self.record.source_text_available is True:
+            raise ValueError("source omission marker conflicts with text availability metadata")
+        if (
+            self.record.kind == "source"
+            and self.record.source_text_available is False
+            and not omitted_source
+        ):
+            raise ValueError("source fragment is marked unavailable but contains text")
         if text_sha256 != self.record.sha256 and not omitted_source:
             raise ValueError("context fragment content hash mismatch")
         if len(set(self.profiles)) != len(self.profiles):
@@ -227,22 +235,25 @@ def build_context_packet(
     diff = _diff(context, repository)
     fragments = []
     for entry in context.evidence_registry:
-        if entry.evidence_ref in optional_profiles:
-            if entry.kind in {"diff", "requirement"}:
-                raise ValueError("diff and requirements must remain mandatory")
-            if entry.kind == "source" and entry.path in context.changed_files:
-                raise ValueError("changed source must remain mandatory")
+        if entry.evidence_ref in optional_profiles and entry.kind in {"diff", "requirement"}:
+            raise ValueError("diff and requirements must remain mandatory")
         if entry.kind == "source":
             source = cache.read(repository, entry)
             if hashlib.sha256(source).hexdigest() != entry.sha256:
                 raise ValueError(f"source evidence content hash mismatch: {entry.evidence_ref}")
-            try:
-                text = source.decode("utf-8")
-            except UnicodeDecodeError:
-                text = _omitted_source_text(entry.sha256)
-            else:
-                if "\x00" in text:
-                    text = _omitted_source_text(entry.sha256)
+            source_text_available = _is_text_source(source)
+            if (
+                entry.source_text_available is not None
+                and source_text_available != entry.source_text_available
+            ):
+                raise ValueError(
+                    f"source text availability metadata mismatch: {entry.evidence_ref}"
+                )
+            text = (
+                source.decode("utf-8")
+                if source_text_available
+                else _omitted_source_text(entry.sha256)
+            )
         elif entry.kind == "diff":
             text = diff.decode("utf-8")
         else:
@@ -278,26 +289,23 @@ def validate_packet_context(packet: ContextPacket, context: ReviewContext) -> No
     for fragment in packet.fragments:
         if fragment.record != registry.get(fragment.record.evidence_ref):
             raise ValueError("context packet metadata differs from the bound registry")
-        if not fragment.required and (
-            fragment.record.kind in {"diff", "requirement"}
-            or fragment.record.kind == "source"
-            and fragment.record.path in context.changed_files
-        ):
-            raise ValueError("mandatory changed source/diff/requirements cannot be excluded")
+        if not fragment.required and fragment.record.kind in {"diff", "requirement"}:
+            raise ValueError("mandatory diff/requirements cannot be excluded")
 
 
 def _validate_mandatory_presence(context: ReviewContext, deleted_paths: tuple[str, ...]) -> None:
     if not any(r.kind == "diff" for r in context.evidence_registry):
         raise ValueError("mandatory diff evidence is absent")
-    paths = {r.path for r in context.evidence_registry if r.kind == "source"}
-    if set(context.changed_files) - paths:
-        raise ValueError("mandatory changed source evidence is absent")
     if set(deleted_paths) - set(context.changed_files):
         raise ValueError("deleted paths must belong to the bound changed files")
-    for path in context.changed_files:
-        revision = context.base_sha if path in deleted_paths else context.head_sha
-        if not any(
-            r.kind == "source" and r.path == path and r.revision == revision
-            for r in context.evidence_registry
+    expected_revisions = {
+        path: context.base_sha if path in deleted_paths else context.head_sha
+        for path in context.changed_files
+    }
+    for entry in context.evidence_registry:
+        if (
+            entry.kind == "source"
+            and entry.path in expected_revisions
+            and entry.revision != expected_revisions[entry.path]
         ):
-            raise ValueError("mandatory changed source revision is absent")
+            raise ValueError("changed source evidence must match the pinned revision")

@@ -72,6 +72,14 @@ def test_executor_schema_change_invalidates_previous_identity(executor_input):
     assert executor.identity != old_identity
 
 
+def test_default_context_budget_matches_the_total_prompt_ceiling(executor_input):
+    from qa_orchestrator.codex_executor import MAX_EXECUTOR_PROMPT_BYTES, CodexProfileExecutor
+
+    packet, _, _ = executor_input
+
+    assert CodexProfileExecutor(packet).max_context_bytes == MAX_EXECUTOR_PROMPT_BYTES
+
+
 @pytest.fixture
 def executor_input(tmp_path, bound_review_context):
     packet = tmp_path / "packet.md"
@@ -132,6 +140,54 @@ async def test_executor_reports_phases_and_usage_before_failed_completion(execut
     assert observed.model_seconds >= 0
 
 
+async def test_executor_includes_bounded_sanitized_cli_stderr_on_failure(executor_input):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+
+    packet, job, script = executor_input
+    script.write_text(
+        "import sys\nsys.stdin.read()\n"
+        "sys.stderr.write('x' * 20000)\n"
+        "sys.stderr.write('\\nError: token=sk-1234567890abcdef access_token=plain-secret-value "
+        "AWS_SECRET_ACCESS_KEY=aws-hidden-value at /Users/private/.codex/log\\n')\n"
+        "sys.exit(2)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"CLI reviewer failed: Error:.*\[REDACTED\].*\[path\]",
+    ) as exc:
+        await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(job)
+
+    message = str(exc.value)
+    assert len(message) < 600
+    assert "sk-1234567890abcdef" not in message
+    assert "access_token=[REDACTED]" in message
+    assert "plain-secret-value" not in message
+    assert "AWS_SECRET_ACCESS_KEY=[REDACTED]" in message
+    assert "aws-hidden-value" not in message
+    assert "/Users/private" not in message
+
+
+async def test_executor_reports_json_failure_type_without_exposing_event_body(executor_input):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+
+    packet, job, script = executor_input
+    script.write_text(
+        "import json,sys\nsys.stdin.read()\n"
+        "print(json.dumps({'type':'turn.failed','error':{'message':"
+        "'Error: token=sk-1234567890abcdef request failed at /Users/private/log'}}))\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"CLI reviewer failed \(turn.failed event\)") as exc:
+        await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(job)
+
+    message = str(exc.value)
+    assert "sk-1234567890abcdef" not in message
+    assert "/Users/private" not in message
+
+
 async def test_executor_success_exposes_validation_phase(executor_input):
     from qa_orchestrator.codex_executor import CodexProfileExecutor
     from qa_orchestrator.contracts import ProfileAttemptObservation
@@ -178,7 +234,8 @@ async def test_missing_usage_in_any_turn_remains_unknown(executor_input):
     assert report.execution_metrics.input_tokens is None
 
 
-async def test_executor_selects_context_and_binds_actual_subset_hash(executor_input):
+async def test_executor_selects_context_and_binds_actual_subset_hash(executor_input, monkeypatch):
+    from qa_orchestrator import codex_executor
     from qa_orchestrator.codex_executor import CodexProfileExecutor
     from qa_orchestrator.context_pack import ContextFragment, ContextPacket
     from qa_orchestrator.contracts import EvidenceRecord
@@ -192,28 +249,124 @@ async def test_executor_selects_context_and_binds_actual_subset_hash(executor_in
                                   sha256=hashlib.sha256(text.encode()).hexdigest()),
             text=text, required=required, profiles=() if required else ("pr_test_analyzer",),
         ))
+    budget_text = "BUDGET_OMITTED" * 800
+    fragments.append(ContextFragment(
+        record=EvidenceRecord(
+            evidence_ref="E5", kind="other", locator="host:E5",
+            sha256=hashlib.sha256(budget_text.encode()).hexdigest(),
+        ),
+        text=budget_text,
+        required=False,
+        profiles=(ReviewAgent.PYTHON_REVIEWER,),
+    ))
     for ref, kind, text in (("E3", "source", "original source"), ("E4", "diff", "changed diff")):
         fragments.append(ContextFragment(
             record=EvidenceRecord(
                 evidence_ref=ref, kind=kind, revision=job.session.review_context.head_sha,
                 path=job.session.review_context.changed_files[0] if kind == "source" else None,
                 sha256=hashlib.sha256(text.encode()).hexdigest(),
+                    source_text_available=kind == "source",
             ), text=text,
         ))
     packet.write_text(ContextPacket(fragments=fragments).model_dump_json())
     context = job.session.review_context.model_copy(update={
         "evidence_packet_sha256": hashlib.sha256(packet.read_bytes()).hexdigest(),
-        "evidence_refs": ("E1", "E2", "E3", "E4"),
+        "diff_sha256": hashlib.sha256(b"changed diff").hexdigest(),
+        "evidence_refs": ("E1", "E2", "E3", "E4", "E5"),
         "evidence_registry": tuple(f.record for f in fragments),
+        "changed_files": (*job.session.review_context.changed_files, "src/omitted.py"),
     })
     job = replace(job, session=job.session.model_copy(update={"review_context": context}))
+    monkeypatch.setattr(codex_executor, "MAX_EXECUTOR_PROMPT_BYTES", 8192)
     script.write_text(script.read_text().replace(
-        "prompt=sys.stdin.read()", "prompt=sys.stdin.read()\nassert 'OMITTED_TEST_ONLY' not in prompt"
+        "prompt=sys.stdin.read()",
+        "prompt=sys.stdin.read()\nassert 'OMITTED_TEST_ONLY' not in prompt\n"
+        "assert 'BUDGET_OMITTED' not in prompt\nassert 'E2' not in prompt and 'E5' not in prompt\n"
+        "assert '1 of 2 changed paths have excerpts available' in prompt\n"
+        "assert len(prompt.encode())<=8192",
     ))
     report = await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(job)
     assert report.context_selection.included_refs == ("E1", "E3", "E4")
-    assert report.context_selection.omitted_refs == ("E2",)
+    assert report.context_selection.omitted_refs == ("E2", "E5")
+    assert report.context_selection.budget_omitted_refs == ("E5",)
+    assert report.context_selection.changed_files_count == 2
+    assert report.context_selection.source_excerpt_files_available == 1
+    assert report.context_selection.source_excerpt_files_included == 1
     assert report.context_selection.source_packet_sha256 == context.evidence_packet_sha256
+
+
+async def test_executor_excludes_binary_and_base_only_source_from_excerpt_coverage(
+    executor_input,
+):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.context_pack import ContextFragment, ContextPacket
+    from qa_orchestrator.contracts import EvidenceRecord
+
+    packet, job, script = executor_input
+    head = job.session.review_context.head_sha
+    base = job.session.review_context.base_sha
+    changed_paths = ("assets/logo.png", "src/deleted.py")
+    binary_text = (
+        "[Source content omitted from text context (binary or non-UTF-8); "
+        f"sha256={'a' * 64}]"
+    )
+    fragments = (
+        ContextFragment(
+            record=EvidenceRecord(
+                evidence_ref="B1",
+                kind="source",
+                revision=head,
+                path=changed_paths[0],
+                sha256="a" * 64,
+                source_text_available=False,
+            ),
+            text=binary_text,
+        ),
+        ContextFragment(
+            record=EvidenceRecord(
+                evidence_ref="S1",
+                kind="source",
+                revision=base,
+                path=changed_paths[1],
+                    sha256=hashlib.sha256(b"Deleted head source is unavailable.").hexdigest(),
+                source_text_available=True,
+            ),
+            text="Deleted head source is unavailable.",
+        ),
+        ContextFragment(
+            record=EvidenceRecord(
+                evidence_ref="D1",
+                kind="diff",
+                revision=head,
+                sha256=hashlib.sha256(b"changed diff").hexdigest(),
+            ),
+            text="changed diff",
+        ),
+    )
+    document = ContextPacket(fragments=fragments, deleted_paths=("src/deleted.py",))
+    packet.write_text(document.model_dump_json())
+    registry = tuple(fragment.record for fragment in fragments)
+    context = job.session.review_context.model_copy(
+        update={
+            "evidence_packet_sha256": hashlib.sha256(packet.read_bytes()).hexdigest(),
+            "diff_sha256": hashlib.sha256(b"changed diff").hexdigest(),
+            "evidence_refs": ("B1", "S1", "D1"),
+            "evidence_registry": registry,
+            "changed_files": changed_paths,
+        }
+    )
+    script.write_text(
+        script.read_text().replace(
+            "assert 'Pinned source data.' in prompt",
+            "assert '0 of 2 changed paths have excerpts available in this packet' in prompt",
+        )
+    )
+    report = await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(
+        replace(job, session=job.session.model_copy(update={"review_context": context}))
+    )
+
+    assert report.context_selection.source_excerpt_files_available == 0
+    assert report.context_selection.source_excerpt_files_included == 0
 
 
 async def test_context_byte_budget_changes_executor_checkpoint_identity(executor_input):

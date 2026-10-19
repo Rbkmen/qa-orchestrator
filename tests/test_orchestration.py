@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import ValidationError
 
 from qa_orchestrator.contracts import ReviewAgent, ReviewBundle, ReviewFindingCandidate, ReviewNote
 from qa_orchestrator.orchestration import (
@@ -11,6 +12,7 @@ from qa_orchestrator.orchestration import (
     OrchestrationReason,
     OrchestrationStatus,
     OrchestrationStep,
+    QaOrchestrationSession,
     QaOrchestrator,
 )
 from qa_orchestrator.review_profiles import (
@@ -60,6 +62,94 @@ def test_list_includes_retained_terminal_sessions_and_returns_independent_result
         active.run_id,
         newest.run_id,
     }
+
+
+def test_session_trace_is_hash_chained_and_rejects_tampering():
+    orchestrator = QaOrchestrator(ttl_seconds=60, max_sessions=2)
+    started = orchestrator.start("ordinary_review")
+    orchestrator.advance(
+        run_id=started.run_id,
+        completed_step="triage",
+        status="partial",
+        request_id="stop-after-triage",
+        expected_revision=0,
+    )
+    finalized = orchestrator.finish(
+        run_id=started.run_id,
+        outcome="partial",
+        expected_revision=1,
+    )
+
+    assert finalized.audit_trace_complete is True
+    events = finalized.audit_events
+    assert [event.event_type for event in events] == [
+        "session_started",
+        "transition_applied",
+        "session_finalized",
+    ]
+    assert [event.revision for event in events] == [0, 1, 2]
+    assert events[0].previous_event_sha256 is None
+    assert events[1].previous_event_sha256 == events[0].event_sha256
+    assert events[1].request_id == "stop-after-triage"
+    assert events[2].previous_event_sha256 == events[1].event_sha256
+    assert QaOrchestrationSession.model_validate_json(finalized.model_dump_json()) == finalized
+
+    tampered = finalized.model_dump(mode="json")
+    tampered["audit_events"][1]["to_status"] = "blocked"
+    with pytest.raises(ValidationError, match="QA audit event hash mismatch"):
+        QaOrchestrationSession.model_validate(tampered)
+
+
+def test_session_trace_cannot_be_transplanted_to_another_session():
+    orchestrator = QaOrchestrator(ttl_seconds=60, max_sessions=2)
+    source = orchestrator.start("ordinary_review")
+    target = orchestrator.start("ordinary_review")
+    tampered = target.model_dump(mode="json")
+    tampered["audit_events"] = [event.model_dump(mode="json") for event in source.audit_events]
+
+    with pytest.raises(ValidationError, match="QA audit event belongs to a different session"):
+        QaOrchestrationSession.model_validate(tampered)
+
+
+def test_session_trace_rejects_a_rehashed_invalid_state_transition():
+    from qa_orchestrator.orchestration import _audit_event_sha256
+
+    orchestrator = QaOrchestrator(ttl_seconds=60, max_sessions=2)
+    started = orchestrator.start("ordinary_review")
+    orchestrator.advance(
+        run_id=started.run_id,
+        completed_step="triage",
+        status="partial",
+        expected_revision=0,
+    )
+    finalized = orchestrator.finish(
+        run_id=started.run_id,
+        outcome="partial",
+        expected_revision=1,
+    )
+    events = finalized.audit_events
+
+    invalid_transition = events[1].model_copy(
+        update={"from_status": OrchestrationStatus.BLOCKED, "event_sha256": "0" * 64}
+    )
+    invalid_transition = invalid_transition.model_copy(
+        update={"event_sha256": _audit_event_sha256(invalid_transition)}
+    )
+    finalization = events[2].model_copy(
+        update={
+            "previous_event_sha256": invalid_transition.event_sha256,
+            "event_sha256": "0" * 64,
+        }
+    )
+    finalization = finalization.model_copy(
+        update={"event_sha256": _audit_event_sha256(finalization)}
+    )
+    tampered = finalized.model_dump(mode="json")
+    tampered["audit_events"][1] = invalid_transition.model_dump(mode="json")
+    tampered["audit_events"][2] = finalization.model_dump(mode="json")
+
+    with pytest.raises(ValidationError, match="QA audit event source state does not match prior state"):
+        QaOrchestrationSession.model_validate(tampered)
 
 
 def test_normal_flow_skips_sol():
@@ -113,6 +203,10 @@ def test_review_bound_flow_validates_and_retains_structured_reports(
     orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
     started = orchestrator.start("ordinary_review", bound_review_context)
     assert started.recommended_profiles == [ReviewAgent.PYTHON_REVIEWER]
+    assert started.recommended_bundles == [
+        ReviewBundle.ORDINARY_MR,
+        ReviewBundle.PYTHON_BACKEND,
+    ]
     primary = orchestrator.advance(
         run_id=started.run_id,
         completed_step=OrchestrationStep.TRIAGE,

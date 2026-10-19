@@ -31,7 +31,9 @@ OpenAI recommends evaluating prompting guidance with the selected model and work
 
 ## Changed-file profile hints
 
-When `review_context.changed_files` is supplied, `start_qa_orchestration` returns `recommended_profiles` based on recognizable file extensions and test paths. The list is a shortlist only; it does not select a route, infer risk, or replace the bundle recommendation.
+When `review_context.changed_files` is supplied, `start_qa_orchestration` returns `recommended_profiles` based on recognizable file extensions and test paths. It also appends a matching Python, Ruby, or mobile bundle when those stacks are identified. Both fields are non-binding hints: they do not select a route or infer risk.
+
+For web UI changes, a single recognizable `.tsx` or `.jsx` stack keeps only its matching widget bundle; mixed TypeScript and JavaScript UI changes may recommend both. Mobile paths do not get a web widget hint from `.tsx` or `.jsx` files beneath the mobile tree.
 
 | Changed paths | Expected hint |
 |---|---|

@@ -58,7 +58,10 @@ REVIEW_PROFILES: Mapping[ReviewAgent, ReviewProfileDefinition] = MappingProxyTyp
                 "needed to check a material scenario or support a candidate, and do not repeat the map. "
                 "Apply the shared scenario trace to every material requirement or claim. For example, "
                 "query-only navigation must update dependent metadata, just as a status-only change "
-                "must update dependent responses, caches or events."
+                "must update dependent responses, caches or events. For API clients, verify pagination "
+                "and cursor termination, detect repeated reads of the same endpoint, compare freshness "
+                "with the current resource identity or version when required, and check that early returns "
+                "do not skip required side effects."
             ),
             required_sections=("Scope", "Finding Candidates", "Coverage Gaps", "Unverified"),
             escalation_signals=(
@@ -105,7 +108,12 @@ REVIEW_PROFILES: Mapping[ReviewAgent, ReviewProfileDefinition] = MappingProxyTyp
         ),
         ReviewAgent.TYPESCRIPT_REVIEWER: ReviewProfileDefinition(
             display_name="TypeScript Reviewer",
-            focus="Focus on types, asynchronous and error contracts, narrowing, and unsafe casts.",
+            focus=(
+                "Review TypeScript behavior and public contracts. Check null/undefined and "
+                "discriminated-union narrowing, exhaustive branches, unsafe casts, and the "
+                "boundary between untrusted serialized data and validated types. Trace async "
+                "success, rejection, cancellation, and error propagation where changed."
+            ),
             required_sections=("Scope", "Finding Candidates", "Coverage Gaps", "Unverified"),
             escalation_signals=(
                 "A type or async contract is enforced only at runtime.",
@@ -115,8 +123,10 @@ REVIEW_PROFILES: Mapping[ReviewAgent, ReviewProfileDefinition] = MappingProxyTyp
         ReviewAgent.REACT_REVIEWER: ReviewProfileDefinition(
             display_name="React Reviewer",
             focus=(
-                "Focus on component state, rendering branches, effects, accessibility, and "
-                "user-visible behavior."
+                "Review React state and rendered behavior. Check hook dependencies and stale "
+                "closures, effect cleanup and async races, state changes when resource identity "
+                "changes, controlled props, rendering branches, accessibility, and the visible "
+                "user path where affected."
             ),
             required_sections=("Scope", "Finding Candidates", "Coverage Gaps", "Unverified"),
             escalation_signals=(
@@ -303,6 +313,23 @@ RECOMMENDED_BUNDLES_BY_TASK_TYPE: Mapping[QaTaskType, tuple[ReviewBundle, ...]] 
     }
 )
 
+_STACK_BUNDLE_BY_PROFILE: Mapping[ReviewAgent, ReviewBundle] = MappingProxyType(
+    {
+        ReviewAgent.RUBY_REVIEWER: ReviewBundle.RUBY_BACKEND,
+        ReviewAgent.PYTHON_REVIEWER: ReviewBundle.PYTHON_BACKEND,
+        ReviewAgent.MOBILE_REVIEWER: ReviewBundle.MOBILE,
+    }
+)
+_MOBILE_PATH_SEGMENTS = frozenset({"android", "ios", "mobile", "mobile-apps", "react-native"})
+_MOBILE_NATIVE_SUFFIXES = frozenset({".swift", ".m", ".mm"})
+
+
+def _is_mobile_path(changed_file: str) -> bool:
+    path = PurePosixPath(changed_file.replace("\\", "/").lower())
+    return bool(_MOBILE_PATH_SEGMENTS.intersection(path.parts)) or path.suffix in (
+        _MOBILE_NATIVE_SUFFIXES
+    )
+
 
 _BUNDLE_USAGE: Mapping[ReviewBundle, str] = MappingProxyType(
     {
@@ -354,8 +381,43 @@ def bundle_execution_groups(
     return _REVIEW_BUNDLE_EXECUTION_GROUPS[bundle]
 
 
-def recommended_bundles_for(task_type: QaTaskType) -> tuple[ReviewBundle, ...]:
-    return RECOMMENDED_BUNDLES_BY_TASK_TYPE[task_type]
+def recommended_bundles_for(
+    task_type: QaTaskType,
+    changed_files: tuple[str, ...] = (),
+) -> tuple[ReviewBundle, ...]:
+    """Combine the task shortlist with bundles matching recognizable changed-file stacks."""
+    suggested = list(RECOMMENDED_BUNDLES_BY_TASK_TYPE[task_type])
+
+    path_profiles = recommended_profiles_for_changed_files(changed_files)
+    is_mobile_change = ReviewAgent.MOBILE_REVIEWER in path_profiles
+    has_web_tsx = False
+    has_web_jsx = False
+    for changed_file in changed_files:
+        path = PurePosixPath(changed_file.replace("\\", "/").lower())
+        if _is_mobile_path(changed_file):
+            continue
+        has_web_tsx = has_web_tsx or path.suffix == ".tsx"
+        has_web_jsx = has_web_jsx or path.suffix == ".jsx"
+
+    if is_mobile_change and not (has_web_tsx or has_web_jsx):
+        suggested = [
+            bundle
+            for bundle in suggested
+            if bundle not in {ReviewBundle.WIDGET, ReviewBundle.WIDGET_JS}
+        ]
+    elif has_web_tsx != has_web_jsx:
+        incompatible_bundle = ReviewBundle.WIDGET_JS if has_web_tsx else ReviewBundle.WIDGET
+        suggested = [bundle for bundle in suggested if bundle is not incompatible_bundle]
+    if has_web_tsx and ReviewBundle.WIDGET not in suggested:
+        suggested.append(ReviewBundle.WIDGET)
+    if has_web_jsx and ReviewBundle.WIDGET_JS not in suggested:
+        suggested.append(ReviewBundle.WIDGET_JS)
+
+    for profile in path_profiles:
+        bundle = _STACK_BUNDLE_BY_PROFILE.get(profile)
+        if bundle is not None and bundle not in suggested:
+            suggested.append(bundle)
+    return tuple(suggested)
 
 
 def recommended_profiles_for_changed_files(
@@ -386,11 +448,7 @@ def recommended_profiles_for_changed_files(
             suggested.add(ReviewAgent.RUBY_REVIEWER)
         if suffix == ".py":
             suggested.add(ReviewAgent.PYTHON_REVIEWER)
-        if {"android", "ios", "mobile", "mobile-apps", "react-native"} & segments or suffix in {
-            ".swift",
-            ".m",
-            ".mm",
-        }:
+        if _is_mobile_path(normalized_path):
             suggested.add(ReviewAgent.MOBILE_REVIEWER)
 
     order = (
