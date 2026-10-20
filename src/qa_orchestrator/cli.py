@@ -647,6 +647,7 @@ def _help() -> int:
     print("  qa-orch reload         перечитать и проверить модельную политику")
     print("  qa-orch benchmark      импортировать, сравнить скорость и оценить локальный benchmark")
     print("  qa-orch evidence       найти соседний код, собрать и проверить реестр evidence")
+    print("  qa-orch repo           составить профиль проекта и выполнить аудит тестового набора")
     print("  qa-orch rules          привязать явные правила к контексту ревью")
     print("  qa-orch report render  вывести структурированный отчёт ревью в Markdown")
     print("  qa-orch                запустить MCP STDIO-сервер")
@@ -669,6 +670,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             from qa_orchestrator.evidence import evidence_main
 
             return evidence_main(args[1:])
+        if args[0] == "repo":
+            from qa_orchestrator.repo_audit import repo_audit_main
+
+            return repo_audit_main(args[1:])
         if args[0] == "rules":
             from qa_orchestrator.review_rules import rules_main
 
