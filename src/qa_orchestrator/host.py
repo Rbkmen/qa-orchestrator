@@ -22,6 +22,7 @@ from qa_orchestrator.contracts import (
     QaTaskOutcome,
     ReviewAgent,
     ReviewContext,
+    ReviewNote,
     ReviewRoute,
 )
 from qa_orchestrator.evidence import validate_context_selection, validate_registered_locations
@@ -131,6 +132,9 @@ class HostReviewAdapter:
                 )
                 cached = self.checkpoint_store.load(key)
                 if cached is not None:
+                    cached = self._with_changed_path_coverage_gaps(
+                        session.review_context, cached
+                    )
                     self._validate_report(session.review_context, profile, cached)
                     reused.append(profile)
                     return cached
@@ -160,6 +164,9 @@ class HostReviewAdapter:
                     if report.profile != profile:
                         failure = HostProfileFailure(profile, "wrong_profile")
                     else:
+                        report = self._with_changed_path_coverage_gaps(
+                            session.review_context, report
+                        )
                         outcome = "completed"
                 except (TimeoutError, RetryableProfileError) as exc:
                     outcome = "timeout" if isinstance(exc, TimeoutError) else "retryable_error"
@@ -393,6 +400,43 @@ class HostReviewAdapter:
                     pass
 
     @staticmethod
+    def _with_changed_path_coverage_gaps(
+        context: ReviewContext,
+        report: ProfileReviewReport,
+    ) -> ProfileReviewReport:
+        bound_paths = set(context.changed_files)
+        reviewed_paths = set(report.reviewed_changed_paths)
+        unknown_paths = reviewed_paths - bound_paths
+        if unknown_paths:
+            examples = ", ".join(sorted(unknown_paths)[:5])
+            raise ValueError(
+                "profile report claims review of paths outside the bound change: " + examples
+            )
+        unreported_paths = sorted(bound_paths - reviewed_paths)
+        if not unreported_paths:
+            return report
+        examples = ", ".join(
+            path if len(path) <= 160 else path[:157] + "..."
+            for path in unreported_paths[:5]
+        )
+        gap = ReviewNote(
+            text=(
+                f"The profile did not explicitly attest inspection of {len(unreported_paths)} "
+                f"changed path(s), including {examples}. Coverage for those paths is "
+                "unverified; review them before treating this profile as complete."
+            )
+        )
+        gaps = list(report.coverage_gaps)
+        if gap in gaps:
+            return report
+        if len(gaps) >= 100:
+            raise ValueError("profile report has no room for host-generated coverage gaps")
+        gaps.append(gap)
+        return ProfileReviewReport.model_validate(
+            {**report.model_dump(mode="python"), "coverage_gaps": tuple(gaps)}
+        )
+
+    @staticmethod
     def _validate_report(context: ReviewContext, profile: ReviewAgent, report: ProfileReviewReport):
         if report.profile != profile:
             raise ValueError("checkpoint profile mismatch")
@@ -406,6 +450,8 @@ class HostReviewAdapter:
         expected = context.review_rules.digest if context.review_rules else None
         if report.review_rules_sha256 != expected:
             raise ValueError("profile report rules digest mismatch")
+        if set(report.reviewed_changed_paths) - set(context.changed_files):
+            raise ValueError("profile report claims review of paths outside the bound change")
         validate_registered_locations(context, report.finding_candidates)
         validate_context_selection(context, report)
 

@@ -39,7 +39,39 @@ def host_session(tmp_path, bound_review_context):
 
 
 def report(profile):
-    return ProfileReviewReport(profile=profile, scope="Pinned source inspected.")
+    return ProfileReviewReport(
+        profile=profile,
+        scope="Pinned source inspected.",
+        reviewed_changed_paths=("src/service.py",),
+    )
+
+
+async def test_host_reports_changed_paths_missing_from_profile_attestation(host_session):
+    service, run_id = host_session(profile="python_reviewer")
+
+    async def execute(job):
+        return ProfileReviewReport(profile=job.profile, scope="Reviewed partial context.")
+
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, execute, lambda _: DeepReviewSignals()
+    )
+
+    gaps = result.session.profile_reports[0].coverage_gaps
+    assert any(
+        "explicitly attest inspection" in gap.text and "src/service.py" in gap.text
+        for gap in gaps
+    )
+
+
+def test_host_rejects_attestation_for_path_outside_bound_change(bound_review_context):
+    invalid = ProfileReviewReport(
+        profile="python_reviewer",
+        scope="Invalid path attestation.",
+        reviewed_changed_paths=("src/other.py",),
+    )
+
+    with pytest.raises(ValueError, match="outside the bound change"):
+        HostReviewAdapter._with_changed_path_coverage_gaps(bound_review_context, invalid)
 
 
 async def test_finish_review_exports_markdown_with_the_accepted_outcome(host_session, tmp_path):
@@ -109,6 +141,32 @@ async def test_attempt_ledger_preserves_failed_usage_and_sums_known_retries(host
     assert metrics.output_tokens == 6
     assert metrics.attempts == result.execution_attempts
     assert "secret" not in str(result.execution_attempts)
+
+
+async def test_attempt_ledger_keeps_sanitized_cli_failure_metadata(host_session):
+    service, run_id = host_session(profile="python_reviewer")
+
+    async def execute(job):
+        job.observation.cli_failure_detail = (
+            "Error: token=sk-1234567890abcdef access_token=private-value "
+            "at /Users/private/.codex/log"
+        )
+        job.observation.cli_exit_code = 2
+        job.observation.cli_event_type = "turn.failed"
+        raise ValueError("private provider response")
+
+    result = await HostReviewAdapter(
+        service, HostExecutionPolicy(retry_delay_seconds=0)
+    ).run_primary_review(run_id, execute, lambda _: DeepReviewSignals())
+
+    attempt = result.execution_attempts[0]
+    assert attempt.outcome == "failed"
+    assert attempt.cli_failure_detail == (
+        "Error: token=[REDACTED] access_token=[REDACTED] at [path]"
+    )
+    assert attempt.cli_exit_code == 2
+    assert attempt.cli_event_type == "turn.failed"
+    assert "private provider response" not in str(result.execution_attempts)
 
 
 async def test_cancelled_attempt_keeps_observed_usage_in_partial_result(host_session):

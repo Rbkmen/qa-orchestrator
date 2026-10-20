@@ -12,6 +12,7 @@ from pydantic import (
     model_validator,
 )
 
+from qa_orchestrator.failure_diagnostics import sanitize_failure_detail
 from qa_orchestrator.review_rules import ReviewRuleset
 
 type QaTaskType = Literal[
@@ -225,10 +226,20 @@ class ProfileAttemptObservation(BaseModel):
     preparation_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     model_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     validation_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    cli_failure_detail: str | None = Field(default=None, max_length=512)
+    cli_exit_code: int | None = Field(default=None, ge=-255, le=255)
+    cli_event_type: Literal["error", "turn.failed"] | None = None
+
+    @field_validator("cli_failure_detail")
+    @classmethod
+    def sanitize_cli_failure_detail(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return sanitize_failure_detail(value) or None
 
 
 class ProfileAttemptMetrics(ProfileAttemptObservation):
-    """One actual executor call; no exception bodies or source content."""
+    """One call's timings, usage and sanitized CLI diagnostics; no raw exception/source."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -430,6 +441,15 @@ class ProfileReviewReport(BaseModel):
     review_rules_sha256: Sha256Digest | None = None
     scope: str = Field(min_length=1, max_length=2000)
     finding_candidates: tuple[ReviewFindingCandidate, ...] = Field(default=(), max_length=100)
+    reviewed_changed_paths: tuple[ChangedFilePath, ...] = Field(
+        default=(),
+        max_length=500,
+        description=(
+            "Paths in the bound change that this profile explicitly inspected, including paths "
+            "with no finding. This is an executor attestation; the host cannot independently "
+            "verify that the inspection occurred."
+        ),
+    )
     coverage_gaps: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
     unverified: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
     evidence_map: tuple[ReviewEvidenceMapEntry, ...] = Field(default=(), max_length=500)
@@ -456,6 +476,8 @@ class ProfileReviewReport(BaseModel):
             self.finding_candidates
         ):
             raise ValueError("finding candidate IDs must be unique within a profile report")
+        if len(set(self.reviewed_changed_paths)) != len(self.reviewed_changed_paths):
+            raise ValueError("reviewed_changed_paths must be unique")
         if len(self.model_dump_json().encode("utf-8")) > _MAX_PROFILE_REVIEW_REPORT_BYTES:
             raise ValueError("profile report exceeds the maximum serialized size")
         return self

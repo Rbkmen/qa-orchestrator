@@ -21,6 +21,9 @@ def test_output_schema_enforces_profile_finding_scope(profile):
     assert schema["properties"]["finding_candidates"]["maxItems"] == limit
     assert schema["properties"]["finding_candidates"]["type"] == "array"
     assert "finding_candidates" in schema["required"]
+    assert schema["properties"]["coverage_gaps"]["maxItems"] == 97
+    assert schema["properties"]["reviewed_changed_paths"]["type"] == "array"
+    assert "reviewed_changed_paths" in schema["required"]
     assert schema["properties"]["profile"]["enum"] == [profile.value]
 
 
@@ -63,7 +66,7 @@ def test_executor_schema_change_invalidates_previous_identity(executor_input):
     packet, _, _ = executor_input
     executor = CodexProfileExecutor(packet)
     old_identity = hashlib.sha256(json.dumps({
-        "implementation": "codex-packet-executor-v5",
+        "implementation": "codex-packet-executor-v9",
         "command": executor.command,
         "max_context_bytes": executor.max_context_bytes,
         "model": executor.model,
@@ -99,7 +102,7 @@ assert not any('bypass' in x for x in a)
 prompt=sys.stdin.read()
 assert 'Pinned source data.' in prompt
 out=pathlib.Path(a[a.index('--output-last-message')+1])
-out.write_text(json.dumps({'profile':'python_reviewer','scope':'Inspected packet','finding_candidates':[], 'coverage_gaps':[], 'unverified':[], 'evidence_map':[]}))
+out.write_text(json.dumps({'profile':'python_reviewer','scope':'Inspected packet','finding_candidates':[], 'reviewed_changed_paths':['src/service.py'], 'coverage_gaps':[], 'unverified':[], 'evidence_map':[]}))
 print(json.dumps({'type':'turn.completed','usage':{'input_tokens':12,'output_tokens':5}}))
 """,
         encoding="utf-8",
@@ -142,8 +145,10 @@ async def test_executor_reports_phases_and_usage_before_failed_completion(execut
 
 async def test_executor_includes_bounded_sanitized_cli_stderr_on_failure(executor_input):
     from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.contracts import ProfileAttemptObservation
 
     packet, job, script = executor_input
+    observed = ProfileAttemptObservation()
     script.write_text(
         "import sys\nsys.stdin.read()\n"
         "sys.stderr.write('x' * 20000)\n"
@@ -157,7 +162,9 @@ async def test_executor_includes_bounded_sanitized_cli_stderr_on_failure(executo
         ValueError,
         match=r"CLI reviewer failed: Error:.*\[REDACTED\].*\[path\]",
     ) as exc:
-        await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(job)
+        await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(
+            replace(job, observation=observed)
+        )
 
     message = str(exc.value)
     assert len(message) < 600
@@ -167,12 +174,19 @@ async def test_executor_includes_bounded_sanitized_cli_stderr_on_failure(executo
     assert "AWS_SECRET_ACCESS_KEY=[REDACTED]" in message
     assert "aws-hidden-value" not in message
     assert "/Users/private" not in message
+    assert observed.cli_exit_code == 2
+    assert observed.cli_event_type is None
+    assert "access_token=[REDACTED]" in observed.cli_failure_detail
+    assert "plain-secret-value" not in observed.cli_failure_detail
+    assert "/Users/private" not in observed.cli_failure_detail
 
 
 async def test_executor_reports_json_failure_type_without_exposing_event_body(executor_input):
     from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.contracts import ProfileAttemptObservation
 
     packet, job, script = executor_input
+    observed = ProfileAttemptObservation()
     script.write_text(
         "import json,sys\nsys.stdin.read()\n"
         "print(json.dumps({'type':'turn.failed','error':{'message':"
@@ -181,11 +195,16 @@ async def test_executor_reports_json_failure_type_without_exposing_event_body(ex
     )
 
     with pytest.raises(ValueError, match=r"CLI reviewer failed \(turn.failed event\)") as exc:
-        await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(job)
+        await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(
+            replace(job, observation=observed)
+        )
 
     message = str(exc.value)
     assert "sk-1234567890abcdef" not in message
     assert "/Users/private" not in message
+    assert observed.cli_exit_code == 0
+    assert observed.cli_event_type == "turn.failed"
+    assert observed.cli_failure_detail is None
 
 
 async def test_executor_success_exposes_validation_phase(executor_input):
@@ -283,6 +302,8 @@ async def test_executor_selects_context_and_binds_actual_subset_hash(executor_in
         "prompt=sys.stdin.read()\nassert 'OMITTED_TEST_ONLY' not in prompt\n"
         "assert 'BUDGET_OMITTED' not in prompt\nassert 'E2' not in prompt and 'E5' not in prompt\n"
         "assert '1 of 2 changed paths have excerpts available' in prompt\n"
+        "assert 'Inspect every changed path and hunk' in prompt\n"
+        "assert 'do a second systematic sweep over the diff' in prompt\n"
         "assert len(prompt.encode())<=8192",
     ))
     report = await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(job)
@@ -293,6 +314,15 @@ async def test_executor_selects_context_and_binds_actual_subset_hash(executor_in
     assert report.context_selection.source_excerpt_files_available == 1
     assert report.context_selection.source_excerpt_files_included == 1
     assert report.context_selection.source_packet_sha256 == context.evidence_packet_sha256
+    assert any(
+        "1 evidence ref" in gap.text and "budget" in gap.text.lower()
+        for gap in report.coverage_gaps
+    )
+    assert any("src/omitted.py" in gap.text for gap in report.coverage_gaps)
+    assert any(
+        "explicitly attest inspection" in gap.text and "src/omitted.py" in gap.text
+        for gap in report.coverage_gaps
+    )
 
 
 async def test_executor_excludes_binary_and_base_only_source_from_excerpt_coverage(
@@ -356,9 +386,14 @@ async def test_executor_excludes_binary_and_base_only_source_from_excerpt_covera
         }
     )
     script.write_text(
-        script.read_text().replace(
+        script.read_text()
+        .replace(
             "assert 'Pinned source data.' in prompt",
             "assert '0 of 2 changed paths have excerpts available in this packet' in prompt",
+        )
+        .replace(
+            "'reviewed_changed_paths':['src/service.py']",
+            "'reviewed_changed_paths':['assets/logo.png','src/deleted.py']",
         )
     )
     report = await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(
@@ -367,6 +402,9 @@ async def test_executor_excludes_binary_and_base_only_source_from_excerpt_covera
 
     assert report.context_selection.source_excerpt_files_available == 0
     assert report.context_selection.source_excerpt_files_included == 0
+    assert not any(
+        "No head-source excerpt" in gap.text for gap in report.coverage_gaps
+    )
 
 
 async def test_context_byte_budget_changes_executor_checkpoint_identity(executor_input):
@@ -425,6 +463,58 @@ async def test_failure_never_becomes_a_clean_report(executor_input, body):
     with pytest.raises(ValueError) as caught:
         await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(job)
     assert "SECRET" not in str(caught.value)
+
+
+async def test_failed_turn_records_only_allowlisted_error_code_and_status(executor_input):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.contracts import ProfileAttemptObservation
+
+    packet, job, script = executor_input
+    observed = ProfileAttemptObservation()
+    job = replace(job, observation=observed)
+    script.write_text(
+        "import json,sys\nsys.stdin.read()\n"
+        "print(json.dumps({'type':'turn.failed','error':{"
+        "'message':'private PR fragment and credential=do-not-store',"
+        "'additionalDetails':'raw private diagnostic',"
+        "'codexErrorInfo':{'httpConnectionFailed':{'httpStatusCode':503}}}}))\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(job)
+
+    assert observed.cli_failure_detail == "codex_error=httpConnectionFailed http_status=503"
+    assert "private" not in observed.cli_failure_detail
+    assert "credential" not in observed.cli_failure_detail
+
+
+@pytest.mark.parametrize(
+    ("event", "expected"),
+    [
+        (
+            {"type": "turn.failed", "error": {"codexErrorInfo": "rateLimitExceeded"}},
+            "codex_error=rateLimitExceeded",
+        ),
+        (
+            {"type": "turn.failed", "error": {"codexErrorInfo": "private prompt data"}},
+            None,
+        ),
+        (
+            {"type": "turn.failed", "error": {"message": "private prompt data"}},
+            None,
+        ),
+        (
+            {"type": "turn.completed", "error": {"codexErrorInfo": "rateLimitExceeded"}},
+            None,
+        ),
+    ],
+)
+def test_cli_event_failure_detail_uses_only_known_machine_fields(event, expected):
+    from qa_orchestrator.failure_diagnostics import safe_cli_event_failure_detail
+
+    assert safe_cli_event_failure_detail(event) == expected
 
 
 async def test_tool_actions_are_rejected_even_with_valid_final_output(executor_input):

@@ -146,11 +146,15 @@ CLI version and your instruction version before enabling checkpoints.
 
 The output schema requires an empty `finding_candidates` array for
 `pr_test_analyzer` and `code_explorer`, matching server-side role validation.
-Other profiles retain their existing finding limit. Executor identity v6
-invalidates checkpoints produced under the previous generation schema and prompt budget.
+It also requires `reviewed_changed_paths`: list every bound path whose supplied
+diff/source evidence was inspected, including paths with no finding. The host
+adds a `coverage_gap` for every unlisted path and rejects paths outside the bound
+change. This is an executor attestation, not independent proof of review.
+Other profiles retain their existing finding limit. Executor identity v10
+invalidates checkpoints produced under the previous report schema and prompt.
 
 Each call checks the packet hash, accounts for the complete prompt envelope, and
-keeps the combined prompt within 2 MB before launch. It starts a fresh temporary
+keeps the combined prompt within 1,000,000 bytes before launch. It starts a fresh temporary
 workspace without the target checkout or inherited MCP configuration, passes
 route/rules/context and previous reports, validates profile/evidence/locations,
 and captures reported token usage. Raw event bodies and stderr are not persisted

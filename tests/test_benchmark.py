@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from qa_orchestrator.benchmark import (
     BenchmarkDataset,
+    BenchmarkFailure,
     BenchmarkResults,
     benchmark_main,
     check_diff_budget,
@@ -631,6 +632,105 @@ async def test_repetition_runner_executes_all_requested_attempts(benchmark_input
     runs = await run_repetitions(BenchmarkDataset.model_validate(dataset), execute, repetitions=3)
     assert seen == [("case-1", 1), ("case-1", 2), ("case-1", 3)]
     assert len(runs.runs) == 3
+    assert [run.attempt for run in runs.runs] == [1, 2, 3]
+
+
+async def test_repetition_runner_persists_sanitized_failure_attempts(benchmark_inputs, tmp_path):
+    import json
+
+    from qa_orchestrator.benchmark import BenchmarkRun, run_repetitions, score_reliability
+
+    dataset, source_results = benchmark_inputs
+    dataset = BenchmarkDataset.model_validate(dataset)
+    template = source_results["runs"][0]
+    configuration_id = template["configuration_id"]
+
+    async def execute(case, attempt):
+        if attempt == 2:
+            return BenchmarkFailure(
+                case_id=case.case_id,
+                configuration_id=configuration_id,
+                model=template["model"],
+                reasoning=template["reasoning"],
+                checklist_sha256=template["checklist_sha256"],
+                host_instructions_sha256=template["host_instructions_sha256"],
+                attempt=attempt,
+                failure_code="cli_failed",
+                error_type="ValueError",
+                exit_code=2,
+                event_type="turn.failed",
+                stderr_detail=(
+                    "Error: access_token=private-value at /Users/private/.codex/log"
+                ),
+            )
+        return BenchmarkRun.model_validate(
+            {**source_results["runs"][0], "run_id": f"success-{attempt}"}
+        )
+
+    artifact = await run_repetitions(dataset, execute, repetitions=3)
+    reloaded = BenchmarkResults.model_validate_json(artifact.model_dump_json())
+    assert [run.attempt for run in reloaded.runs] == [1, 3]
+    assert reloaded.failures[0].stderr_detail == "Error: access_token=[REDACTED] at [path]"
+
+    summary = score_reliability(dataset, reloaded, expected_repetitions=3)
+    group = summary["groups"][0]
+    assert group["attempts"] == 2
+    assert group["failed_attempts"] == 1
+    assert group["attempts_recorded"] == 3
+    assert group["repetition_coverage_complete"] is False
+    assert summary["failures"][0]["exit_code"] == 2
+    assert summary["failures"][0]["event_type"] == "turn.failed"
+
+    dataset_path = tmp_path / "dataset.json"
+    results_path = tmp_path / "results.json"
+    output_path = tmp_path / "reliability.json"
+    dataset_path.write_text(dataset.model_dump_json(), encoding="utf-8")
+    results_path.write_text(reloaded.model_dump_json(), encoding="utf-8")
+    assert benchmark_main(
+        [
+            "reliability",
+            "--dataset",
+            str(dataset_path),
+            "--results",
+            str(results_path),
+            "--repetitions",
+            "3",
+            "--output",
+            str(output_path),
+        ]
+    ) == 0
+    cli_output = json.loads(output_path.read_text(encoding="utf-8"))
+    assert cli_output["failures"][0]["stderr_detail"] == (
+        "Error: access_token=[REDACTED] at [path]"
+    )
+
+
+async def test_repetition_runner_accepts_failure_only_artifacts(benchmark_inputs):
+    from qa_orchestrator.benchmark import run_repetitions, score_reliability
+
+    dataset, source_results = benchmark_inputs
+    dataset = BenchmarkDataset.model_validate(dataset)
+    template = source_results["runs"][0]
+    configuration_id = template["configuration_id"]
+
+    async def fail(case, attempt):
+        return BenchmarkFailure(
+            case_id=case.case_id,
+            configuration_id=configuration_id,
+            model=template["model"],
+            reasoning=template["reasoning"],
+            checklist_sha256=template["checklist_sha256"],
+            host_instructions_sha256=template["host_instructions_sha256"],
+            attempt=attempt,
+            failure_code="cli_failed",
+            error_type="RuntimeError",
+        )
+
+    artifact = await run_repetitions(dataset, fail, repetitions=2)
+    assert artifact.runs == ()
+    summary = score_reliability(dataset, artifact, expected_repetitions=2)
+    assert summary["groups"][0]["elapsed_ms"] is None
+    assert summary["groups"][0]["failed_attempts"] == 2
 
 
 def test_speed_comparison_requires_same_model_packet_and_complete_repetitions(benchmark_inputs):

@@ -22,6 +22,7 @@ from pydantic import (
 )
 
 from qa_orchestrator.contracts import GitObjectId, ReviewFindingCandidate, Sha256Digest
+from qa_orchestrator.failure_diagnostics import sanitize_failure_detail
 
 
 class GoldFinding(BaseModel):
@@ -175,6 +176,7 @@ class BenchmarkRun(BaseModel):
     diff_sha256: Sha256Digest
     evidence_packet_sha256: Sha256Digest
     elapsed_ms: int = Field(ge=0)
+    attempt: int | None = Field(default=None, ge=1, le=20)
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
     candidates: tuple[ReviewFindingCandidate, ...] = Field(default=(), max_length=1000)
@@ -186,6 +188,8 @@ class BenchmarkRun(BaseModel):
         payload = handler(self)
         if self.task_context_sha256 is None:
             payload.pop("task_context_sha256", None)
+        if self.attempt is None:
+            payload.pop("attempt", None)
         return payload
 
     @field_validator(
@@ -221,18 +225,89 @@ class BenchmarkRun(BaseModel):
         return self
 
 
+class BenchmarkFailure(BaseModel):
+    """One failed benchmark attempt with bounded, sanitized execution metadata."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    case_id: str = Field(min_length=1, max_length=256)
+    configuration_id: str = Field(min_length=1, max_length=256)
+    model: str = Field(min_length=1, max_length=256)
+    reasoning: str = Field(min_length=1, max_length=64)
+    checklist_sha256: Sha256Digest
+    host_instructions_sha256: Sha256Digest
+    review_rules_sha256: Sha256Digest | None = None
+    attempt: int = Field(ge=1, le=20)
+    failure_code: str = Field(pattern=r"^[a-z][a-z0-9_.-]{0,63}$")
+    error_type: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_.]{0,127}$")
+    exit_code: int | None = Field(default=None, ge=-255, le=255)
+    event_type: Literal["error", "turn.failed"] | None = None
+    stderr_detail: str | None = Field(default=None, max_length=512)
+
+    @field_validator(
+        "checklist_sha256", "host_instructions_sha256", "review_rules_sha256"
+    )
+    @classmethod
+    def normalize_hashes(cls, value: str | None) -> str | None:
+        return value.lower() if value is not None else None
+
+    @field_validator("stderr_detail")
+    @classmethod
+    def sanitize_stderr_detail(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return sanitize_failure_detail(value) or None
+
+    @model_serializer(mode="wrap")
+    def serialize_optional_diagnostics(self, handler):
+        payload = handler(self)
+        for field in (
+            "review_rules_sha256",
+            "exit_code",
+            "event_type",
+            "stderr_detail",
+        ):
+            if getattr(self, field) is None:
+                payload.pop(field, None)
+        return payload
+
+
 class BenchmarkResults(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1] = 1
-    runs: tuple[BenchmarkRun, ...] = Field(min_length=1, max_length=10000)
+    schema_version: Literal[1, 2] = 1
+    runs: tuple[BenchmarkRun, ...] = Field(default=(), max_length=10000)
+    failures: tuple[BenchmarkFailure, ...] = Field(default=(), max_length=10000)
 
     @model_validator(mode="after")
     def unique_runs(self) -> "BenchmarkResults":
+        if not self.runs and not self.failures:
+            raise ValueError("benchmark results must contain a run or a failure")
+        if self.schema_version == 1 and (
+            self.failures or any(run.attempt is not None for run in self.runs)
+        ):
+            raise ValueError("schema version 1 cannot contain attempt diagnostics")
+        if self.failures and any(run.attempt is None for run in self.runs):
+            raise ValueError("failure artifacts require explicit attempt numbers for every run")
         if len({run.run_id for run in self.runs}) != len(self.runs):
             raise ValueError("run IDs must be unique")
+        attempt_slots = {
+            (run.configuration_id, run.case_id, run.attempt)
+            for run in self.runs
+            if run.attempt is not None
+        }
+        if len(attempt_slots) != sum(run.attempt is not None for run in self.runs):
+            raise ValueError("benchmark attempt slots must be unique")
+        failure_slots = [
+            (failure.configuration_id, failure.case_id, failure.attempt)
+            for failure in self.failures
+        ]
+        if len(set(failure_slots)) != len(failure_slots) or attempt_slots.intersection(
+            failure_slots
+        ):
+            raise ValueError("benchmark attempt slots must be unique")
         configurations = {}
-        for run in self.runs:
+        for run in (*self.runs, *self.failures):
             identity = (
                 run.model,
                 run.reasoning,
@@ -245,6 +320,13 @@ class BenchmarkResults(BaseModel):
                     "configuration_id cannot combine different model or prompt versions"
                 )
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_optional_failures(self, handler):
+        payload = handler(self)
+        if not self.failures:
+            payload.pop("failures", None)
+        return payload
 
 
 def check_diff_budget(dataset: BenchmarkDataset, *, max_context_bytes: int) -> dict:
@@ -286,6 +368,11 @@ def check_diff_budget(dataset: BenchmarkDataset, *, max_context_bytes: int) -> d
 def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dict:
     cases = {case.case_id: case for case in dataset.cases}
     summaries = []
+    failures_by_configuration = defaultdict(list)
+    for failure in results.failures:
+        if failure.case_id not in cases:
+            raise ValueError("benchmark failure references an unknown dataset case")
+        failures_by_configuration[failure.configuration_id].append(failure)
     for run in results.runs:
         case = cases.get(run.case_id)
         if case is None:
@@ -359,7 +446,9 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
     for run in results.runs:
         runs_by_configuration[run.configuration_id].append(run)
     aggregates = {}
-    for configuration, rows in by_configuration.items():
+    configurations = set(by_configuration) | set(failures_by_configuration)
+    for configuration in sorted(configurations):
+        rows = by_configuration.get(configuration, [])
         count = sum(r["candidates"] for r in rows)
         missing_cases = sorted(set(cases) - {r["case_id"] for r in rows})
         gold_count = sum(r["gold_count"] for r in rows)
@@ -408,23 +497,30 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
             if not missing_cases and gold_count and all(r["recall"] is not None for r in rows)
             else None,
             "precision_is_lower_bound": any(r["unverified"] for r in rows),
-            "mean_elapsed_ms": sum(r["elapsed_ms"] for r in rows) / len(rows),
+            "mean_elapsed_ms": sum(r["elapsed_ms"] for r in rows) / len(rows) if rows else None,
             "input_tokens": sum(r["input_tokens"] for r in rows)
-            if all(r["input_tokens"] is not None for r in rows)
+            if rows and all(r["input_tokens"] is not None for r in rows)
             else None,
             "output_tokens": sum(r["output_tokens"] for r in rows)
-            if all(r["output_tokens"] is not None for r in rows)
+            if rows and all(r["output_tokens"] is not None for r in rows)
             else None,
             "gold_recall_by": stratified_gold_recall,
         }
-    return {
-        "schema_version": 1,
+        if failures_by_configuration.get(configuration):
+            aggregates[configuration]["failed_attempts"] = len(
+                failures_by_configuration[configuration]
+            )
+    payload = {
+        "schema_version": 2 if results.failures else 1,
         "scoring": "local_explicit_adjudication",
         "dataset_kind": dataset.kind,
         "dataset_cases": sorted(cases),
         "runs": summaries,
         "configurations": aggregates,
     }
+    if results.failures:
+        payload["failures"] = [failure.model_dump(mode="json") for failure in results.failures]
+    return payload
 
 
 def score_reliability(
@@ -438,15 +534,25 @@ def score_reliability(
     grouped = defaultdict(list)
     for run in results.runs:
         grouped[(run.configuration_id, run.case_id)].append(run)
+    failures_by_group = defaultdict(list)
+    for failure in results.failures:
+        if failure.attempt > expected_repetitions:
+            raise ValueError("more attempts than the declared repetition budget")
+        failures_by_group[(failure.configuration_id, failure.case_id)].append(failure)
     groups = []
-    for (configuration, case_id), runs in sorted(grouped.items()):
-        if len({r.evidence_packet_sha256 for r in runs}) != 1:
+    group_keys = set(grouped) | set(failures_by_group)
+    for configuration, case_id in sorted(group_keys):
+        runs = grouped.get((configuration, case_id), [])
+        failures = failures_by_group.get((configuration, case_id), [])
+        if any(run.attempt is not None and run.attempt > expected_repetitions for run in runs):
+            raise ValueError("more attempts than the declared repetition budget")
+        if runs and len({r.evidence_packet_sha256 for r in runs}) != 1:
             raise ValueError("repetitions must use the same Evidence Packet")
-        if len({r.task_context_sha256 for r in runs}) != 1:
+        if runs and len({r.task_context_sha256 for r in runs}) != 1:
             raise ValueError("repetitions must use the same pinned task context")
-        if len({r.adjudicator for r in runs}) != 1:
+        if runs and len({r.adjudicator for r in runs}) != 1:
             raise ValueError("repetitions must use the same adjudicator")
-        if len(runs) > expected_repetitions:
+        if len(runs) + len(failures) > expected_repetitions:
             raise ValueError("more attempts than the declared repetition budget")
         sets = [
             {
@@ -457,11 +563,12 @@ def score_reliability(
             }
             for r in runs
         ]
-        intersection, union = set.intersection(*sets), set.union(*sets)
+        intersection = set.intersection(*sets) if sets else set()
+        union = set.union(*sets) if sets else set()
         pairs = [(a, b) for i, a in enumerate(sets) for b in sets[i + 1 :]]
         jaccard = [len(a & b) / len(a | b) for a, b in pairs if a | b]
         elapsed = sorted(r.elapsed_ms for r in runs)
-        complete = len(runs) == expected_repetitions
+        complete = len(runs) == expected_repetitions and not failures
         rows = [summaries[r.run_id] for r in runs]
 
         def spread(values):
@@ -472,37 +579,51 @@ def score_reliability(
                 else None
             )
 
-        groups.append(
-            {
-                "configuration_id": configuration,
-                "case_id": case_id,
-                "attempts": len(runs),
-                "expected_repetitions": expected_repetitions,
-                "repetition_coverage_complete": complete,
-                "always_found_gold": sorted(intersection),
-                "ever_found_gold": sorted(union),
-                "stable_gold_recall": len(intersection) / len(cases[case_id].gold)
-                if complete and cases[case_id].gold_complete and cases[case_id].gold
-                else None,
-                "pairwise_gold_jaccard": statistics.mean(jaccard) if jaccard else None,
-                "precision": spread(r["precision"] for r in rows),
-                "recall": spread(r["recall"] for r in rows),
-                "elapsed_ms": {
+        group = {
+            "configuration_id": configuration,
+            "case_id": case_id,
+            "attempts": len(runs),
+            "failed_attempts": len(failures),
+            "attempts_recorded": len(runs) + len(failures),
+            "expected_repetitions": expected_repetitions,
+            "repetition_coverage_complete": complete,
+            "always_found_gold": sorted(intersection),
+            "ever_found_gold": sorted(union),
+            "stable_gold_recall": len(intersection) / len(cases[case_id].gold)
+            if complete and cases[case_id].gold_complete and cases[case_id].gold
+            else None,
+            "pairwise_gold_jaccard": statistics.mean(jaccard) if jaccard else None,
+            "precision": spread(r["precision"] for r in rows),
+            "recall": spread(r["recall"] for r in rows),
+            "elapsed_ms": (
+                {
                     **spread(elapsed),
                     "p95": elapsed[math.ceil(0.95 * len(elapsed)) - 1],
-                },
-                "finding_identity": "explicit golden IDs only; valid_unlisted has no stable identity",
-            }
-        )
-    return {
-        "schema_version": 1,
+                }
+                if elapsed
+                else None
+            ),
+            "finding_identity": "explicit golden IDs only; valid_unlisted has no stable identity",
+        }
+        if failures:
+            group["failures"] = [failure.model_dump(mode="json") for failure in failures]
+        groups.append(group)
+    configurations = sorted(
+        {r.configuration_id for r in results.runs}
+        | {failure.configuration_id for failure in results.failures}
+    )
+    payload = {
+        "schema_version": 2 if results.failures else 1,
         "scoring": "local_explicit_adjudication_repetitions",
         "missing_cases_by_configuration": {
             c: sorted(set(cases) - {r.case_id for r in results.runs if r.configuration_id == c})
-            for c in sorted({r.configuration_id for r in results.runs})
+            for c in configurations
         },
         "groups": groups,
     }
+    if results.failures:
+        payload["failures"] = [failure.model_dump(mode="json") for failure in results.failures]
+    return payload
 
 
 def compare_speed(
@@ -518,6 +639,8 @@ def compare_speed(
         raise ValueError("repetitions must be between 2 and 20")
     if baseline_configuration == candidate_configuration:
         raise ValueError("baseline and candidate configurations must differ")
+    if results.failures:
+        raise ValueError("speed comparison cannot include failed benchmark attempts")
 
     score_benchmark(dataset, results)
     selected = tuple(
@@ -611,7 +734,13 @@ def compare_speed(
             }
         )
 
-    score = score_benchmark(dataset, BenchmarkResults(runs=tuple(baseline_runs + candidate_runs)))
+    score = score_benchmark(
+        dataset,
+        BenchmarkResults(
+            schema_version=results.schema_version,
+            runs=tuple(baseline_runs + candidate_runs),
+        ),
+    )
     quality = {
         configuration: {
             key: score["configurations"][configuration][key]
@@ -688,24 +817,37 @@ def compare_speed(
 
 async def run_repetitions(
     dataset: BenchmarkDataset,
-    execute: Callable[[BenchmarkCase, int], Awaitable[BenchmarkRun]],
+    execute: Callable[[BenchmarkCase, int], Awaitable[BenchmarkRun | BenchmarkFailure]],
     *,
     repetitions: int = 3,
 ) -> BenchmarkResults:
     """Fresh serial attempts; execute owns worker launch AND external adjudication.
 
-    Failed calls abort; no duplication of prior results, hidden retries or checkpoint reuse.
+    Return BenchmarkFailure for an expected failed attempt so the artifact preserves its
+    classified diagnostics. Unexpected runner errors still abort; no hidden retries or reuse.
     """
     if not 2 <= repetitions <= 20:
         raise ValueError("repetitions must be between 2 and 20")
     runs = []
+    failures = []
     for case in dataset.cases:
         for attempt in range(1, repetitions + 1):
-            run = BenchmarkRun.model_validate(await execute(case, attempt))
+            result = await execute(case, attempt)
+            if isinstance(result, BenchmarkFailure):
+                failure = result
+                if failure.case_id != case.case_id or failure.attempt != attempt:
+                    raise ValueError("repetition runner returned a different failure slot")
+                failures.append(failure)
+                continue
+            run = BenchmarkRun.model_validate(result)
             if run.case_id != case.case_id:
                 raise ValueError("repetition runner returned a different case")
+            if run.attempt not in (None, attempt):
+                raise ValueError("repetition runner returned a different run slot")
+            if run.attempt is None:
+                run = run.model_copy(update={"attempt": attempt})
             runs.append(run)
-    results = BenchmarkResults(runs=tuple(runs))
+    results = BenchmarkResults(schema_version=2, runs=tuple(runs), failures=tuple(failures))
     score_reliability(dataset, results, expected_repetitions=repetitions)
     return results
 
