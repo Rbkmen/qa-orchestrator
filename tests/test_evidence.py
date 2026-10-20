@@ -18,6 +18,7 @@ from qa_orchestrator.evidence import (
     _path_tokens,
     discover_neighbor_evidence,
     evidence_main,
+    neighbor_discovery_sha256,
     register_evidence,
     validate_registered_locations,
     verify_evidence,
@@ -627,6 +628,28 @@ def test_discovery_reports_unavailable_optional_codegraph(pinned_evidence, monke
     assert manifest["codegraph"]["status"] == "not_installed"
     assert manifest["codegraph"]["caller_candidates"] == []
     assert manifest["exhaustive"] is False
+    assert manifest["discovery_sha256"] == neighbor_discovery_sha256(manifest)
+
+
+def test_discovery_digest_is_stable_and_changes_when_omissions_change():
+    discovery_payload = {
+        "head_sha": "1" * 40,
+        "changed_files": ["src/api.py"],
+        "candidate_limit": 10,
+        "candidate_records": [{"path": "src/caller.py", "categories": ["caller"]}],
+        "omissions": [],
+    }
+
+    first = neighbor_discovery_sha256(discovery_payload)
+    assert first == neighbor_discovery_sha256(discovery_payload)
+    assert first == neighbor_discovery_sha256(
+        {"discovery_sha256": first, **discovery_payload}
+    )
+    changed = {
+        **discovery_payload,
+        "omissions": [{"kind": "candidate_path_limit", "count": 1}],
+    }
+    assert first != neighbor_discovery_sha256(changed)
 
 
 def test_path_tokens_ignore_file_extensions():

@@ -8,7 +8,8 @@ import re
 import statistics
 import subprocess
 from collections import defaultdict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from itertools import pairwise
 from pathlib import Path
 from typing import Literal
 
@@ -134,6 +135,43 @@ class BenchmarkDataset(BaseModel):
         return payload
 
 
+class BenchmarkQualityGatePolicy(BaseModel):
+    """A named quality gate bound to one exact dataset identity."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    policy_id: str = Field(min_length=1, max_length=128)
+    dataset_kind: Literal["synthetic", "reviewbench_reference", "curated"]
+    dataset_sha256: Sha256Digest
+    min_cases: int = Field(ge=1, strict=True)
+    min_gold_findings: int = Field(ge=1, strict=True)
+    min_precision: float = Field(ge=0, le=1, strict=True)
+    min_recall: float = Field(ge=0, le=1, strict=True)
+    max_missed_high_impact: int = Field(ge=0, strict=True)
+    min_evidence_validation_rate: float | None = Field(
+        default=None, ge=0, le=1, strict=True
+    )
+    min_location_validation_rate: float | None = Field(
+        default=None, ge=0, le=1, strict=True
+    )
+    min_stratum_recall: float | None = Field(default=None, ge=0, le=1, strict=True)
+    min_stratum_gold_count: int = Field(default=5, ge=1, strict=True)
+    min_speed_repetitions: int | None = Field(default=None, ge=2, le=20, strict=True)
+
+    @field_validator("policy_id")
+    @classmethod
+    def normalize_policy_id(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("policy_id must not be empty")
+        return value
+
+    @field_validator("dataset_sha256")
+    @classmethod
+    def normalize_dataset_digest(cls, value: str) -> str:
+        return value.lower()
+
+
 class CandidateAdjudication(BaseModel):
     """A host/reviewer decision, never inferred from candidate wording or confidence."""
 
@@ -176,6 +214,7 @@ class BenchmarkRun(BaseModel):
     diff_sha256: Sha256Digest
     evidence_packet_sha256: Sha256Digest
     elapsed_ms: int = Field(ge=0)
+    queue_wait_ms: int | None = Field(default=None, ge=0)
     attempt: int | None = Field(default=None, ge=1, le=20)
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
@@ -188,6 +227,8 @@ class BenchmarkRun(BaseModel):
         payload = handler(self)
         if self.task_context_sha256 is None:
             payload.pop("task_context_sha256", None)
+        if self.queue_wait_ms is None:
+            payload.pop("queue_wait_ms", None)
         if self.attempt is None:
             payload.pop("attempt", None)
         return payload
@@ -272,12 +313,32 @@ class BenchmarkFailure(BaseModel):
         return payload
 
 
+class BenchmarkSchedule(BaseModel):
+    """Host-declared successful run order for one benchmark execution."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schedule_id: str = Field(min_length=1, max_length=128)
+    strategy: Literal["interleaved", "randomized"]
+    run_order: tuple[str, ...] = Field(max_length=10000)
+
+    @field_validator("run_order")
+    @classmethod
+    def validate_run_order(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not run_id.strip() or len(run_id) > 128 for run_id in value):
+            raise ValueError("run_order IDs must be non-empty and at most 128 characters")
+        if len(value) != len(set(value)):
+            raise ValueError("run_order must contain unique run IDs")
+        return value
+
+
 class BenchmarkResults(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1, 2] = 1
+    schema_version: Literal[1, 2, 3] = 1
     runs: tuple[BenchmarkRun, ...] = Field(default=(), max_length=10000)
     failures: tuple[BenchmarkFailure, ...] = Field(default=(), max_length=10000)
+    schedule: BenchmarkSchedule | None = None
 
     @model_validator(mode="after")
     def unique_runs(self) -> "BenchmarkResults":
@@ -287,6 +348,16 @@ class BenchmarkResults(BaseModel):
             self.failures or any(run.attempt is not None for run in self.runs)
         ):
             raise ValueError("schema version 1 cannot contain attempt diagnostics")
+        has_schedule_metadata = self.schedule is not None or any(
+            run.queue_wait_ms is not None for run in self.runs
+        )
+        if has_schedule_metadata and self.schema_version != 3:
+            raise ValueError("schedule and queue metadata require schema version 3")
+        if self.schedule is not None:
+            run_order = self.schedule.run_order
+            run_ids = tuple(run.run_id for run in self.runs)
+            if len(run_order) != len(run_ids) or set(run_order) != set(run_ids):
+                raise ValueError("schedule run_order must list every successful run exactly once")
         if self.failures and any(run.attempt is None for run in self.runs):
             raise ValueError("failure artifacts require explicit attempt numbers for every run")
         if len({run.run_id for run in self.runs}) != len(self.runs):
@@ -326,6 +397,8 @@ class BenchmarkResults(BaseModel):
         payload = handler(self)
         if not self.failures:
             payload.pop("failures", None)
+        if self.schedule is None:
+            payload.pop("schedule", None)
         return payload
 
 
@@ -462,7 +535,8 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
         rows = by_configuration.get(configuration, [])
         count = sum(r["candidates"] for r in rows)
         missing_cases = sorted(set(cases) - {r["case_id"] for r in rows})
-        gold_count = sum(r["gold_count"] for r in rows)
+        gold_attempt_count = sum(r["gold_count"] for r in rows)
+        gold_count = sum(len(cases[case_id].gold) for case_id in {r["case_id"] for r in rows})
         selected_runs = runs_by_configuration[configuration]
         elapsed_values = sorted(row["elapsed_ms"] for row in rows)
         stratified_gold_recall = {}
@@ -506,10 +580,14 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
             "missing_cases": missing_cases,
             "coverage_complete": not missing_cases,
             "candidate_count": count,
+            "gold_count": gold_count,
+            "gold_attempt_count": gold_attempt_count,
             "unverified_candidates": sum(r["unverified"] for r in rows),
             "precision": sum(r["valid"] for r in rows) / count if count else None,
-            "recall": sum(r["matched_gold"] for r in rows) / gold_count
-            if not missing_cases and gold_count and all(r["recall"] is not None for r in rows)
+            "recall": sum(r["matched_gold"] for r in rows) / gold_attempt_count
+            if not missing_cases
+            and gold_attempt_count
+            and all(r["recall"] is not None for r in rows)
             else None,
             "precision_is_lower_bound": any(r["unverified"] for r in rows),
             "missed_high_impact": sum(r["missed_high_impact"] for r in rows),
@@ -829,6 +907,7 @@ def evaluate_quality_gate(
                 )
     return {
         "schema_version": 1,
+        "mode": "experimental",
         "configuration_id": configuration_id,
         "dataset_kind": dataset_kind,
         "dataset_sha256": dataset_sha256,
@@ -852,6 +931,215 @@ def evaluate_quality_gate(
         "scope": (
             "Checks aggregate metrics from explicit host/reviewer adjudications. It cannot "
             "verify adjudicator correctness or prove that a model executed the review."
+        ),
+    }
+
+
+def evaluate_quality_policy(
+    score: Mapping[str, object],
+    policy: BenchmarkQualityGatePolicy,
+    *,
+    configuration_id: str,
+) -> dict:
+    """Evaluate a named, digest-pinned quality policy with fail-closed data checks."""
+    if not isinstance(policy, BenchmarkQualityGatePolicy):
+        raise TypeError("policy must be a BenchmarkQualityGatePolicy")
+    if not isinstance(score, Mapping):
+        score = {}
+        invalid_score = True
+    else:
+        score = dict(score)
+        invalid_score = False
+
+    dataset_kind = score.get("dataset_kind")
+    dataset_sha256 = score.get("dataset_sha256")
+    if isinstance(dataset_sha256, str):
+        dataset_sha256 = dataset_sha256.lower()
+
+    thresholds = {
+        "dataset_kind": policy.dataset_kind,
+        "dataset_sha256": policy.dataset_sha256,
+        "min_cases": policy.min_cases,
+        "min_gold_findings": policy.min_gold_findings,
+        "min_precision": policy.min_precision,
+        "min_recall": policy.min_recall,
+        "max_missed_high_impact": policy.max_missed_high_impact,
+        "min_evidence_validation_rate": policy.min_evidence_validation_rate,
+        "min_location_validation_rate": policy.min_location_validation_rate,
+        "min_stratum_recall": policy.min_stratum_recall,
+        "min_stratum_gold_count": policy.min_stratum_gold_count,
+        "min_speed_repetitions": policy.min_speed_repetitions,
+    }
+    observed = {
+        "case_count": None,
+        "gold_count": None,
+        "failed_attempts": None,
+        "precision": None,
+        "precision_is_lower_bound": None,
+        "recall": None,
+        "missed_high_impact": None,
+        "evidence_validation_rate": None,
+        "location_validation_rate": None,
+        "stratum_checks": [],
+    }
+    reasons: list[str] = []
+    blocking: list[str] = []
+
+    def block(reason: str) -> None:
+        if reason not in reasons:
+            reasons.append(reason)
+        if reason not in blocking:
+            blocking.append(reason)
+
+    if invalid_score:
+        block("score must be a JSON object")
+    if score.get("scoring") != "local_explicit_adjudication":
+        block("score is not from local explicit adjudication")
+    if dataset_kind != policy.dataset_kind:
+        block(
+            f"dataset kind {dataset_kind or 'unavailable'} does not match policy kind "
+            f"{policy.dataset_kind}"
+        )
+    valid_digest = False
+    if isinstance(dataset_sha256, str) and len(dataset_sha256) == 64:
+        try:
+            valid_digest = bytes.fromhex(dataset_sha256).hex() == dataset_sha256
+        except ValueError:
+            valid_digest = False
+    if not valid_digest:
+        block("score dataset SHA-256 is missing or invalid")
+    elif dataset_sha256 != policy.dataset_sha256:
+        block("score dataset SHA-256 does not match the policy-pinned dataset")
+
+    configurations = score.get("configurations")
+    configuration_id_valid = (
+        isinstance(configuration_id, str) and bool(configuration_id.strip())
+    )
+    if not configuration_id_valid:
+        block("configuration_id is missing or invalid")
+    aggregate = (
+        configurations.get(configuration_id)
+        if isinstance(configurations, Mapping) and configuration_id_valid
+        else None
+    )
+    if not isinstance(aggregate, Mapping):
+        block("configuration is absent or malformed in the score")
+        aggregate = {}
+    else:
+        aggregate = dict(aggregate)
+
+    raw_dataset_cases = score.get("dataset_cases")
+    raw_cases = aggregate.get("cases")
+    raw_missing_cases = aggregate.get("missing_cases")
+    dataset_cases_valid = isinstance(raw_dataset_cases, list) and all(
+        isinstance(case, str) and case.strip() for case in raw_dataset_cases
+    )
+    cases_valid = isinstance(raw_cases, list) and all(
+        isinstance(case, str) and case.strip() for case in raw_cases
+    )
+    missing_cases_valid = isinstance(raw_missing_cases, list) and all(
+        isinstance(case, str) and case.strip() for case in raw_missing_cases
+    )
+    if not (dataset_cases_valid and cases_valid and missing_cases_valid):
+        block("dataset or configuration case coverage data is unavailable or malformed")
+    else:
+        dataset_case_set = set(raw_dataset_cases)
+        case_set = set(raw_cases)
+        missing_case_set = set(raw_missing_cases)
+        if (
+            len(dataset_case_set) != len(raw_dataset_cases)
+            or len(case_set) != len(raw_cases)
+            or len(missing_case_set) != len(raw_missing_cases)
+            or case_set & missing_case_set
+            or case_set | missing_case_set != dataset_case_set
+            or missing_case_set != dataset_case_set - case_set
+            or aggregate.get("coverage_complete") is not (not missing_case_set)
+        ):
+            block("case coverage is incomplete or inconsistent with the pinned dataset")
+        observed["case_count"] = len(case_set)
+        if len(case_set) < policy.min_cases:
+            block(f"only {len(case_set)} case(s) scored; {policy.min_cases} required")
+
+    gold_count = aggregate.get("gold_count")
+    if type(gold_count) is not int or gold_count < 0:
+        block("scored gold_count is unavailable or invalid")
+    else:
+        observed["gold_count"] = gold_count
+        if gold_count < policy.min_gold_findings:
+            block(
+                f"only {gold_count} gold finding(s) covered; "
+                f"{policy.min_gold_findings} required"
+            )
+
+    failed_attempts = aggregate.get("failed_attempts", 0)
+    failures = score.get("failures", [])
+    if type(failed_attempts) is not int or failed_attempts < 0:
+        block("failed attempt count is unavailable or invalid")
+    else:
+        observed["failed_attempts"] = failed_attempts
+        if failed_attempts:
+            block(f"benchmark contains {failed_attempts} failed attempt(s)")
+    if failures != []:
+        block("benchmark contains failed attempt records")
+
+    if type(aggregate.get("missed_high_impact")) is not int:
+        block("missed high-impact finding count is unavailable or invalid")
+
+    try:
+        gate = evaluate_quality_gate(
+            dict(score),
+            configuration_id=configuration_id,
+            min_cases=policy.min_cases,
+            min_precision=policy.min_precision,
+            min_recall=policy.min_recall,
+            max_missed_high_impact=policy.max_missed_high_impact,
+            min_evidence_validation_rate=policy.min_evidence_validation_rate,
+            min_location_validation_rate=policy.min_location_validation_rate,
+            min_stratum_recall=policy.min_stratum_recall,
+            min_stratum_gold_count=policy.min_stratum_gold_count,
+            required_dataset_kind=(
+                policy.dataset_kind if policy.dataset_kind != "synthetic" else None
+            ),
+            required_dataset_sha256=policy.dataset_sha256,
+        )
+        observed.update(gate["observed"])
+        observed["gold_count"] = gold_count if type(gold_count) is int else None
+        observed["failed_attempts"] = (
+            failed_attempts if type(failed_attempts) is int else None
+        )
+        for reason in gate["reasons"]:
+            if reason not in reasons:
+                reasons.append(reason)
+            if any(
+                marker in reason
+                for marker in (
+                    "unavailable",
+                    "lower bound",
+                    "incomplete",
+                    "unknown",
+                    "no gold-recall stratum meets",
+                )
+            ) and reason not in blocking:
+                blocking.append(reason)
+    except (TypeError, ValueError) as exc:
+        block(f"scored metrics are malformed or unavailable: {exc}")
+        gate = None
+
+    state = "blocked" if blocking else "failed" if gate and not gate["passed"] else "passed"
+    return {
+        "schema_version": 1,
+        "mode": "pinned_policy",
+        "state": state,
+        "policy_id": policy.policy_id,
+        "configuration_id": configuration_id,
+        "dataset_kind": dataset_kind,
+        "dataset_sha256": dataset_sha256,
+        "thresholds": thresholds,
+        "observed": observed,
+        "reasons": reasons,
+        "scope": (
+            "Checks score coverage and aggregate metrics from explicit host/reviewer "
+            "adjudications. It cannot independently verify adjudicator correctness."
         ),
     }
 
@@ -1018,6 +1306,37 @@ def compare_speed(
             "speed comparison requires the same model, reasoning, review instructions and adjudicator"
         )
 
+    schedule_assessment = "unknown"
+    if results.schedule is not None:
+        if results.schedule.strategy == "randomized":
+            schedule_assessment = "randomized_host_declared"
+        else:
+            runs_by_id = {run.run_id: run for run in results.runs}
+            ordered_pair = [
+                runs_by_id[run_id]
+                for run_id in results.schedule.run_order
+                if runs_by_id[run_id].configuration_id
+                in {baseline_configuration, candidate_configuration}
+            ]
+            configurations_in_order = [run.configuration_id for run in ordered_pair]
+            schedule_assessment = (
+                "interleaved_validated"
+                if len(ordered_pair) == len(baseline_runs) + len(candidate_runs)
+                and all(left != right for left, right in pairwise(configurations_in_order))
+                else "invalid"
+            )
+
+    def distribution(values: list[int], *, sample_count: int | None = None) -> dict:
+        sample_count = len(values) if sample_count is None else sample_count
+        ordered = sorted(values)
+        return {
+            "sample_count": sample_count,
+            "observed_count": len(ordered),
+            "missing_count": sample_count - len(ordered),
+            "median": statistics.median(ordered) if ordered else None,
+            "p95": ordered[math.ceil(0.95 * len(ordered)) - 1] if ordered else None,
+        }
+
     per_case = []
 
     def median_usage(runs: list[BenchmarkRun], field: str) -> float | None:
@@ -1039,6 +1358,16 @@ def compare_speed(
             raise ValueError("speed comparison requires the same task context per case")
         baseline_median = statistics.median(run.elapsed_ms for run in baseline)
         candidate_median = statistics.median(run.elapsed_ms for run in candidate)
+        baseline_elapsed = distribution([run.elapsed_ms for run in baseline])
+        candidate_elapsed = distribution([run.elapsed_ms for run in candidate])
+        baseline_queue = distribution(
+            [run.queue_wait_ms for run in baseline if run.queue_wait_ms is not None],
+            sample_count=len(baseline),
+        )
+        candidate_queue = distribution(
+            [run.queue_wait_ms for run in candidate if run.queue_wait_ms is not None],
+            sample_count=len(candidate),
+        )
         baseline_by_attempt = {run.attempt: run for run in baseline}
         candidate_by_attempt = {run.attempt: run for run in candidate}
         paired = [
@@ -1074,6 +1403,12 @@ def compare_speed(
                 "task_context_sha256": next(iter(baseline_tasks)),
                 "baseline_median_ms": baseline_median,
                 "candidate_median_ms": candidate_median,
+                "baseline_p95_elapsed_ms": baseline_elapsed["p95"],
+                "candidate_p95_elapsed_ms": candidate_elapsed["p95"],
+                "baseline_elapsed_sample_count": baseline_elapsed["sample_count"],
+                "candidate_elapsed_sample_count": candidate_elapsed["sample_count"],
+                "baseline_queue_wait_ms": baseline_queue,
+                "candidate_queue_wait_ms": candidate_queue,
                 "paired_repetitions": repetitions,
                 "paired_median_speedup_ratio": (
                     statistics.median(paired_speedups) if paired_speedups else None
@@ -1105,10 +1440,7 @@ def compare_speed(
         ),
     )
     quality = {
-        configuration: {
-            key: score["configurations"][configuration][key]
-            for key in ("precision", "recall", "precision_is_lower_bound", "coverage_complete")
-        }
+        configuration: score["configurations"][configuration]
         for configuration in (baseline_configuration, candidate_configuration)
     }
     ratios = [case["speedup_ratio"] for case in per_case if case["speedup_ratio"] is not None]
@@ -1147,6 +1479,16 @@ def compare_speed(
         if all(run.output_tokens is not None for run in candidate_runs)
         else None
     )
+    baseline_elapsed = distribution([run.elapsed_ms for run in baseline_runs])
+    candidate_elapsed = distribution([run.elapsed_ms for run in candidate_runs])
+    baseline_queue = distribution(
+        [run.queue_wait_ms for run in baseline_runs if run.queue_wait_ms is not None],
+        sample_count=len(baseline_runs),
+    )
+    candidate_queue = distribution(
+        [run.queue_wait_ms for run in candidate_runs if run.queue_wait_ms is not None],
+        sample_count=len(candidate_runs),
+    )
     return {
         "schema_version": 1,
         "comparison": "same_model_same_pinned_input_attempt_paired_host_elapsed_time",
@@ -1154,9 +1496,20 @@ def compare_speed(
         "dataset_sha256": _benchmark_dataset_sha256(dataset),
         "baseline_configuration": baseline_configuration,
         "candidate_configuration": candidate_configuration,
+        "dataset_cases": sorted(expected_cases),
         "model": baseline_runs[0].model,
         "reasoning": baseline_runs[0].reasoning,
         "repetitions_per_case": repetitions,
+        "schedule_assessment": schedule_assessment,
+        "schedule": (
+            {
+                "schedule_id": results.schedule.schedule_id,
+                "strategy": results.schedule.strategy,
+                "selected_run_count": len(baseline_runs) + len(candidate_runs),
+            }
+            if results.schedule is not None
+            else None
+        ),
         "cases": per_case,
         "aggregate": {
             "median_speedup_ratio": statistics.median(ratios) if ratios else None,
@@ -1173,6 +1526,12 @@ def compare_speed(
             "candidate_median_ms": statistics.median(
                 case["candidate_median_ms"] for case in per_case
             ),
+            "baseline_p95_elapsed_ms": baseline_elapsed["p95"],
+            "candidate_p95_elapsed_ms": candidate_elapsed["p95"],
+            "baseline_elapsed_sample_count": baseline_elapsed["sample_count"],
+            "candidate_elapsed_sample_count": candidate_elapsed["sample_count"],
+            "baseline_queue_wait_ms": baseline_queue,
+            "candidate_queue_wait_ms": candidate_queue,
             "baseline_total_input_tokens": baseline_input_total,
             "candidate_total_input_tokens": candidate_input_total,
             "input_token_savings": (
@@ -1193,10 +1552,244 @@ def compare_speed(
         "quality_by_configuration": quality,
         "timing_scope": (
             "host-reported elapsed_ms; callback must measure the same end-to-end scope. "
-            "Attempts are paired by case and attempt number; callers must interleave or randomize "
-            "configuration order to reduce time/order bias."
+            "Attempts are paired by case and attempt number. p95 is descriptive at the reported "
+            "sample count. Interleaved order is checked for alternating configurations; a "
+            "randomized order remains host-declared and is not independently verified."
         ),
         "usage_scope": "host-reported token counters; missing values are not treated as zero",
+    }
+
+
+def evaluate_speed_candidate(
+    comparison: Mapping[str, object], policy: BenchmarkQualityGatePolicy
+) -> dict:
+    """Decide whether a speed comparison is eligible under a pinned quality policy."""
+    if not isinstance(policy, BenchmarkQualityGatePolicy):
+        raise TypeError("policy must be a BenchmarkQualityGatePolicy")
+    if not isinstance(comparison, Mapping):
+        comparison = {}
+
+    baseline_configuration = comparison.get("baseline_configuration")
+    candidate_configuration = comparison.get("candidate_configuration")
+    dataset_kind = comparison.get("dataset_kind")
+    dataset_sha256 = comparison.get("dataset_sha256")
+    if isinstance(dataset_sha256, str):
+        dataset_sha256 = dataset_sha256.lower()
+    schedule_assessment = comparison.get("schedule_assessment", "unknown")
+    schedule = comparison.get("schedule")
+    repetitions = comparison.get("repetitions_per_case")
+    dataset_cases = comparison.get("dataset_cases")
+    quality = comparison.get("quality_by_configuration")
+    aggregate = comparison.get("aggregate")
+
+    reasons: list[str] = []
+    blocking: list[str] = []
+
+    def block(reason: str) -> None:
+        if reason not in reasons:
+            reasons.append(reason)
+        if reason not in blocking:
+            blocking.append(reason)
+
+    valid_configurations = (
+        isinstance(baseline_configuration, str)
+        and bool(baseline_configuration.strip())
+        and isinstance(candidate_configuration, str)
+        and bool(candidate_configuration.strip())
+        and baseline_configuration != candidate_configuration
+    )
+    if not valid_configurations:
+        block("baseline and candidate configuration identities are missing or invalid")
+    if dataset_kind != policy.dataset_kind:
+        block("comparison dataset kind does not match the policy")
+    if dataset_sha256 != policy.dataset_sha256:
+        block("comparison dataset SHA-256 does not match the policy-pinned dataset")
+    if not isinstance(schedule_assessment, str) or schedule_assessment not in {
+        "interleaved_validated",
+        "randomized_host_declared",
+    }:
+        block(f"run schedule is {schedule_assessment}; controlled order is required")
+    if policy.min_speed_repetitions is None:
+        block("policy does not configure a minimum speed repetition count")
+    if type(repetitions) is not int or not 2 <= repetitions <= 20:
+        block("comparison repetition count is unavailable or invalid")
+    elif (
+        policy.min_speed_repetitions is not None
+        and repetitions < policy.min_speed_repetitions
+    ):
+        block(
+            f"comparison has {repetitions} repetitions per case; "
+            f"{policy.min_speed_repetitions} required by policy"
+        )
+
+    if not isinstance(dataset_cases, list) or not dataset_cases or any(
+        not isinstance(case_id, str) or not case_id.strip() for case_id in dataset_cases
+    ):
+        block("comparison dataset case identity is unavailable or malformed")
+        dataset_cases = []
+    elif len(set(dataset_cases)) != len(dataset_cases):
+        block("comparison dataset case identity contains duplicates")
+
+    if not isinstance(schedule, Mapping):
+        block("schedule metadata is unavailable")
+    else:
+        strategy = schedule.get("strategy")
+        schedule_id = schedule.get("schedule_id")
+        selected_run_count = schedule.get("selected_run_count")
+        if (
+            not isinstance(schedule_id, str)
+            or not schedule_id.strip()
+            or not isinstance(strategy, str)
+            or strategy not in {"interleaved", "randomized"}
+            or type(selected_run_count) is not int
+            or type(repetitions) is not int
+            or selected_run_count != len(dataset_cases) * repetitions * 2
+        ):
+            block("schedule metadata is incomplete or inconsistent with the selected runs")
+        elif (
+            (schedule_assessment == "interleaved_validated" and strategy != "interleaved")
+            or (
+                schedule_assessment == "randomized_host_declared"
+                and strategy != "randomized"
+            )
+        ):
+            block("schedule assessment does not match the recorded schedule strategy")
+
+    if not isinstance(aggregate, Mapping):
+        block("aggregate speed measurements are unavailable")
+    else:
+        expected_samples = len(dataset_cases) * repetitions if type(repetitions) is int else 0
+        for configuration, label in (
+            (baseline_configuration, "baseline"),
+            (candidate_configuration, "candidate"),
+        ):
+            sample_count = aggregate.get(f"{label}_elapsed_sample_count")
+            median = aggregate.get(f"{label}_median_ms")
+            p95 = aggregate.get(f"{label}_p95_elapsed_ms")
+            if (
+                not isinstance(configuration, str)
+                or type(sample_count) is not int
+                or sample_count != expected_samples
+                or type(median) not in {int, float}
+                or not math.isfinite(median)
+                or median < 0
+                or type(p95) is not int
+                or p95 < 0
+            ):
+                block(f"{label} latency measurements are incomplete or invalid")
+            queue = aggregate.get(f"{label}_queue_wait_ms")
+            if not isinstance(queue, Mapping):
+                block(f"{label} queue-wait sample counts are unavailable")
+                continue
+            observed_queue = queue.get("observed_count")
+            missing_queue = queue.get("missing_count")
+            queue_samples = queue.get("sample_count")
+            queue_median = queue.get("median")
+            queue_p95 = queue.get("p95")
+            if (
+                type(queue_samples) is not int
+                or queue_samples != expected_samples
+                or type(observed_queue) is not int
+                or type(missing_queue) is not int
+                or observed_queue < 0
+                or missing_queue < 0
+                or observed_queue + missing_queue != expected_samples
+                or (
+                    observed_queue == 0
+                    and (queue_median is not None or queue_p95 is not None)
+                )
+                or (
+                    observed_queue > 0
+                    and (
+                        type(queue_median) not in {int, float}
+                        or not math.isfinite(queue_median)
+                        or queue_median < 0
+                        or type(queue_p95) not in {int, float}
+                        or not math.isfinite(queue_p95)
+                        or queue_p95 < 0
+                    )
+                )
+            ):
+                block(f"{label} queue-wait measurements are incomplete or invalid")
+
+    quality_gates: dict[str, dict] = {}
+    if not isinstance(quality, Mapping):
+        block("quality evidence is unavailable for both configurations")
+    elif not isinstance(dataset_cases, list):
+        block("quality evidence cannot be bound to dataset cases")
+    elif valid_configurations:
+        for configuration, label in (
+            (baseline_configuration, "baseline"),
+            (candidate_configuration, "candidate"),
+        ):
+            aggregate_quality = quality.get(configuration)
+            if not isinstance(aggregate_quality, Mapping):
+                block(f"{label} quality evidence is unavailable")
+                continue
+            score = {
+                "scoring": "local_explicit_adjudication",
+                "dataset_kind": dataset_kind,
+                "dataset_sha256": dataset_sha256,
+                "dataset_cases": dataset_cases,
+                "configurations": {configuration: dict(aggregate_quality)},
+            }
+            quality_gate = evaluate_quality_policy(
+                score, policy, configuration_id=configuration
+            )
+            quality_gates[label] = quality_gate
+            if label == "baseline" and quality_gate["state"] != "passed":
+                block(f"baseline does not pass the quality policy ({quality_gate['state']})")
+                reasons.extend(
+                    f"baseline: {reason}"
+                    for reason in quality_gate["reasons"]
+                    if f"baseline: {reason}" not in reasons
+                )
+            elif label == "candidate" and quality_gate["state"] == "blocked":
+                block("candidate quality evidence is blocked")
+                reasons.extend(
+                    f"candidate: {reason}"
+                    for reason in quality_gate["reasons"]
+                    if f"candidate: {reason}" not in reasons
+                )
+            elif label == "candidate" and quality_gate["state"] == "failed":
+                reasons.extend(
+                    f"candidate: {reason}"
+                    for reason in quality_gate["reasons"]
+                    if f"candidate: {reason}" not in reasons
+                )
+
+    if blocking:
+        state = "blocked"
+    elif quality_gates.get("candidate", {}).get("state") == "failed":
+        state = "failed"
+    elif (
+        quality_gates.get("baseline", {}).get("state") == "passed"
+        and quality_gates.get("candidate", {}).get("state") == "passed"
+    ):
+        state = "passed"
+    else:
+        state = "blocked"
+        block("both baseline and candidate quality evidence are required")
+
+    return {
+        "schema_version": 1,
+        "state": state,
+        "policy_id": policy.policy_id,
+        "dataset_kind": dataset_kind,
+        "dataset_sha256": dataset_sha256,
+        "baseline_configuration": baseline_configuration,
+        "candidate_configuration": candidate_configuration,
+        "schedule_assessment": schedule_assessment,
+        "repetitions_per_case": repetitions,
+        "min_speed_repetitions": policy.min_speed_repetitions,
+        "baseline_quality": quality_gates.get("baseline"),
+        "candidate_quality": quality_gates.get("candidate"),
+        "reasons": reasons,
+        "limitations": (
+            ["randomized order is host-declared and was not independently verified"]
+            if schedule_assessment == "randomized_host_declared"
+            else []
+        ),
     }
 
 
@@ -1499,20 +2092,23 @@ def benchmark_main(argv: list[str]) -> int:
     score.add_argument("--results", required=True, type=Path)
     score.add_argument("--output", type=Path)
     quality_gate = subparsers.add_parser(
-        "quality-gate", aliases=["gate"], help="Apply explicit quality and speed thresholds"
+        "quality-gate",
+        aliases=["gate"],
+        help="Apply a pinned quality policy or experimental thresholds",
     )
     quality_gate.add_argument("--score", required=True, type=Path)
     quality_gate.add_argument("--configuration", required=True)
-    quality_gate.add_argument("--min-cases", default=1, type=int)
-    quality_gate.add_argument("--min-precision", required=True, type=float)
-    quality_gate.add_argument("--min-recall", required=True, type=float)
-    quality_gate.add_argument("--max-missed-high-impact", default=0, type=int)
+    quality_gate.add_argument("--policy", type=Path)
+    quality_gate.add_argument("--min-cases", type=int)
+    quality_gate.add_argument("--min-precision", type=float)
+    quality_gate.add_argument("--min-recall", type=float)
+    quality_gate.add_argument("--max-missed-high-impact", type=int)
     quality_gate.add_argument("--min-evidence-validation-rate", type=float)
     quality_gate.add_argument("--min-location-validation-rate", type=float)
     quality_gate.add_argument("--max-mean-elapsed-ms", type=float)
     quality_gate.add_argument("--max-p95-elapsed-ms", type=float)
     quality_gate.add_argument("--min-stratum-recall", type=float)
-    quality_gate.add_argument("--min-stratum-gold-count", default=5, type=int)
+    quality_gate.add_argument("--min-stratum-gold-count", type=int)
     quality_gate.add_argument(
         "--require-dataset-kind", choices=("reviewbench_reference", "curated")
     )
@@ -1531,6 +2127,7 @@ def benchmark_main(argv: list[str]) -> int:
     compare.add_argument("--baseline", required=True)
     compare.add_argument("--candidate", required=True)
     compare.add_argument("--repetitions", required=True, type=int)
+    compare.add_argument("--quality-policy", type=Path)
     compare.add_argument("--output", type=Path)
     prepare = subparsers.add_parser("import-reviewbench", help="Import one public golden case")
     prepare.add_argument("--golden", required=True, type=Path)
@@ -1557,23 +2154,58 @@ def benchmark_main(argv: list[str]) -> int:
     diff_budget.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     if args.command in {"quality-gate", "gate"}:
-        score = json.loads(args.score.read_bytes())
-        payload = evaluate_quality_gate(
-            score,
-            configuration_id=args.configuration,
-            min_cases=args.min_cases,
-            min_precision=args.min_precision,
-            min_recall=args.min_recall,
-            max_missed_high_impact=args.max_missed_high_impact,
-            min_evidence_validation_rate=args.min_evidence_validation_rate,
-            min_location_validation_rate=args.min_location_validation_rate,
-            max_mean_elapsed_ms=args.max_mean_elapsed_ms,
-            max_p95_elapsed_ms=args.max_p95_elapsed_ms,
-            min_stratum_recall=args.min_stratum_recall,
-            min_stratum_gold_count=args.min_stratum_gold_count,
-            required_dataset_kind=args.require_dataset_kind,
-            required_dataset_sha256=args.require_dataset_sha256,
+        threshold_args = (
+            args.min_cases,
+            args.min_precision,
+            args.min_recall,
+            args.max_missed_high_impact,
+            args.min_evidence_validation_rate,
+            args.min_location_validation_rate,
+            args.max_mean_elapsed_ms,
+            args.max_p95_elapsed_ms,
+            args.min_stratum_recall,
+            args.min_stratum_gold_count,
+            args.require_dataset_kind,
+            args.require_dataset_sha256,
         )
+        if args.policy:
+            if any(value is not None for value in threshold_args):
+                parser.error("--policy cannot be combined with experimental threshold arguments")
+            score = json.loads(args.score.read_bytes())
+            policy = BenchmarkQualityGatePolicy.model_validate_json(args.policy.read_bytes())
+            payload = evaluate_quality_policy(
+                score, policy, configuration_id=args.configuration
+            )
+        else:
+            if args.min_precision is None or args.min_recall is None:
+                parser.error(
+                    "--min-precision and --min-recall are required without --policy"
+                )
+            score = json.loads(args.score.read_bytes())
+            payload = evaluate_quality_gate(
+                score,
+                configuration_id=args.configuration,
+                min_cases=args.min_cases if args.min_cases is not None else 1,
+                min_precision=args.min_precision,
+                min_recall=args.min_recall,
+                max_missed_high_impact=(
+                    args.max_missed_high_impact
+                    if args.max_missed_high_impact is not None
+                    else 0
+                ),
+                min_evidence_validation_rate=args.min_evidence_validation_rate,
+                min_location_validation_rate=args.min_location_validation_rate,
+                max_mean_elapsed_ms=args.max_mean_elapsed_ms,
+                max_p95_elapsed_ms=args.max_p95_elapsed_ms,
+                min_stratum_recall=args.min_stratum_recall,
+                min_stratum_gold_count=(
+                    args.min_stratum_gold_count
+                    if args.min_stratum_gold_count is not None
+                    else 5
+                ),
+                required_dataset_kind=args.require_dataset_kind,
+                required_dataset_sha256=args.require_dataset_sha256,
+            )
     elif args.command == "import-reviewbench":
         payload = import_reviewbench(args.golden, args.repository).model_dump(mode="json")
     elif args.command == "import-reviewbench-set":
@@ -1600,6 +2232,13 @@ def benchmark_main(argv: list[str]) -> int:
                 candidate_configuration=args.candidate,
                 repetitions=args.repetitions,
             )
+            if args.quality_policy:
+                policy = BenchmarkQualityGatePolicy.model_validate_json(
+                    args.quality_policy.read_bytes()
+                )
+                payload["eligibility"] = evaluate_speed_candidate(payload, policy)
+            else:
+                payload["eligibility"] = "exploratory"
         else:
             payload = score_benchmark(dataset, results)
     output = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
@@ -1607,4 +2246,10 @@ def benchmark_main(argv: list[str]) -> int:
         args.output.write_text(output, encoding="utf-8")
     else:
         print(output, end="")
-    return 1 if args.command in {"quality-gate", "gate"} and not payload["passed"] else 0
+    if args.command in {"quality-gate", "gate"}:
+        if "state" in payload:
+            return 0 if payload["state"] == "passed" else 1
+        return 0 if payload["passed"] else 1
+    if args.command == "compare" and isinstance(payload.get("eligibility"), Mapping):
+        return 0 if payload["eligibility"].get("state") == "passed" else 1
+    return 0

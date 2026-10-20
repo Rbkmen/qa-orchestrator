@@ -132,6 +132,100 @@ class EvidenceRecord(BaseModel):
         return payload
 
 
+class ReviewInputSource(BaseModel):
+    """Host-authored metadata about one declared source for a review."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source_id: EvidenceRefId
+    kind: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    locator: str = Field(min_length=1, max_length=1024)
+    required: bool
+    snapshot_sha256: Sha256Digest | None = None
+    snapshot_revision: str | None = Field(default=None, min_length=1, max_length=128)
+    retrieval_status: Literal["complete", "partial", "failed", "unknown"] = "unknown"
+    pagination_status: Literal["complete", "incomplete", "not_applicable", "unknown"] = "unknown"
+    extraction_status: Literal["complete", "partial", "failed", "unknown"] = "unknown"
+    criterion_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=500)
+
+    @field_validator("locator")
+    @classmethod
+    def validate_stable_locator(cls, value: str) -> str:
+        if value != value.strip() or any(character.isspace() for character in value):
+            raise ValueError("source locator must be a stable single-line identifier")
+        if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+            raise ValueError("source locator must not contain control characters")
+        if "?" in value or "#" in value:
+            raise ValueError("source locator must not contain query or fragment data")
+        if value.startswith(("/", "\\", "//")) or "\\" in value:
+            raise ValueError("source locator must be repository-relative or a stable URL")
+
+        if "://" in value:
+            try:
+                parsed = urlsplit(value)
+            except ValueError as exc:
+                raise ValueError("source URL is malformed") from exc
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.netloc
+                or parsed.username is not None
+                or parsed.password is not None
+            ):
+                raise ValueError("source URL must not contain credentials or unsupported schemes")
+            path = parsed.path
+        else:
+            path = value
+
+        if any(part in {".", ".."} for part in path.split("/")):
+            raise ValueError("source locator must not contain relative path traversal")
+        return value
+
+    @field_validator("snapshot_sha256")
+    @classmethod
+    def normalize_snapshot_digest(cls, value: str | None) -> str | None:
+        return value.lower() if value is not None else None
+
+    @field_validator("snapshot_revision")
+    @classmethod
+    def validate_snapshot_revision(cls, value: str | None) -> str | None:
+        if value is not None and (
+            value != value.strip()
+            or any(character.isspace() for character in value)
+            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+        ):
+            raise ValueError("snapshot revision must be a stable single-line identifier")
+        return value
+
+    @model_validator(mode="after")
+    def validate_criterion_refs(self) -> "ReviewInputSource":
+        if len(set(self.criterion_refs)) != len(self.criterion_refs):
+            raise ValueError("source criterion refs must be unique")
+        return self
+
+
+class ReviewInputManifest(BaseModel):
+    """Bounded metadata-only inventory of sources declared for a review."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sources: tuple[ReviewInputSource, ...] = Field(default=(), max_length=100)
+
+    @model_validator(mode="after")
+    def validate_unique_sources_and_criteria(self) -> "ReviewInputManifest":
+        source_ids = [source.source_id for source in self.sources]
+        if len(set(source_ids)) != len(source_ids):
+            raise ValueError("input manifest source IDs must be unique")
+
+        criterion_refs = [
+            criterion_ref
+            for source in self.sources
+            for criterion_ref in source.criterion_refs
+        ]
+        if len(set(criterion_refs)) != len(criterion_refs):
+            raise ValueError("input manifest criterion refs must be unique")
+        return self
+
+
 class ReviewContext(BaseModel):
     """Immutable identifiers for the exact source and evidence packet reviewed."""
 
@@ -149,6 +243,8 @@ class ReviewContext(BaseModel):
         default=(), max_length=1000,
         description="Optional complete ref-to-source registry with revision, coordinates and hashes."
     )
+    input_manifest: ReviewInputManifest | None = None
+    neighbor_discovery_sha256: Sha256Digest | None = None
 
     @field_validator("repository")
     @classmethod
@@ -180,10 +276,13 @@ class ReviewContext(BaseModel):
                 raise ValueError("repository identifier must not contain clone credentials")
         return normalized
 
-    @field_validator("base_sha", "head_sha", "diff_sha256", "evidence_packet_sha256")
+    @field_validator(
+        "base_sha", "head_sha", "diff_sha256", "evidence_packet_sha256",
+        "neighbor_discovery_sha256",
+    )
     @classmethod
-    def normalize_hashes(cls, value: str) -> str:
-        return value.lower()
+    def normalize_hashes(cls, value: str | None) -> str | None:
+        return value.lower() if value is not None else None
 
     @model_validator(mode="after")
     def validate_review_identity(self) -> "ReviewContext":
@@ -206,7 +305,25 @@ class ReviewContext(BaseModel):
                     entry.revision != self.head_sha or entry.sha256 != self.diff_sha256
                 ):
                     raise ValueError("diff evidence must match the bound head and diff hash")
+            if self.input_manifest is not None:
+                records_by_ref = {entry.evidence_ref: entry for entry in self.evidence_registry}
+                for source in self.input_manifest.sources:
+                    for criterion_ref in source.criterion_refs:
+                        record = records_by_ref.get(criterion_ref)
+                        if record is not None and record.kind not in {"requirement", "claim"}:
+                            raise ValueError(
+                                "input manifest criteria must resolve to requirement or claim evidence"
+                            )
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_optional_input_manifest(self, handler):
+        payload = handler(self)
+        if self.input_manifest is None:
+            payload.pop("input_manifest", None)
+        if self.neighbor_discovery_sha256 is None:
+            payload.pop("neighbor_discovery_sha256", None)
+        return payload
 
 
 class ReviewFindingLocation(BaseModel):
@@ -341,6 +458,36 @@ class ProfileExecutionMetrics(BaseModel):
         return self
 
 
+class VerificationReceipt(BaseModel):
+    """Provider-neutral metadata attesting that a run response was checked."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    verifier_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_.-]*$")
+    run_id: str = Field(
+        min_length=1, max_length=256, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$"
+    )
+    head_sha: GitObjectId
+    conclusion: Literal["passed", "failed", "skipped", "not_run", "cancelled", "unknown"]
+    scope_sha256: Sha256Digest
+    source_response_sha256: Sha256Digest
+    verified_at: AwareDatetime
+
+    @field_validator("run_id")
+    @classmethod
+    def validate_receipt_run_id(cls, value: str) -> str:
+        if value != value.strip() or any(
+            ord(character) < 0x20 or ord(character) == 0x7F for character in value
+        ):
+            raise ValueError("verification receipt run_id must be a stable single-line value")
+        return value
+
+    @field_validator("head_sha", "scope_sha256", "source_response_sha256")
+    @classmethod
+    def normalize_receipt_digests(cls, value: str) -> str:
+        return value.lower()
+
+
 class ReviewVerificationRecord(BaseModel):
     """Host-supplied test/CI/runtime result bound to the reviewed head revision."""
 
@@ -359,6 +506,17 @@ class ReviewVerificationRecord(BaseModel):
     evidence_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=100)
     started_at: AwareDatetime | None = None
     completed_at: AwareDatetime | None = None
+    scope: str | None = Field(default=None, min_length=1, max_length=2048)
+    scope_sha256: Sha256Digest | None = None
+    run_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$",
+    )
+    artifact_sha256: Sha256Digest | None = None
+    provenance: Literal["host_reported", "local_reproduced", "provider_verified"] = "host_reported"
+    receipt: VerificationReceipt | None = None
 
     @field_validator("scenario", "environment", "source_ref", "reason")
     @classmethod
@@ -387,6 +545,23 @@ class ReviewVerificationRecord(BaseModel):
             raise ValueError("run_url must be an absolute HTTP(S) URL without credentials")
         return value
 
+    @field_validator("scope", "run_id")
+    @classmethod
+    def validate_scope_and_run_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if (
+            value != value.strip()
+            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+        ):
+            raise ValueError("verification scope and run_id must be stable single-line values")
+        return value
+
+    @field_validator("head_sha", "scope_sha256", "artifact_sha256")
+    @classmethod
+    def normalize_verification_digests(cls, value: str | None) -> str | None:
+        return value.lower() if value is not None else None
+
     @model_validator(mode="after")
     def validate_result(self) -> "ReviewVerificationRecord":
         if len(set(self.evidence_refs)) != len(self.evidence_refs):
@@ -397,7 +572,54 @@ class ReviewVerificationRecord(BaseModel):
             raise ValueError("verification start and completion times must be supplied together")
         if self.started_at is not None and self.completed_at < self.started_at:
             raise ValueError("verification completed_at must be at or after started_at")
+        if self.scope_sha256 is not None and self.scope is None:
+            raise ValueError("verification scope digest requires a scope")
+        if self.scope is not None and self.scope_sha256 is not None:
+            actual_scope_sha256 = hashlib.sha256(self.scope.encode("utf-8")).hexdigest()
+            if self.scope_sha256 != actual_scope_sha256:
+                raise ValueError("verification scope digest does not match scope")
+
+        if self.provenance == "host_reported" and self.receipt is not None:
+            raise ValueError("host-reported verification cannot carry a provider receipt")
+        if self.provenance == "local_reproduced":
+            if self.source != "local_runner":
+                raise ValueError("local reproduction provenance requires local_runner source")
+            if not all((self.scope, self.scope_sha256, self.run_id, self.artifact_sha256)):
+                raise ValueError(
+                    "local reproduction requires scope, scope digest, run_id, and artifact digest"
+                )
+            if self.started_at is None or self.completed_at is None:
+                raise ValueError("local reproduction requires start and completion timestamps")
+        if self.provenance == "provider_verified":
+            receipt = self.receipt
+            if self.source != "ci_provider":
+                raise ValueError("provider verification provenance requires ci_provider source")
+            if receipt is None:
+                raise ValueError("provider verification provenance requires a verifier receipt")
+            if not all((self.scope, self.scope_sha256, self.run_id)):
+                raise ValueError("provider verification requires scope, scope digest, and run_id")
+            if self.started_at is None or self.completed_at is None:
+                raise ValueError("provider verification requires start and completion timestamps")
+            if (
+                receipt.run_id != self.run_id
+                or receipt.head_sha != self.head_sha
+                or receipt.conclusion != self.status
+                or receipt.scope_sha256 != self.scope_sha256
+            ):
+                raise ValueError("provider verifier receipt does not match the verification record")
+            if receipt.verified_at < self.completed_at:
+                raise ValueError("provider verifier receipt verified_at precedes run completion")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_additional_provenance(self, handler):
+        payload = handler(self)
+        for field_name in ("scope", "scope_sha256", "run_id", "artifact_sha256", "receipt"):
+            if getattr(self, field_name) is None:
+                payload.pop(field_name, None)
+        if self.provenance == "host_reported":
+            payload.pop("provenance", None)
+        return payload
 
 
 class ReviewFindingCandidate(BaseModel):
@@ -642,6 +864,126 @@ class ReviewCoverageLedger(BaseModel):
         return self
 
 
+class ImpactCandidateDisposition(BaseModel):
+    """Host-authored decision for one candidate in a bounded impact scan."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    candidate_id: str = Field(min_length=1, max_length=256)
+    relation: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    locator: ChangedFilePath
+    disposition: Literal[
+        "reviewed", "no_relevant_relationship", "unresolved", "not_checked"
+    ]
+    rationale: str = Field(min_length=1, max_length=2000)
+    evidence_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=32)
+
+    @field_validator("candidate_id", "locator")
+    @classmethod
+    def validate_candidate_identifiers(cls, value: str) -> str:
+        if value != value.strip() or any(
+            ord(character) < 0x20 or ord(character) == 0x7F for character in value
+        ):
+            raise ValueError("impact candidate identifiers and locators must be stable single-line values")
+        if not value:
+            raise ValueError("impact candidate identifiers and locators must not be blank")
+        return value
+
+    @field_validator("locator")
+    @classmethod
+    def validate_repository_relative_locator(cls, value: str) -> str:
+        if (
+            value.startswith(("/", "\\"))
+            or "\\" in value
+            or ":" in value
+            or any(part in {"", ".", ".."} for part in value.split("/"))
+        ):
+            raise ValueError("impact candidate locator must be repository-relative")
+        return value
+
+    @model_validator(mode="after")
+    def validate_disposition(self) -> "ImpactCandidateDisposition":
+        if not self.rationale.strip():
+            raise ValueError("impact candidate rationale must not be blank")
+        if len(set(self.evidence_refs)) != len(self.evidence_refs):
+            raise ValueError("impact candidate evidence refs must be unique")
+        return self
+
+
+class ImpactCoverageLimit(BaseModel):
+    """One named numeric cap applied by the recorded bounded discovery run."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    value: int = Field(strict=True, ge=0, le=2_147_483_647)
+    reached: bool
+    uninspected: bool
+
+    @model_validator(mode="after")
+    def validate_limit_state(self) -> "ImpactCoverageLimit":
+        if self.uninspected and not self.reached:
+            raise ValueError("an uninspected impact limit must have been reached")
+        return self
+
+
+class ImpactCoverageOmission(BaseModel):
+    """Count and bounded examples for one class of discovery omissions."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    count: int = Field(strict=True, ge=1, le=2_147_483_647)
+    limit: int | None = Field(default=None, strict=True, ge=0, le=2_147_483_647)
+    examples: tuple[str, ...] = Field(default=(), max_length=20)
+
+    @field_validator("examples")
+    @classmethod
+    def validate_examples(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if any(
+            not value.strip()
+            or len(value) > 1024
+            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+            for value in values
+        ):
+            raise ValueError("impact omission examples must be bounded single-line values")
+        return values
+
+
+class ImpactCoverageLedger(BaseModel):
+    """Disposition ledger scoped to one exact, bounded neighbor-discovery result."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    head_sha: GitObjectId
+    changed_paths_sha256: Sha256Digest
+    discovery_sha256: Sha256Digest
+    discovery_method: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    discovery_version: int = Field(strict=True, ge=1, le=2_147_483_647)
+    discovery_state: Literal["ready", "partial", "unknown"]
+    limits: tuple[ImpactCoverageLimit, ...] = Field(min_length=1, max_length=64)
+    candidates: tuple[ImpactCandidateDisposition, ...] = Field(max_length=500)
+    omissions: tuple[ImpactCoverageOmission, ...] = Field(max_length=100)
+
+    @field_validator("head_sha", "changed_paths_sha256", "discovery_sha256")
+    @classmethod
+    def normalize_impact_digests(cls, value: str) -> str:
+        return value.lower()
+
+    @model_validator(mode="after")
+    def validate_impact_coverage(self) -> "ImpactCoverageLedger":
+        candidate_ids = [candidate.candidate_id for candidate in self.candidates]
+        if len(set(candidate_ids)) != len(candidate_ids):
+            raise ValueError("impact coverage candidate IDs must be unique")
+        limit_names = [limit.name for limit in self.limits]
+        if len(set(limit_names)) != len(limit_names):
+            raise ValueError("impact coverage limit names must be unique")
+        omission_kinds = [omission.kind for omission in self.omissions]
+        if len(set(omission_kinds)) != len(omission_kinds):
+            raise ValueError("impact coverage omission kinds must be unique")
+        return self
+
+
 class ProfileReviewReport(BaseModel):
     """Structured host-reported result for one completed specialist profile."""
 
@@ -808,6 +1150,13 @@ class FinalReviewReport(BaseModel):
             "The host replaces this field when finalizing a bound review."
         ),
     )
+    impact_coverage: ImpactCoverageLedger | None = Field(
+        default=None,
+        description=(
+            "Host-authored dispositions for one bounded neighbor-discovery result; this does "
+            "not claim exhaustive repository coverage."
+        ),
+    )
     candidate_decisions: tuple[ReviewCandidateDecision, ...] = Field(
         default=(), max_length=1000,
         description="One host decision per submitted candidate; absent on legacy saved reports."
@@ -853,6 +1202,13 @@ class FinalReviewReport(BaseModel):
         if len(self.model_dump_json().encode("utf-8")) > _MAX_FINAL_REVIEW_REPORT_BYTES:
             raise ValueError("final review report exceeds the maximum serialized size")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_optional_impact_coverage(self, handler):
+        payload = handler(self)
+        if self.impact_coverage is None:
+            payload.pop("impact_coverage", None)
+        return payload
 
 
 class ReviewRoute(BaseModel):

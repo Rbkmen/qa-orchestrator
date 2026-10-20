@@ -90,8 +90,9 @@ The output reports precision, recall against complete reference sets, missed hig
 
 Every score includes `dataset_sha256`, a canonical SHA-256 fingerprint of the
 validated dataset, including its case snapshots and adjudicated gold labels.
-For a release or prompt-change gate, pin the approved dataset kind and digest in
-trusted CI configuration:
+The explicit-threshold command below remains available for experiments. Its
+output is marked `mode: experimental`; it does not establish that the dataset
+or its adjudications are approved.
 
 ```sh
 qa-orch benchmark quality-gate --score /path/to/run/score.json \
@@ -109,8 +110,31 @@ per-run candidates, and adjudication details outside the repository. Synthetic
 datasets remain useful for CI contract tests, but should not be accepted as the
 representative quality gate.
 
-Apply a deterministic gate to a scored aggregate before accepting a prompt, model,
-or scheduling change:
+For a reproducible gate, store a reviewed `BenchmarkQualityGatePolicy` JSON file
+in trusted CI configuration and pin the exact approved dataset kind and digest.
+The policy also sets minimum case and unique gold-finding coverage, precision
+and recall floors, the high-impact miss limit, and any required evidence,
+location, or stratum floors. A speed policy may set `min_speed_repetitions`;
+without it, the speed eligibility check is blocked. No policy or approved
+corpus digest is checked in here.
+
+```sh
+qa-orch benchmark quality-gate --score /path/to/run/score.json \
+  --configuration candidate --policy /path/to/reviewed-policy.json \
+  --output /path/to/run/quality-gate.json
+```
+
+Named policy output has three states. `passed` means the exact dataset identity,
+coverage and measured thresholds all passed. `failed` means valid, complete
+measurements fell below a quality threshold. `blocked` means the dataset
+identity, case/gold coverage, attempts, or required metrics are missing,
+incomplete, or inconsistent. Only `passed` returns exit code 0. A digest pins
+the input data; it does not independently approve the corpus or prove the
+adjudications correct. A synthetic dataset can be digest-pinned for contract
+testing, but is not representative quality evidence.
+
+For ad-hoc experiments, the explicit-threshold interface also supports additional
+metrics. This output remains marked experimental:
 
 ```sh
 qa-orch benchmark quality-gate --score /path/to/run/score.json \
@@ -133,8 +157,8 @@ and minimum stratified-recall thresholds are optional. The stratified threshold
 applies to every severity, category, scope, difficulty, or context bucket that
 meets `min_stratum_gold_count`; smaller buckets are reported as insufficient
 sample, and the gate fails if no bucket meets the minimum. The command returns
-exit code 1 when a threshold fails, so CI can consume an approved aggregate
-without launching model calls. Keep datasets,
+exit code 1 when a threshold fails, but does not produce the named policy's
+`passed`/`failed`/`blocked` state. Keep datasets,
 per-run outputs and raw model text outside the repository. A passing gate still
 depends on correct human/host adjudications; the scorer cannot validate them.
 
@@ -147,7 +171,11 @@ group.
 
 To compare two host configurations, keep the model, reasoning, checklist,
 instructions, review rules, Evidence Packet, adjudicator and pinned source the
-same. Use the same end-to-end timing scope in every callback, then run:
+same. Use the same end-to-end timing scope in every callback. A schema-v3
+`BenchmarkResults` artifact may record `queue_wait_ms` and a schedule whose
+`run_order` lists every successful run exactly once; failed attempts remain in
+the failure ledger and are not scheduled runs. Legacy v1/v2 artifacts remain
+readable when they omit these fields. Then run:
 
 ```sh
 qa-orch benchmark compare --dataset dataset.json --results results.json \
@@ -159,15 +187,30 @@ The comparison requires every dataset case and exactly the declared number of
 fresh runs per configuration, with attempt numbers `1..N` for every
 configuration/case. It pairs elapsed times by case and attempt number, rejects
 differences in model/prompt identity, task context, or Evidence Packet hashes,
-and reports per-case median milliseconds, paired speedup, input/output tokens,
-paired input-token savings, and separately scored precision/recall. Interleave
-or randomize baseline/candidate order across attempts; the scorer cannot observe
-or enforce run order and attempt-index pairing alone does not remove time/order
-bias. Token deltas stay unknown when usage is missing; packet
-bytes are not presented as token counts. `elapsed_ms` is host-reported: measure
-the same end-to-end interval (including the same preparation and finalization
-work) in both callbacks. The command does not launch a model or verify that the
-host actually performed fresh independent reviews; use `run_repetitions` with a
+and reports per-case and aggregate median/p95 latency, sample counts,
+queue-wait distributions, input/output tokens, and separately scored quality.
+Missing queue values remain unknown and are reported with observed and missing
+counts. p95 is descriptive at the reported sample count; do not treat a small
+sample as stable tail-latency evidence.
+
+An interleaved schedule is validated only when baseline and candidate alternate
+in the selected run order. A randomized schedule is labeled
+`randomized_host_declared`; the host's randomization is not independently
+verified. Without a schedule, the assessment is `unknown`; malformed or
+non-alternating interleaving is `invalid`. The comparison alone is exploratory.
+To check speed eligibility against the same quality policy for baseline and
+candidate, add `--quality-policy /path/to/reviewed-policy.json`. The gate blocks
+unknown/invalid order, too few repetitions, incomplete measurements, or a
+baseline that does not pass the policy. A candidate below the policy is failed.
+Missing queue samples are reported but do not by themselves block eligibility.
+The CLI returns a non-zero exit code for failed or blocked eligibility; without
+the policy option it records `eligibility: exploratory` and exits successfully.
+
+Token deltas stay unknown when usage is missing; packet bytes are not presented
+as token counts. `elapsed_ms` and queue wait are host-reported: measure the same
+end-to-end interval (including the same preparation and finalization work) in
+both callbacks. The command does not launch a model or verify that the host
+actually performed fresh independent reviews; use `run_repetitions` with a
 fresh-review callback, disable checkpoints, and keep gold hidden until each
 attempt finishes. A speed result alone does not establish acceptable review
 quality.

@@ -1,13 +1,17 @@
+import hashlib
 import json
 from datetime import UTC, datetime
 
 import pytest
 
+import qa_orchestrator.evidence as evidence_module
+import qa_orchestrator.report as report_module
 from qa_orchestrator.cli import main as cli_main
 from qa_orchestrator.contracts import (
     EvidenceRecord,
     FinalReviewFinding,
     FinalReviewReport,
+    ImpactCoverageLedger,
     ProfileAttemptMetrics,
     ProfileChangedPathCoverage,
     ProfileExecutionMetrics,
@@ -18,12 +22,17 @@ from qa_orchestrator.contracts import (
     ReviewCriterionCoverage,
     ReviewFindingLocation,
     ReviewFindingSource,
+    ReviewInputSource,
     ReviewNote,
     ReviewVerificationRecord,
     review_changed_paths_sha256,
 )
 from qa_orchestrator.refutation import make_refutation_check
-from qa_orchestrator.report import render_final_report, validate_final_report_context
+from qa_orchestrator.report import (
+    impact_coverage_status,
+    render_final_report,
+    validate_final_report_context,
+)
 
 
 def _finding(candidate_id: str, *, severity: str, title: str, change_origin: str = "unknown"):
@@ -44,6 +53,276 @@ def _finding(candidate_id: str, *, severity: str, title: str, change_origin: str
         severity=severity,
         source_profiles=(ReviewAgent.CODE_REVIEWER,),
     )
+
+
+def _provider_verified_record(context):
+    scope = "pytest tests/test_service.py"
+    scope_sha256 = hashlib.sha256(scope.encode("utf-8")).hexdigest()
+    started_at = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
+    completed_at = datetime(2026, 10, 20, 12, 5, tzinfo=UTC)
+    return ReviewVerificationRecord(
+        verification_id="V-02",
+        check_type="ci",
+        scenario="focused unit tests",
+        status="passed",
+        head_sha=context.head_sha,
+        environment="Linux, Python 3.13",
+        source="ci_provider",
+        source_ref="workflow 123 / job 457",
+        scope=scope,
+        scope_sha256=scope_sha256,
+        run_id="github-actions:123:457",
+        started_at=started_at,
+        completed_at=completed_at,
+        provenance="provider_verified",
+        receipt={
+            "verifier_id": "github-actions",
+            "run_id": "github-actions:123:457",
+            "head_sha": context.head_sha,
+            "conclusion": "passed",
+            "scope_sha256": scope_sha256,
+            "source_response_sha256": "5" * 64,
+            "verified_at": completed_at,
+        },
+    )
+
+
+def _impact_ledger(**overrides):
+    payload = {
+        "head_sha": "1" * 40,
+        "changed_paths_sha256": "2" * 64,
+        "discovery_sha256": "3" * 64,
+        "discovery_method": "pinned_git_symbol_scan",
+        "discovery_version": 1,
+        "discovery_state": "ready",
+        "limits": [
+            {
+                "name": "candidate_limit",
+                "value": 50,
+                "reached": False,
+                "uninspected": False,
+            }
+        ],
+        "candidates": [
+            {
+                "candidate_id": "src.module:caller",
+                "relation": "caller",
+                "locator": "src/module.py",
+                "disposition": "reviewed",
+                "rationale": "The caller was checked against the changed contract.",
+                "evidence_refs": ["E1"],
+            }
+        ],
+        "omissions": [],
+    }
+    return ImpactCoverageLedger.model_validate({**payload, **overrides})
+
+
+def _context_with_discovery(bound_review_context, discovery_sha256="4" * 64):
+    return ReviewContext.model_validate(
+        {
+            **bound_review_context.model_dump(),
+            "neighbor_discovery_sha256": discovery_sha256,
+        }
+    )
+
+
+def _impact_ledger_for_context(context, **overrides):
+    payload = _impact_ledger().model_dump(mode="json")
+    payload.update(
+        {
+            "head_sha": context.head_sha,
+            "changed_paths_sha256": review_changed_paths_sha256(context.changed_files),
+            "discovery_sha256": context.neighbor_discovery_sha256,
+        }
+    )
+    payload.update(overrides)
+    return ImpactCoverageLedger.model_validate(payload)
+
+
+def test_impact_coverage_status_is_scoped_and_conservative():
+    assert impact_coverage_status(None) == "unknown"
+    assert impact_coverage_status(_impact_ledger()) == "closed"
+    assert impact_coverage_status(_impact_ledger(discovery_state="partial")) == "partial"
+    assert impact_coverage_status(
+        _impact_ledger(
+            candidates=[
+                {
+                    "candidate_id": "src.module:caller",
+                    "relation": "caller",
+                    "locator": "src/module.py",
+                    "disposition": "unresolved",
+                    "rationale": "The relationship could not be verified.",
+                }
+            ]
+        )
+    ) == "partial"
+    assert impact_coverage_status(
+        _impact_ledger(
+            omissions=[{"kind": "candidate_path_limit", "count": 1, "limit": 50}]
+        )
+    ) == "partial"
+    assert impact_coverage_status(
+        _impact_ledger(
+            limits=[
+                {
+                    "name": "candidate_limit",
+                    "value": 50,
+                    "reached": True,
+                    "uninspected": True,
+                }
+            ]
+        )
+    ) == "partial"
+
+
+@pytest.mark.parametrize(
+    "ledger_changes",
+    [
+        {"head_sha": "5" * 40},
+        {"changed_paths_sha256": "5" * 64},
+        {"discovery_sha256": "5" * 64},
+    ],
+)
+def test_impact_ledger_rejects_wrong_head_or_discovery_digest(
+    bound_review_context, ledger_changes
+):
+    context = _context_with_discovery(bound_review_context)
+    ledger = _impact_ledger_for_context(context, **ledger_changes)
+    report = FinalReviewReport(
+        summary="Reviewed impact candidates.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        impact_coverage=ledger,
+    )
+
+    with pytest.raises(ValueError, match="impact coverage"):
+        validate_final_report_context(report, context)
+
+
+def test_impact_ledger_rejects_evidence_refs_outside_bound_context(bound_review_context):
+    context = _context_with_discovery(bound_review_context)
+    ledger = _impact_ledger_for_context(
+        context,
+        candidates=[
+            {
+                "candidate_id": "src.module:caller",
+                "relation": "caller",
+                "locator": "src/module.py",
+                "disposition": "reviewed",
+                "rationale": "The caller was checked against the changed contract.",
+                "evidence_refs": ["E99"],
+            }
+        ],
+    )
+    report = FinalReviewReport(
+        summary="Reviewed impact candidates.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        impact_coverage=ledger,
+    )
+
+    with pytest.raises(ValueError, match="impact coverage"):
+        validate_final_report_context(report, context)
+
+
+def test_report_never_calls_capped_discovery_closed(bound_review_context):
+    context = _context_with_discovery(bound_review_context)
+    ledger = _impact_ledger_for_context(
+        context,
+        discovery_state="partial",
+        limits=[
+            {
+                "name": "candidate_limit",
+                "value": 50,
+                "reached": True,
+                "uninspected": True,
+            }
+        ],
+        omissions=[
+            {
+                "kind": "candidate_path_limit",
+                "count": 1,
+                "limit": 50,
+                "examples": ["src/capped.py"],
+            }
+        ],
+    )
+    report = FinalReviewReport(
+        summary="Reviewed impact candidates.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        impact_coverage=ledger,
+    )
+
+    rendered = render_final_report(report, context=context)
+
+    assert "Impact closure: partial" in rendered
+    assert "capped" in rendered
+    assert "candidate\\_limit = 50" in rendered
+    assert "1 omission" in rendered
+
+
+def test_impact_rationale_is_markdown_escaped(bound_review_context):
+    context = _context_with_discovery(bound_review_context)
+    ledger = _impact_ledger_for_context(
+        context,
+        candidates=[
+            {
+                "candidate_id": "src.module:caller",
+                "relation": "caller",
+                "locator": "src/module.py",
+                "disposition": "unresolved",
+                "rationale": "<script>alert(1)</script>",
+                "evidence_refs": ["E1"],
+            }
+        ],
+    )
+    report = FinalReviewReport(
+        summary="Reviewed impact candidates.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        impact_coverage=ledger,
+    )
+
+    rendered = render_final_report(report, context=context)
+
+    assert "<script>" not in rendered
+    assert "&lt;script&gt;" in rendered
+
+
+def test_impact_locator_is_markdown_escaped(bound_review_context):
+    context = _context_with_discovery(bound_review_context)
+    ledger = _impact_ledger_for_context(
+        context,
+        candidates=[
+            {
+                "candidate_id": "src.module:caller",
+                "relation": "caller",
+                "locator": "<script>alert(1)</script>.py",
+                "disposition": "reviewed",
+                "rationale": "The neighbor was checked against the contract.",
+                "evidence_refs": ["E1"],
+            }
+        ],
+    )
+    report = FinalReviewReport(
+        summary="Reviewed impact candidates.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        impact_coverage=ledger,
+    )
+
+    rendered = render_final_report(report, context=context)
+
+    assert "<script>" not in rendered
+    assert "&lt;script&gt;" in rendered
+
+
+def test_report_marks_missing_impact_ledger_unknown():
+    report = FinalReviewReport(
+        summary="Reviewed impact candidates.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+    )
+
+    rendered = render_final_report(report)
+
+    assert "Impact closure: unknown" in rendered
 
 
 def test_renderer_orders_findings_and_includes_traceability():
@@ -425,6 +704,142 @@ def test_renderer_maps_host_coverage_ledger_to_bound_changed_paths(bound_review_
         validate_final_report_context(report, bound_review_context)
 
 
+def _input_source(
+    source_id,
+    *,
+    required=True,
+    retrieval_status="complete",
+    pagination_status="complete",
+    extraction_status="complete",
+    criterion_refs=(),
+):
+    return ReviewInputSource(
+        source_id=source_id,
+        kind="jira_issue",
+        locator=f"jira:{source_id}",
+        required=required,
+        retrieval_status=retrieval_status,
+        pagination_status=pagination_status,
+        extraction_status=extraction_status,
+        criterion_refs=criterion_refs,
+    )
+
+
+def _context_with_input_sources(bound_review_context, sources):
+    return ReviewContext.model_validate(
+        {
+            **bound_review_context.model_dump(),
+            "input_manifest": {"sources": tuple(sources)},
+        }
+    )
+
+
+def test_report_renders_incomplete_required_input_as_partial(bound_review_context):
+    context = _context_with_input_sources(
+        bound_review_context,
+        (
+            _input_source(
+                "JIRA-1",
+                retrieval_status="complete",
+                pagination_status="incomplete",
+                extraction_status="partial",
+            ),
+        ),
+    )
+    report = FinalReviewReport(
+        summary="Reviewed the API change.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+    )
+
+    rendered = render_final_report(report, context=context)
+
+    assert "Input completeness: partial" in rendered
+    assert "JIRA-1" in rendered
+    assert "pagination incomplete" in rendered
+    assert "extraction partial" in rendered
+
+
+def test_report_marks_missing_input_manifest_unknown(bound_review_context):
+    report = FinalReviewReport(
+        summary="Reviewed the API change.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+    )
+
+    rendered = render_final_report(report, context=bound_review_context)
+
+    assert "Input completeness: unknown" in rendered
+
+
+def test_report_without_context_marks_input_completeness_unknown():
+    report = FinalReviewReport(
+        summary="Reviewed the API change.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+    )
+
+    rendered = render_final_report(report)
+
+    assert "Input completeness: unknown" in rendered
+
+
+def test_report_lists_manifest_criterion_missing_from_registry(bound_review_context):
+    context = _context_with_input_sources(
+        bound_review_context,
+        (_input_source("JIRA-1", criterion_refs=("R-2",)),),
+    )
+
+    summary = evidence_module.input_manifest_completeness(context)
+
+    assert summary["missing_criterion_refs"] == ["R-2"]
+    assert summary["status"] == "partial"
+
+
+def test_empty_criteria_can_be_complete_after_complete_extraction(bound_review_context):
+    context = _context_with_input_sources(
+        bound_review_context,
+        (_input_source("JIRA-1", criterion_refs=()),),
+    )
+
+    summary = evidence_module.input_manifest_completeness(context)
+
+    assert summary["status"] == "complete"
+
+
+def test_incomplete_optional_source_is_listed_without_downgrading_required_status(
+    bound_review_context,
+):
+    context = _context_with_input_sources(
+        bound_review_context,
+        (
+            _input_source("JIRA-1"),
+            _input_source(
+                "OPTIONAL-1",
+                required=False,
+                retrieval_status="failed",
+                pagination_status="unknown",
+                extraction_status="unknown",
+            ),
+        ),
+    )
+
+    summary = evidence_module.input_manifest_completeness(context)
+
+    assert summary["status"] == "complete"
+    assert [source["source_id"] for source in summary["incomplete_sources"]] == [
+        "OPTIONAL-1"
+    ]
+
+
+def test_manifest_without_required_sources_is_unknown(bound_review_context):
+    context = _context_with_input_sources(
+        bound_review_context,
+        (_input_source("OPTIONAL-1", required=False),),
+    )
+
+    summary = evidence_module.input_manifest_completeness(context)
+
+    assert summary["status"] == "unknown"
+
+
 def test_verification_records_are_bound_to_exact_head_and_rendered(bound_review_context):
     context = ReviewContext.model_validate(
         {
@@ -451,12 +866,14 @@ def test_verification_records_are_bound_to_exact_head_and_rendered(bound_review_
         source="ci_provider",
         source_ref="workflow 123 / job 456",
         run_url="https://github.com/example/repo/actions/runs/123",
+        scope="pytest tests/test_service.py",
         evidence_refs=("R1",),
     )
+    provider_record = _provider_verified_record(context)
     report = FinalReviewReport(
         summary="Reviewed and checked the change.",
         profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
-        verification_records=(record,),
+        verification_records=(record, provider_record),
     )
 
     validate_final_report_context(report, context)
@@ -467,20 +884,35 @@ def test_verification_records_are_bound_to_exact_head_and_rendered(bound_review_
     assert "unit and integration test suites" in rendered
     assert "workflow 123 / job 456" in rendered
     assert "<https://github.com/example/repo/actions/runs/123>" in rendered
-    assert "passed" in rendered
+    assert "status: passed; head binding: current" in rendered
+    assert "provenance: host reported, unverified" in rendered
+    assert "provenance: provider verified" in rendered
+    assert "run ID:" in rendered
+    assert "scope sha256:" in rendered
+    assert "verified at:" in rendered
+    assert "provider response sha256:" in rendered
+    assert "scope: pytest tests/" in rendered
+    assert report_module.verification_binding(record, context) == "current"
 
     wrong_head = report.model_copy(
         update={
             "verification_records": (
-                record.model_copy(update={"head_sha": "0" * 40}),
+                record,
+                provider_record,
+                record.model_copy(update={"head_sha": "0" * 40, "evidence_refs": ()}),
             )
         }
     )
-    with pytest.raises(ValueError, match="bound head revision"):
-        validate_final_report_context(wrong_head, context)
+    validate_final_report_context(wrong_head, context)
+    stale_rendered = render_final_report(wrong_head, context=context)
+    assert "status: passed, stale, not a current pass" in stale_rendered
+    assert report_module.verification_binding(
+        wrong_head.verification_records[-1], context
+    ) == "stale"
 
 
 def test_verification_evidence_requires_head_bound_runtime_record(bound_review_context):
+    older_sha = "0" * 40
     context = ReviewContext.model_validate(
         {
             **bound_review_context.model_dump(),
@@ -488,9 +920,9 @@ def test_verification_evidence_requires_head_bound_runtime_record(bound_review_c
             "evidence_registry": (
                 EvidenceRecord(
                     evidence_ref="E1",
-                    kind="source",
-                    revision=bound_review_context.head_sha,
-                    path="src/service.py",
+                    kind="runtime",
+                    revision=older_sha,
+                    locator="runtime://stage/session/123",
                     sha256="4" * 64,
                 ),
             ),
@@ -502,21 +934,102 @@ def test_verification_evidence_requires_head_bound_runtime_record(bound_review_c
         verification_records=(
             ReviewVerificationRecord(
                 verification_id="V-01",
-                check_type="test",
-                scenario="focused unit test",
-                status="skipped",
-                head_sha=context.head_sha,
-                environment="local",
-                source="local_runner",
-                source_ref="pytest tests/test_service.py",
-                reason="The test dependency was unavailable.",
+                check_type="runtime",
+                scenario="runtime session check",
+                status="passed",
+                head_sha=older_sha,
+                environment="stage",
+                source="runtime_system",
+                source_ref="session 123",
                 evidence_refs=("E1",),
             ),
         ),
     )
 
-    with pytest.raises(ValueError, match="runtime record bound to the reviewed head"):
-        validate_final_report_context(report, context)
+    validate_final_report_context(report, context)
+    assert report_module.verification_binding(
+        report.verification_records[0], context
+    ) == "stale"
+    rendered = render_final_report(report, context=context)
+    assert "status: passed, stale, not a current pass" in rendered
+
+    mismatched_context = ReviewContext.model_validate(
+        {
+            **context.model_dump(),
+            "evidence_registry": (
+                EvidenceRecord(
+                    evidence_ref="E1",
+                    kind="runtime",
+                    revision=context.head_sha,
+                    locator="runtime://stage/session/123",
+                    sha256="4" * 64,
+                ),
+            ),
+        }
+    )
+    with pytest.raises(ValueError, match="runtime evidence must match the verification record head"):
+        validate_final_report_context(report, mismatched_context)
+
+
+@pytest.mark.parametrize("status", ["failed", "skipped", "not_run", "cancelled", "unknown"])
+def test_nonpassing_verification_states_preserve_reason_without_pass_badge(
+    status, bound_review_context
+):
+    record = ReviewVerificationRecord(
+        verification_id="V-03",
+        check_type="test",
+        scenario="focused unit test",
+        status=status,
+        head_sha=bound_review_context.head_sha,
+        environment="local",
+        source="local_runner",
+        source_ref="pytest tests/test_service.py",
+        reason=f"Provider supplied a {status.replace('_', ' ')} result.",
+    )
+    report = FinalReviewReport(
+        summary="Verification was incomplete.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        verification_records=(record,),
+    )
+
+    rendered = render_final_report(report, context=bound_review_context)
+
+    display_status = status.replace("_", " ")
+    assert f"status: {display_status}; head binding: current" in rendered
+    assert f"Provider supplied a {display_status} result" in rendered
+    assert "status: passed; head binding: current" not in rendered
+
+
+def test_local_reproduction_provenance_and_artifact_are_rendered(bound_review_context):
+    scope = "pytest tests/test_service.py"
+    record = ReviewVerificationRecord(
+        verification_id="V-04",
+        check_type="test",
+        scenario="focused unit test",
+        status="passed",
+        head_sha=bound_review_context.head_sha,
+        environment="local",
+        source="local_runner",
+        source_ref="pytest process 1234",
+        scope=scope,
+        scope_sha256=hashlib.sha256(scope.encode("utf-8")).hexdigest(),
+        run_id="local:run-1234",
+        artifact_sha256="6" * 64,
+        started_at=datetime(2026, 10, 20, 12, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 10, 20, 12, 1, tzinfo=UTC),
+        provenance="local_reproduced",
+    )
+    report = FinalReviewReport(
+        summary="A local verification run was recorded.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        verification_records=(record,),
+    )
+
+    rendered = render_final_report(report, context=bound_review_context)
+
+    assert "provenance: locally reproduced" in rendered
+    assert "run ID:" in rendered
+    assert "artifact sha256:" in rendered
 
 
 def test_renderer_shows_original_unconfirmed_candidate_and_refutation_evidence(

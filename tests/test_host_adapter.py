@@ -9,6 +9,7 @@ from qa_orchestrator.contracts import (
     ProfileExecutionMetrics,
     ProfileReviewReport,
     ReviewAgent,
+    ReviewVerificationRecord,
 )
 from qa_orchestrator.host import HostExecutionPolicy, HostReviewAdapter, RetryableProfileError
 from qa_orchestrator.orchestration import (
@@ -107,6 +108,18 @@ async def test_finish_review_exports_markdown_with_the_accepted_outcome(host_ses
     final_report = FinalReviewReport(
         summary="Review completed against the pinned context.",
         profiles_reviewed=(ReviewAgent.PYTHON_REVIEWER,),
+        verification_records=(
+            ReviewVerificationRecord(
+                verification_id="V-01",
+                check_type="ci",
+                scenario="focused test suite",
+                status="passed",
+                head_sha=current.review_context.head_sha,
+                environment="CI",
+                source="ci_provider",
+                source_ref="workflow 123 / job 456",
+            ),
+        ),
     )
     with pytest.raises(OrchestrationError, match="outcome is not ready"):
         adapter.finish_review(
@@ -140,6 +153,7 @@ async def test_finish_review_exports_markdown_with_the_accepted_outcome(host_ses
     assert finished.final_review_report.model_copy(update={"coverage_ledger": None}) == final_report
     assert output.read_text(encoding="utf-8").startswith("# QA review\n")
     assert "Review completed against the pinned context" in output.read_text(encoding="utf-8")
+    assert "provenance: host reported, unverified" in output.read_text(encoding="utf-8")
 
 
 async def test_attempt_ledger_preserves_failed_usage_and_sums_known_retries(host_session):

@@ -1,3 +1,4 @@
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -6,6 +7,7 @@ from pydantic import ValidationError
 
 from qa_orchestrator.contracts import (
     FinalReviewReport,
+    ImpactCoverageLedger,
     ProfileChangedPathCoverage,
     ProfileExecutionMetrics,
     ProfileReviewReport,
@@ -14,8 +16,11 @@ from qa_orchestrator.contracts import (
     ReviewContext,
     ReviewCoverageLedger,
     ReviewFindingLocation,
+    ReviewInputSource,
     ReviewNote,
     ReviewRouteSelection,
+    ReviewVerificationRecord,
+    VerificationReceipt,
 )
 from qa_orchestrator.orchestration import (
     MODEL_POLICIES,
@@ -28,6 +33,118 @@ from qa_orchestrator.orchestration import (
     QaOrchestrationSession,
 )
 from qa_orchestrator.review_profiles import build_review_route
+
+_VERIFICATION_STARTED_AT = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
+_VERIFICATION_COMPLETED_AT = datetime(2026, 10, 20, 12, 5, tzinfo=UTC)
+_VERIFICATION_SCOPE = "pytest tests/test_service.py"
+_VERIFICATION_SCOPE_SHA256 = hashlib.sha256(
+    _VERIFICATION_SCOPE.encode("utf-8")
+).hexdigest()
+
+
+def _verification_record_payload(**overrides):
+    payload = {
+        "verification_id": "V-01",
+        "check_type": "ci",
+        "scenario": "unit test suite",
+        "status": "passed",
+        "head_sha": "1" * 40,
+        "environment": "Linux, Python 3.13",
+        "source": "ci_provider",
+        "source_ref": "workflow 123 / job 456",
+        "started_at": _VERIFICATION_STARTED_AT,
+        "completed_at": _VERIFICATION_COMPLETED_AT,
+    }
+    return {**payload, **overrides}
+
+
+def _provider_verification_record_payload(*, include_receipt=True):
+    payload = _verification_record_payload(
+        scope=_VERIFICATION_SCOPE,
+        scope_sha256=_VERIFICATION_SCOPE_SHA256,
+        run_id="github-actions:123:456",
+        provenance="provider_verified",
+    )
+    if include_receipt:
+        payload["receipt"] = {
+            "verifier_id": "github-actions",
+            "run_id": payload["run_id"],
+            "head_sha": payload["head_sha"],
+            "conclusion": payload["status"],
+            "scope_sha256": payload["scope_sha256"],
+            "source_response_sha256": "2" * 64,
+            "verified_at": _VERIFICATION_COMPLETED_AT + timedelta(seconds=1),
+        }
+    return payload
+
+
+def test_provider_verified_record_requires_matching_receipt():
+    with pytest.raises(ValidationError):
+        ReviewVerificationRecord.model_validate(
+            _provider_verification_record_payload(include_receipt=False)
+        )
+
+
+def test_provider_verified_record_accepts_matching_verifier_receipt():
+    record = ReviewVerificationRecord.model_validate(
+        _provider_verification_record_payload()
+    )
+
+    assert record.provenance == "provider_verified"
+    assert isinstance(record.receipt, VerificationReceipt)
+
+
+@pytest.mark.parametrize(
+    "receipt_changes",
+    [
+        {"run_id": "github-actions:999:456"},
+        {"head_sha": "f" * 40},
+        {"conclusion": "failed"},
+        {"scope_sha256": "f" * 64},
+    ],
+)
+def test_provider_verified_record_rejects_receipt_binding_mismatches(receipt_changes):
+    payload = _provider_verification_record_payload()
+    payload["receipt"] = {**payload["receipt"], **receipt_changes}
+
+    with pytest.raises(ValidationError):
+        ReviewVerificationRecord.model_validate(payload)
+
+
+def test_legacy_verification_record_defaults_to_host_reported():
+    record = ReviewVerificationRecord.model_validate(
+        _verification_record_payload(
+            started_at=None,
+            completed_at=None,
+        )
+    )
+
+    assert record.provenance == "host_reported"
+    assert "provenance" not in record.model_dump()
+
+
+def test_local_reproduction_requires_artifact_digest():
+    with pytest.raises(ValidationError):
+        ReviewVerificationRecord.model_validate(
+            _verification_record_payload(
+                source="local_runner",
+                provenance="local_reproduced",
+                scope=_VERIFICATION_SCOPE,
+                scope_sha256=_VERIFICATION_SCOPE_SHA256,
+                run_id="local:run-1",
+            )
+        )
+
+
+def test_local_reproduction_requires_run_identity_and_scope():
+    with pytest.raises(ValidationError):
+        ReviewVerificationRecord.model_validate(
+            _verification_record_payload(
+                source="local_runner",
+                provenance="local_reproduced",
+                artifact_sha256="3" * 64,
+            )
+        )
 
 
 def test_review_route_selection_rejects_group_order_mismatch():
@@ -77,6 +194,78 @@ def test_review_coverage_ledger_rejects_invalid_indexes_and_inclusion_claims():
                 ),
             ),
         )
+
+
+def test_impact_coverage_rejects_duplicate_candidates_and_invalid_dispositions():
+    candidate = {
+        "candidate_id": "src.module:caller",
+        "relation": "caller",
+        "locator": "src/module.py",
+        "disposition": "reviewed",
+        "rationale": "The caller's behavior was checked against the changed contract.",
+        "evidence_refs": ["E1"],
+    }
+    ledger = {
+        "head_sha": "1" * 40,
+        "changed_paths_sha256": "2" * 64,
+        "discovery_sha256": "3" * 64,
+        "discovery_method": "pinned_git_symbol_scan",
+        "discovery_version": 1,
+        "discovery_state": "ready",
+        "limits": [
+            {
+                "name": "candidate_limit",
+                "value": 50,
+                "reached": False,
+                "uninspected": False,
+            }
+        ],
+        "candidates": [candidate, candidate],
+        "omissions": [],
+    }
+
+    with pytest.raises(ValidationError, match="candidate IDs must be unique"):
+        ImpactCoverageLedger.model_validate(ledger)
+
+    invalid_disposition = {
+        **ledger,
+        "candidates": [{**candidate, "disposition": "approved"}],
+    }
+    with pytest.raises(ValidationError):
+        ImpactCoverageLedger.model_validate(invalid_disposition)
+
+    incomplete_limit = {
+        **ledger,
+        "candidates": [candidate],
+        "limits": [
+            {
+                "name": "candidate_limit",
+                "value": 50,
+                "reached": False,
+                "uninspected": True,
+            }
+        ],
+    }
+    with pytest.raises(ValidationError, match="uninspected impact limit must have been reached"):
+        ImpactCoverageLedger.model_validate(incomplete_limit)
+
+
+def test_final_report_accepts_absent_legacy_impact_coverage():
+    report = FinalReviewReport.model_validate(
+        {
+            "summary": "Legacy report.",
+            "profiles_reviewed": [ReviewAgent.CODE_REVIEWER.value],
+            "finding_candidates": [],
+            "coverage_gaps": [],
+            "unverified": [],
+            "criterion_coverage": [],
+            "verification_records": [],
+            "coverage_ledger": None,
+            "candidate_decisions": [],
+        }
+    )
+
+    assert report.impact_coverage is None
 
 
 @pytest.mark.parametrize(
@@ -189,6 +378,207 @@ def test_review_context_bounds_paths_and_rejects_repository_credentials(bound_re
     ):
         with pytest.raises(ValidationError, match="credentials|parameters|clone|query or fragment"):
             ReviewContext(**{**context, "repository": repository})
+
+
+def test_review_input_manifest_rejects_duplicate_source_ids_and_criteria_refs(
+    bound_review_context,
+):
+    def source(source_id, locator, criterion_refs):
+        return {
+            "source_id": source_id,
+            "kind": "jira_issue",
+            "locator": locator,
+            "required": True,
+            "retrieval_status": "complete",
+            "pagination_status": "complete",
+            "extraction_status": "complete",
+            "criterion_refs": criterion_refs,
+        }
+
+    context_payload = bound_review_context.model_dump()
+    context_payload["input_manifest"] = {
+        "sources": (
+            source("jira-1", "jira:QA-1", ("REQ-1",)),
+            source("spec-1", "docs/review-spec.md", ("REQ-2",)),
+        )
+    }
+    valid_context = ReviewContext.model_validate(context_payload)
+
+    duplicate_source_payload = valid_context.model_dump()
+    duplicate_source_payload["input_manifest"] = {
+        "sources": (
+            source("jira-1", "jira:QA-1", ("REQ-1",)),
+            source("jira-1", "docs/review-spec.md", ("REQ-2",)),
+        )
+    }
+    with pytest.raises(ValidationError, match="source IDs must be unique"):
+        ReviewContext.model_validate(duplicate_source_payload)
+
+    duplicate_criterion_payload = valid_context.model_dump()
+    duplicate_criterion_payload["input_manifest"] = {
+        "sources": (
+            source("jira-1", "jira:QA-1", ("REQ-1",)),
+            source("spec-1", "docs/review-spec.md", ("REQ-1",)),
+        )
+    }
+    with pytest.raises(ValidationError, match="criterion refs must be unique"):
+        ReviewContext.model_validate(duplicate_criterion_payload)
+
+
+def test_legacy_review_context_without_input_manifest_round_trips(bound_review_context):
+    legacy_json = bound_review_context.model_dump_json()
+
+    context = ReviewContext.model_validate_json(legacy_json)
+
+    assert context.input_manifest is None
+    assert "input_manifest" not in context.model_dump()
+    assert context.neighbor_discovery_sha256 is None
+    assert "neighbor_discovery_sha256" not in context.model_dump()
+
+    bound = ReviewContext.model_validate(
+        {
+            **bound_review_context.model_dump(),
+            "neighbor_discovery_sha256": "A" * 64,
+        }
+    )
+    assert bound.neighbor_discovery_sha256 == "a" * 64
+
+
+def test_review_input_manifest_preserves_unresolved_criterion_refs(bound_review_context):
+    payload = bound_review_context.model_dump()
+    payload["input_manifest"] = {
+        "sources": (
+            {
+                "source_id": "jira-1",
+                "kind": "jira_issue",
+                "locator": "jira:QA-1",
+                "required": True,
+                "retrieval_status": "complete",
+                "pagination_status": "not_applicable",
+                "extraction_status": "complete",
+                "criterion_refs": ("REQ-MISSING",),
+            },
+        )
+    }
+
+    context = ReviewContext.model_validate(payload)
+
+    assert context.input_manifest.sources[0].criterion_refs == ("REQ-MISSING",)
+
+
+def test_review_input_manifest_rejects_registered_noncriterion_refs(bound_review_context):
+    payload = bound_review_context.model_dump()
+    payload["evidence_refs"] = ("REQ-1",)
+    payload["evidence_registry"] = (
+        {
+            "evidence_ref": "REQ-1",
+            "kind": "runtime",
+            "sha256": "a" * 64,
+            "locator": "testrail:run-1",
+        },
+    )
+    payload["input_manifest"] = {
+        "sources": (
+            {
+                "source_id": "jira-1",
+                "kind": "jira_issue",
+                "locator": "jira:QA-1",
+                "required": True,
+                "retrieval_status": "complete",
+                "pagination_status": "not_applicable",
+                "extraction_status": "complete",
+                "criterion_refs": ("REQ-1",),
+            },
+        )
+    }
+
+    with pytest.raises(ValidationError, match="requirement or claim"):
+        ReviewContext.model_validate(payload)
+
+
+def test_review_input_manifest_accepts_registered_requirement_and_claim_refs(
+    bound_review_context,
+):
+    payload = bound_review_context.model_dump()
+    payload["evidence_refs"] = ("REQ-1", "CLAIM-1")
+    payload["evidence_registry"] = (
+        {
+            "evidence_ref": "REQ-1",
+            "kind": "requirement",
+            "sha256": "a" * 64,
+            "locator": "jira:QA-1",
+        },
+        {
+            "evidence_ref": "CLAIM-1",
+            "kind": "claim",
+            "sha256": "b" * 64,
+            "locator": "gitlab:MR-2",
+        },
+    )
+    payload["input_manifest"] = {
+        "sources": (
+            {
+                "source_id": "jira-1",
+                "kind": "jira_issue",
+                "locator": "jira:QA-1",
+                "required": True,
+                "retrieval_status": "complete",
+                "pagination_status": "complete",
+                "extraction_status": "complete",
+                "criterion_refs": ("REQ-1",),
+            },
+            {
+                "source_id": "mr-2",
+                "kind": "merge_request",
+                "locator": "gitlab:MR-2",
+                "required": True,
+                "retrieval_status": "complete",
+                "pagination_status": "not_applicable",
+                "extraction_status": "complete",
+                "criterion_refs": ("CLAIM-1",),
+            },
+        )
+    }
+
+    context = ReviewContext.model_validate(payload)
+
+    assert tuple(
+        ref
+        for source in context.input_manifest.sources
+        for ref in source.criterion_refs
+    ) == ("REQ-1", "CLAIM-1")
+
+
+@pytest.mark.parametrize(
+    "locator",
+    (
+        "https://user:secret@example.com/issue/QA-1",
+        "https://example.com/issue/QA-1?token=secret",
+        "docs/../private-spec.md",
+        "docs/spec with spaces.md",
+    ),
+)
+def test_review_input_source_rejects_unstable_or_sensitive_locators(locator):
+    with pytest.raises(ValidationError):
+        ReviewInputSource(
+            source_id="jira-1",
+            kind="jira_issue",
+            locator=locator,
+            required=True,
+        )
+
+
+def test_review_input_source_defaults_missing_statuses_to_unknown():
+    source = ReviewInputSource(
+        source_id="jira-1",
+        kind="jira_issue",
+        locator="jira:QA-1",
+        required=True,
+    )
+
+    assert source.retrieval_status == "unknown"
+    assert source.pagination_status == "unknown"
+    assert source.extraction_status == "unknown"
 
 
 def test_finding_locations_require_a_valid_line_range():

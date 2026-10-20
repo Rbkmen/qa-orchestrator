@@ -8,7 +8,7 @@ import re
 import shutil
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
 from qa_orchestrator.contracts import (
@@ -271,6 +271,96 @@ def validate_context_selection(context: ReviewContext, report: ProfileReviewRepo
     cited.update(item.evidence_ref for item in report.evidence_map)
     if cited - set(selection.included_refs):
         raise ValueError("profile report cites evidence omitted from its context")
+
+
+def input_manifest_completeness(context: ReviewContext | None) -> dict[str, object]:
+    """Derive required-input status from host-authored manifest metadata."""
+    manifest = context.input_manifest if context is not None else None
+    sources = manifest.sources if manifest is not None else ()
+    required_sources = tuple(source for source in sources if source.required)
+    optional_sources = tuple(source for source in sources if not source.required)
+
+    def incomplete_reasons(source) -> tuple[str, ...]:
+        reasons = []
+        if source.retrieval_status != "complete":
+            reasons.append(f"retrieval {source.retrieval_status}")
+        if source.pagination_status not in {"complete", "not_applicable"}:
+            reasons.append(f"pagination {source.pagination_status}")
+        if source.extraction_status != "complete":
+            reasons.append(f"extraction {source.extraction_status}")
+        return tuple(reasons)
+
+    incomplete_sources = [
+        {
+            "source_id": source.source_id,
+            "required": source.required,
+            "retrieval_status": source.retrieval_status,
+            "pagination_status": source.pagination_status,
+            "extraction_status": source.extraction_status,
+            "reasons": incomplete_reasons(source),
+        }
+        for source in sources
+        if incomplete_reasons(source)
+    ]
+    required_incomplete = tuple(
+        source for source in required_sources if incomplete_reasons(source)
+    )
+
+    registered_criteria = (
+        {
+            record.evidence_ref
+            for record in context.evidence_registry
+            if record.kind in {"requirement", "claim"}
+        }
+        if context is not None
+        else set()
+    )
+    declared_criteria = {
+        criterion_ref
+        for source in sources
+        for criterion_ref in source.criterion_refs
+    }
+    required_criteria = {
+        criterion_ref
+        for source in required_sources
+        for criterion_ref in source.criterion_refs
+    }
+    missing_criterion_refs = sorted(declared_criteria - registered_criteria)
+    missing_required_criterion_refs = sorted(required_criteria - registered_criteria)
+
+    if context is None:
+        status = "unknown"
+        status_reason = "review context is unavailable"
+    elif manifest is None:
+        status = "unknown"
+        status_reason = "input manifest was not provided"
+    elif not required_sources:
+        status = "unknown"
+        status_reason = "no required source was declared"
+    elif required_incomplete or missing_required_criterion_refs:
+        status = "partial"
+        status_reason = "one or more required sources or criteria are incomplete"
+    else:
+        status = "complete"
+        status_reason = "all required sources and declared criteria are accounted for"
+
+    return {
+        "status": status,
+        "status_reason": status_reason,
+        "source_counts": {
+            "declared": len(sources),
+            "required": len(required_sources),
+            "optional": len(optional_sources),
+            "complete_required": len(required_sources) - len(required_incomplete),
+            "incomplete_required": len(required_incomplete),
+            "incomplete_optional": sum(
+                bool(incomplete_reasons(source)) for source in optional_sources
+            ),
+        },
+        "incomplete_sources": incomplete_sources,
+        "missing_criterion_refs": missing_criterion_refs,
+        "missing_required_criterion_refs": missing_required_criterion_refs,
+    }
 
 
 def complete_criterion_coverage(
@@ -670,6 +760,22 @@ def _test_dependency_manifests(changed_paths: set[str], tracked_paths: set[str])
             ):
                 manifests.add(candidate)
     return manifests
+
+
+def neighbor_discovery_sha256(payload: Mapping[str, object]) -> str:
+    """Fingerprint a discovery result independently of mapping insertion order."""
+    if not isinstance(payload, Mapping) or any(not isinstance(key, str) for key in payload):
+        raise TypeError("neighbor discovery payload must be a string-keyed mapping")
+    canonical_payload = dict(payload)
+    canonical_payload.pop("discovery_sha256", None)
+    canonical_json = json.dumps(
+        canonical_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
 
 def _neighbor_categories(path: str) -> tuple[str, ...]:
@@ -1415,7 +1521,7 @@ def discover_neighbor_evidence(
         }
     )
 
-    return {
+    payload = {
         "schema_version": 1,
         "method": "pinned_git_symbol_scan",
         "codegraph": codegraph,
@@ -1506,6 +1612,8 @@ def discover_neighbor_evidence(
             "Add accepted record objects and refs to the full registry before building the Evidence Packet.",
         ],
     }
+    payload["discovery_sha256"] = neighbor_discovery_sha256(payload)
+    return payload
 
 
 def evidence_main(argv: list[str]) -> int:

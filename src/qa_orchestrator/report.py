@@ -4,14 +4,18 @@ import argparse
 import json
 import re
 from pathlib import Path
+from typing import Literal
 
 from qa_orchestrator.contracts import (
     FinalReviewReport,
+    ImpactCoverageLedger,
     ReviewContext,
+    ReviewVerificationRecord,
     review_changed_paths_sha256,
 )
 from qa_orchestrator.evidence import (
     complete_criterion_coverage,
+    input_manifest_completeness,
     validate_registered_locations,
 )
 
@@ -90,6 +94,25 @@ def _coverage_path_label(
     if context is not None and len(context.changed_files) == ledger_path_count:
         return _code(context.changed_files[index])
     return f"index {index}"
+
+
+def impact_coverage_status(ledger: ImpactCoverageLedger | None) -> str:
+    """Return closure status only for the candidates in a recorded bounded scan."""
+    if ledger is None:
+        return "unknown"
+    if (
+        ledger.discovery_state == "partial"
+        or ledger.omissions
+        or any(limit.reached or limit.uninspected for limit in ledger.limits)
+        or any(
+            candidate.disposition in {"unresolved", "not_checked"}
+            for candidate in ledger.candidates
+        )
+    ):
+        return "partial"
+    if ledger.discovery_state == "unknown":
+        return "unknown"
+    return "closed"
 
 
 def _render_coverage_ledger(
@@ -235,6 +258,111 @@ def _render_coverage_ledger(
     return lines
 
 
+def _render_impact_coverage(
+    report: FinalReviewReport,
+    context: ReviewContext | None,
+) -> list[str]:
+    lines = ["## Impact closure", ""]
+    ledger = report.impact_coverage
+    if ledger is None:
+        lines.extend(
+            (
+                "Impact closure: unknown",
+                "- **Reason:** no impact-coverage ledger was supplied.",
+                "- **Scope:** impact closure only describes the recorded bounded discovery; it is not exhaustive repository coverage.",
+                "",
+            )
+        )
+        return lines
+
+    status = impact_coverage_status(ledger)
+    lines.extend(
+        (
+            f"Impact closure: {status}",
+            "This ledger covers the recorded bounded discovery only; it does not claim exhaustive repository coverage.",
+            (
+                f"- **Discovery:** {_text(ledger.discovery_method)} v{ledger.discovery_version}; "
+                f"state {_text(ledger.discovery_state)}."
+            ),
+            f"- **Bound head:** {_code(ledger.head_sha)}",
+            f"- **Changed-path SHA-256:** {_code(ledger.changed_paths_sha256)}",
+            f"- **Discovery SHA-256:** {_code(ledger.discovery_sha256)}",
+            f"- **Candidates:** {len(ledger.candidates)}",
+        )
+    )
+
+    disposition_counts = {
+        disposition: sum(
+            candidate.disposition == disposition for candidate in ledger.candidates
+        )
+        for disposition in (
+            "reviewed",
+            "no_relevant_relationship",
+            "unresolved",
+            "not_checked",
+        )
+    }
+    lines.append(
+        "- **Dispositions:** "
+        + "; ".join(
+            f"{_text(disposition)} {count}"
+            for disposition, count in disposition_counts.items()
+        )
+    )
+
+    limit_details = []
+    for limit in ledger.limits:
+        state = []
+        if limit.reached:
+            state.append("reached")
+        if limit.uninspected:
+            state.append("uninspected")
+        suffix = f" ({', '.join(state)})" if state else ""
+        limit_details.append(f"{_text(limit.name)} = {limit.value}{suffix}")
+    lines.append("- **Configured scan limits:** " + "; ".join(limit_details))
+
+    total_omissions = sum(omission.count for omission in ledger.omissions)
+    omission_label = "omission" if total_omissions == 1 else "omissions"
+    lines.append(
+        f"- **Omissions:** {total_omissions} {omission_label} across "
+        f"{len(ledger.omissions)} categories."
+    )
+    for omission in ledger.omissions:
+        details = [f"{omission.count} omitted"]
+        if omission.limit is not None:
+            details.append(f"limit {omission.limit}")
+        if omission.examples:
+            examples = ", ".join(_text(example) for example in omission.examples)
+            details.append(f"examples: {examples}")
+        lines.append(f"  - **{_text(omission.kind)}:** " + "; ".join(details))
+
+    if status == "partial" and (
+        ledger.omissions
+        or any(limit.reached or limit.uninspected for limit in ledger.limits)
+    ):
+        lines.append("- Discovery was capped or left items uninspected; closure remains partial.")
+
+    if ledger.candidates:
+        lines.append("- **Candidate dispositions:**")
+        for candidate in ledger.candidates:
+            details = [
+                f"**{_text(candidate.disposition)}**",
+                _text(candidate.rationale),
+                f"locator: {_text(candidate.locator)}",
+            ]
+            if candidate.evidence_refs:
+                details.append(f"evidence: {_refs(candidate.evidence_refs, context)}")
+            lines.append(
+                f"  - **{_text(candidate.candidate_id)} · {_text(candidate.relation)}:** "
+                + "; ".join(details)
+            )
+    else:
+        lines.append("- **Candidate dispositions:** none discovered in this bounded scan.")
+
+    lines.append("")
+    return lines
+
+
 def _render_profile_execution(report: FinalReviewReport) -> list[str]:
     ledger = report.coverage_ledger
     if ledger is None:
@@ -316,30 +444,70 @@ def _render_profile_execution(report: FinalReviewReport) -> list[str]:
     return lines
 
 
-def _render_verification_records(report: FinalReviewReport) -> list[str]:
+def verification_binding(
+    record: ReviewVerificationRecord,
+    context: ReviewContext,
+) -> Literal["current", "stale"]:
+    """Classify a recorded run by whether it used the exact reviewed head."""
+    return "current" if record.head_sha == context.head_sha else "stale"
+
+
+def _render_verification_records(
+    report: FinalReviewReport,
+    context: ReviewContext | None,
+) -> list[str]:
     lines = [
         "## Tests and CI verification",
         "",
-        "These are host-supplied records bound to a head SHA; the orchestrator does not independently authenticate external run results.",
+        "These are host-supplied records bound to a head SHA; status, head binding and provenance are shown separately. The orchestrator does not independently authenticate host-reported results.",
         "",
     ]
     if not report.verification_records:
         lines.extend(("No test, CI, or runtime verification records were supplied.", ""))
         return lines
     for record in report.verification_records:
+        binding = verification_binding(record, context) if context is not None else "unknown"
+        status = record.status
+        if record.status == "passed" and binding == "stale":
+            status = "passed, stale, not a current pass"
+        elif record.status == "passed" and binding == "unknown":
+            status = "passed, head binding unknown"
+        elif record.status == "not_run":
+            status = "not run"
+        provenance = {
+            "host_reported": "host reported, unverified",
+            "local_reproduced": "locally reproduced",
+            "provider_verified": "provider verified",
+        }[record.provenance]
         details = [
-            f"**{_text(record.status)}**",
+            f"status: {_text(status)}",
+            f"head binding: {_text(binding)}",
+            f"provenance: {_text(provenance)}",
             f"scenario: {_text(record.scenario)}",
             f"head: {_code(record.head_sha)}",
             f"environment: {_text(record.environment)}",
             f"source: {_text(record.source)} / {_code(record.source_ref)}",
         ]
+        if record.scope:
+            details.append(f"scope: {_text(record.scope)}")
+        if record.scope_sha256:
+            details.append(f"scope sha256: {_code(record.scope_sha256)}")
+        if record.run_id:
+            details.append(f"run ID: {_code(record.run_id)}")
+        if record.artifact_sha256:
+            details.append(f"artifact sha256: {_code(record.artifact_sha256)}")
+        if record.receipt:
+            details.append(f"verifier: {_text(record.receipt.verifier_id)}")
+            details.append(f"verified at: {_text(record.receipt.verified_at.isoformat())}")
+            details.append(
+                f"provider response sha256: {_code(record.receipt.source_response_sha256)}"
+            )
         if record.run_url:
             details.append(f"run: <{record.run_url}>")
         if record.reason:
             details.append(f"reason: {_text(record.reason)}")
         if record.evidence_refs:
-            details.append(f"evidence: {_refs(record.evidence_refs)}")
+            details.append(f"evidence: {_refs(record.evidence_refs, context)}")
         lines.append(f"- **{_text(record.verification_id)} · {_text(record.check_type)}:** " + "; ".join(details))
     lines.append("")
     return lines
@@ -352,6 +520,41 @@ def render_final_report(
     if context is not None:
         report = complete_criterion_coverage(context, report)
     lines = ["# QA review", "", _text(report.summary), ""]
+    input_summary = input_manifest_completeness(context)
+    source_counts = input_summary["source_counts"]
+    lines.extend(
+        (
+            "## Input completeness",
+            "",
+            f"Input completeness: {_text(input_summary['status'])}",
+            f"- **Status basis:** {_text(input_summary['status_reason'])}",
+            (
+                f"- **Sources:** {source_counts['declared']} declared "
+                f"({source_counts['required']} required, {source_counts['optional']} optional); "
+                f"{source_counts['complete_required']} required complete, "
+                f"{source_counts['incomplete_required']} required incomplete, "
+                f"{source_counts['incomplete_optional']} optional incomplete."
+            ),
+        )
+    )
+    if input_summary["incomplete_sources"]:
+        lines.append("- **Incomplete sources:**")
+        for source in input_summary["incomplete_sources"]:
+            source_kind = "required" if source["required"] else "optional"
+            reasons = ", ".join(source["reasons"])
+            lines.append(
+                f"  - {_code(source['source_id'])} ({source_kind}): {_text(reasons)}"
+            )
+    else:
+        lines.append("- **Incomplete sources:** none")
+    if input_summary["missing_criterion_refs"]:
+        missing_refs = ", ".join(
+            _text(reference) for reference in input_summary["missing_criterion_refs"]
+        )
+        lines.append(f"- **Unregistered declared criterion refs:** {missing_refs}")
+    else:
+        lines.append("- **Unregistered declared criterion refs:** none")
+    lines.append("")
     lines.extend(("## Findings", ""))
     findings = sorted(
         report.finding_candidates,
@@ -493,8 +696,9 @@ def render_final_report(
             lines.append("")
 
     lines.extend(_render_coverage_ledger(report, context))
+    lines.extend(_render_impact_coverage(report, context))
     lines.extend(_render_profile_execution(report))
-    lines.extend(_render_verification_records(report))
+    lines.extend(_render_verification_records(report, context))
 
     for heading, notes in (
         ("Coverage gaps", report.coverage_gaps),
@@ -513,6 +717,23 @@ def render_final_report(
 
 def validate_final_report_context(report: FinalReviewReport, context: ReviewContext) -> None:
     report = complete_criterion_coverage(context, report)
+    impact_ledger = report.impact_coverage
+    if impact_ledger is not None:
+        if (
+            impact_ledger.head_sha != context.head_sha
+            or impact_ledger.changed_paths_sha256
+            != review_changed_paths_sha256(context.changed_files)
+            or context.neighbor_discovery_sha256 is None
+            or impact_ledger.discovery_sha256 != context.neighbor_discovery_sha256
+        ):
+            raise ValueError("impact coverage ledger does not match the bound review")
+        impact_refs = {
+            ref
+            for candidate in impact_ledger.candidates
+            for ref in candidate.evidence_refs
+        }
+        if impact_refs - set(context.evidence_refs):
+            raise ValueError("impact coverage cites refs outside the bound context")
     ledger = report.coverage_ledger
     if ledger is not None:
         if (
@@ -600,15 +821,13 @@ def validate_final_report_context(report: FinalReviewReport, context: ReviewCont
     )
     registry = {entry.evidence_ref: entry for entry in context.evidence_registry}
     for item in report.verification_records:
-        if item.head_sha != context.head_sha:
-            raise ValueError("verification record does not match the bound head revision")
         for ref in item.evidence_refs:
             entry = registry.get(ref)
             if entry is not None and (
-                entry.kind != "runtime" or entry.revision != context.head_sha
+                entry.kind != "runtime" or entry.revision != item.head_sha
             ):
                 raise ValueError(
-                    "verification evidence must be a runtime record bound to the reviewed head"
+                    "runtime evidence must match the verification record head and be a runtime record"
                 )
     if report_refs - set(context.evidence_refs):
         raise ValueError("report cites refs outside the bound context")

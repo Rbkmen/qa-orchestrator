@@ -9,11 +9,13 @@ from pydantic import ValidationError
 from qa_orchestrator.benchmark import (
     BenchmarkDataset,
     BenchmarkFailure,
+    BenchmarkQualityGatePolicy,
     BenchmarkResults,
     benchmark_main,
     check_diff_budget,
     compare_speed,
     evaluate_quality_gate,
+    evaluate_quality_policy,
     import_reviewbench,
     import_reviewbench_case_set,
     import_reviewbench_test_set,
@@ -100,6 +102,184 @@ def benchmark_inputs():
         ],
     }
     return dataset, {"runs": [run]}
+
+
+def _score_for_quality_policy(benchmark_inputs):
+    dataset_data, results_data = deepcopy(benchmark_inputs)
+    dataset_data["kind"] = "curated"
+    return score_benchmark(
+        BenchmarkDataset.model_validate(dataset_data),
+        BenchmarkResults.model_validate(results_data),
+    )
+
+
+def _quality_policy(score, **overrides):
+    policy = {
+        "policy_id": "test-quality-policy",
+        "dataset_kind": score["dataset_kind"],
+        "dataset_sha256": score["dataset_sha256"],
+        "min_cases": 1,
+        "min_gold_findings": 1,
+        "min_precision": 0.3,
+        "min_recall": 0.5,
+        "max_missed_high_impact": 0,
+    }
+    return BenchmarkQualityGatePolicy.model_validate({**policy, **overrides})
+
+
+def _quality_result(score, policy):
+    return evaluate_quality_policy(score, policy, configuration_id="baseline")
+
+
+def _speed_fixture(benchmark_inputs, *, include_schedule=True, schedule_order=None):
+    dataset_data, result_data = deepcopy(benchmark_inputs)
+    dataset = BenchmarkDataset.model_validate(dataset_data)
+    runs = []
+    run_order = []
+    queue_waits = {
+        "baseline": (10, 20, 30),
+        "candidate": (40, None, 60),
+    }
+    elapsed = {"baseline": (600, 700, 800), "candidate": (400, 500, 600)}
+    for attempt in range(1, 4):
+        for configuration in ("baseline", "candidate"):
+            run_id = f"{configuration}-{attempt}"
+            run = deepcopy(result_data["runs"][0])
+            run.update(
+                run_id=run_id,
+                configuration_id=configuration,
+                attempt=attempt,
+                elapsed_ms=elapsed[configuration][attempt - 1],
+                queue_wait_ms=queue_waits[configuration][attempt - 1],
+            )
+            runs.append(run)
+            run_order.append(run_id)
+    result_payload = {"schema_version": 3, "runs": runs}
+    if include_schedule:
+        result_payload["schedule"] = {
+            "schedule_id": "schedule-1",
+            "strategy": "interleaved",
+            "run_order": schedule_order or run_order,
+        }
+    results = BenchmarkResults.model_validate(result_payload)
+    return dataset, results
+
+
+def _speed_policy(dataset, results, **overrides):
+    score = score_benchmark(dataset, results)
+    policy = {
+        "policy_id": "test-speed-policy",
+        "dataset_kind": score["dataset_kind"],
+        "dataset_sha256": score["dataset_sha256"],
+        "min_cases": 1,
+        "min_gold_findings": 1,
+        "min_precision": 0.3,
+        "min_recall": 0.5,
+        "max_missed_high_impact": 0,
+        "min_speed_repetitions": 3,
+    }
+    return BenchmarkQualityGatePolicy.model_validate({**policy, **overrides})
+
+
+def test_quality_policy_blocks_missing_or_mismatched_dataset_digest(benchmark_inputs):
+    score = _score_for_quality_policy(benchmark_inputs)
+    policy = _quality_policy(score)
+
+    mismatched_score = deepcopy(score)
+    mismatched_score["dataset_sha256"] = "b" * 64
+    mismatched = _quality_result(mismatched_score, policy)
+    missing_score = deepcopy(score)
+    missing_score.pop("dataset_sha256")
+    missing = _quality_result(missing_score, policy)
+
+    assert mismatched["state"] == "blocked"
+    assert "dataset" in " ".join(mismatched["reasons"])
+    assert missing["state"] == "blocked"
+    assert "dataset" in " ".join(missing["reasons"])
+
+
+def test_quality_policy_separates_threshold_failure_from_blocked(benchmark_inputs):
+    score = _score_for_quality_policy(benchmark_inputs)
+    policy = _quality_policy(score, min_recall=0.6)
+
+    result = _quality_result(score, policy)
+
+    assert result["state"] == "failed"
+    assert any("recall" in reason for reason in result["reasons"])
+
+
+def test_quality_policy_blocks_incomplete_coverage(benchmark_inputs):
+    score = _score_for_quality_policy(benchmark_inputs)
+    aggregate = score["configurations"]["baseline"]
+    aggregate["coverage_complete"] = False
+    aggregate["missing_cases"] = ["case-missing"]
+
+    result = _quality_result(score, _quality_policy(score))
+
+    assert result["state"] == "blocked"
+    assert any("coverage" in reason for reason in result["reasons"])
+
+
+def test_quality_policy_blocks_any_failed_attempt(benchmark_inputs):
+    score = _score_for_quality_policy(benchmark_inputs)
+    score["configurations"]["baseline"]["failed_attempts"] = 1
+
+    result = _quality_result(score, _quality_policy(score))
+
+    assert result["state"] == "blocked"
+    assert any("failed attempt" in reason for reason in result["reasons"])
+
+
+def test_quality_policy_reports_each_threshold_measurement(benchmark_inputs):
+    score = _score_for_quality_policy(benchmark_inputs)
+    policy = _quality_policy(score)
+
+    result = _quality_result(score, policy)
+
+    assert result["state"] == "passed"
+    assert result["observed"]["recall"] == score["configurations"]["baseline"]["recall"]
+    assert result["observed"]["gold_count"] == 2
+    assert result["thresholds"]["min_gold_findings"] == policy.min_gold_findings
+    assert score["configurations"]["baseline"]["gold_count"] == 2
+
+
+def test_quality_policy_blocks_insufficient_gold_coverage(benchmark_inputs):
+    score = _score_for_quality_policy(benchmark_inputs)
+    score["configurations"]["baseline"]["gold_count"] = 0
+
+    result = _quality_result(score, _quality_policy(score, min_gold_findings=1))
+
+    assert result["state"] == "blocked"
+    assert any("gold finding" in reason for reason in result["reasons"])
+
+
+def test_quality_policy_blocks_invalid_configuration_identity(benchmark_inputs):
+    score = _score_for_quality_policy(benchmark_inputs)
+    policy = _quality_policy(score)
+
+    result = evaluate_quality_policy(score, policy, configuration_id=[])
+
+    assert result["state"] == "blocked"
+    assert any("configuration_id" in reason for reason in result["reasons"])
+
+
+def test_score_gold_coverage_is_unique_across_repetitions(benchmark_inputs):
+    dataset_data, results_data = deepcopy(benchmark_inputs)
+    results_data["schema_version"] = 2
+    results_data["runs"][0]["attempt"] = 1
+    repeated_run = deepcopy(results_data["runs"][0])
+    repeated_run["run_id"] = "run-2"
+    repeated_run["attempt"] = 2
+    results_data["runs"].append(repeated_run)
+    score = score_benchmark(
+        BenchmarkDataset.model_validate(dataset_data),
+        BenchmarkResults.model_validate(results_data),
+    )
+
+    aggregate = score["configurations"]["baseline"]
+    assert aggregate["gold_count"] == 2
+    assert aggregate["gold_attempt_count"] == 4
+    assert aggregate["recall"] == 0.5
 
 
 def test_scoring_uses_explicit_verdicts_and_counts_duplicate_noise(benchmark_inputs):
@@ -294,6 +474,102 @@ def test_quality_gate_cli_accepts_required_dataset_identity(tmp_path):
     )
 
     assert result == 0
+
+
+def test_quality_gate_cli_loads_digest_pinned_policy(tmp_path, benchmark_inputs):
+    dataset_data, results_data = benchmark_inputs
+    score = score_benchmark(
+        BenchmarkDataset.model_validate(dataset_data),
+        BenchmarkResults.model_validate(results_data),
+    )
+    score_file = tmp_path / "score.json"
+    policy_file = tmp_path / "policy.json"
+    output = tmp_path / "gate.json"
+    score_file.write_text(json.dumps(score), encoding="utf-8")
+    policy = BenchmarkQualityGatePolicy(
+        policy_id="test",
+        dataset_kind=score["dataset_kind"],
+        dataset_sha256=score["dataset_sha256"],
+        min_cases=1,
+        min_gold_findings=1,
+        min_precision=0,
+        min_recall=0,
+        max_missed_high_impact=0,
+    )
+    policy_file.write_text(policy.model_dump_json(), encoding="utf-8")
+
+    result = benchmark_main(
+        [
+            "quality-gate",
+            "--score",
+            str(score_file),
+            "--configuration",
+            "baseline",
+            "--policy",
+            str(policy_file),
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert json.loads(output.read_text(encoding="utf-8"))["state"] == "passed"
+    assert result == 0
+
+    failing_policy = policy.model_copy(update={"min_recall": 0.9})
+    policy_file.write_text(failing_policy.model_dump_json(), encoding="utf-8")
+    failed_result = benchmark_main(
+        [
+            "quality-gate",
+            "--score",
+            str(score_file),
+            "--configuration",
+            "baseline",
+            "--policy",
+            str(policy_file),
+            "--output",
+            str(output),
+        ]
+    )
+    assert json.loads(output.read_text(encoding="utf-8"))["state"] == "failed"
+    assert failed_result == 1
+
+    policy_file.write_text(policy.model_dump_json(), encoding="utf-8")
+    score["dataset_sha256"] = "b" * 64
+    score_file.write_text(json.dumps(score), encoding="utf-8")
+    blocked_result = benchmark_main(
+        [
+            "quality-gate",
+            "--score",
+            str(score_file),
+            "--configuration",
+            "baseline",
+            "--policy",
+            str(policy_file),
+            "--output",
+            str(output),
+        ]
+    )
+    blocked = json.loads(output.read_text(encoding="utf-8"))
+    assert blocked["state"] == "blocked"
+    assert any("dataset" in reason for reason in blocked["reasons"])
+    assert blocked_result == 1
+
+
+def test_quality_gate_cli_rejects_mixed_policy_and_experimental_thresholds(tmp_path):
+    with pytest.raises(SystemExit):
+        benchmark_main(
+            [
+                "quality-gate",
+                "--score",
+                str(tmp_path / "score.json"),
+                "--configuration",
+                "candidate",
+                "--policy",
+                str(tmp_path / "policy.json"),
+                "--min-recall",
+                "0.9",
+            ]
+        )
 
 
 def test_quality_gate_fails_incomplete_or_unresolved_runs():
@@ -604,6 +880,86 @@ def test_legacy_results_wire_format_omits_task_context_hash(benchmark_inputs):
     serialized = BenchmarkResults.model_validate(payload).model_dump(mode="json")
 
     assert "task_context_sha256" not in serialized["runs"][0]
+
+
+def test_benchmark_schedule_requires_unique_complete_run_order(benchmark_inputs):
+    _, results_data = benchmark_inputs
+    duplicate = deepcopy(results_data)
+    duplicate["schema_version"] = 3
+    duplicate["schedule"] = {
+        "schedule_id": "schedule-1",
+        "strategy": "interleaved",
+        "run_order": ["run-1", "run-1"],
+    }
+    with pytest.raises(ValidationError, match="unique"):
+        BenchmarkResults.model_validate(duplicate)
+
+    incomplete = deepcopy(results_data)
+    incomplete["schema_version"] = 3
+    incomplete["schedule"] = {
+        "schedule_id": "schedule-2",
+        "strategy": "randomized",
+        "run_order": ["other-run"],
+    }
+    with pytest.raises(ValidationError, match="every successful run"):
+        BenchmarkResults.model_validate(incomplete)
+
+
+def test_benchmark_schedule_excludes_failed_attempts(benchmark_inputs):
+    _, results_data = benchmark_inputs
+    results_data["schema_version"] = 3
+    results_data["runs"][0]["attempt"] = 1
+    run = results_data["runs"][0]
+    results_data["failures"] = [
+        {
+            "case_id": run["case_id"],
+            "configuration_id": run["configuration_id"],
+            "model": run["model"],
+            "reasoning": run["reasoning"],
+            "checklist_sha256": run["checklist_sha256"],
+            "host_instructions_sha256": run["host_instructions_sha256"],
+            "attempt": 2,
+            "failure_code": "provider_failed",
+            "error_type": "RuntimeError",
+        }
+    ]
+    results_data["schedule"] = {
+        "schedule_id": "schedule-1",
+        "strategy": "interleaved",
+        "run_order": [run["run_id"]],
+    }
+
+    results = BenchmarkResults.model_validate(results_data)
+
+    assert [item.run_id for item in results.runs] == ["run-1"]
+    assert [item.attempt for item in results.failures] == [2]
+    assert results.schedule.run_order == ("run-1",)
+
+
+def test_benchmark_run_accepts_nonnegative_queue_wait(benchmark_inputs):
+    _, results_data = benchmark_inputs
+    results_data["schema_version"] = 2
+    results_data["runs"][0]["queue_wait_ms"] = 120
+    with pytest.raises(ValidationError, match="schema version 3"):
+        BenchmarkResults.model_validate(results_data)
+
+    results_data["schema_version"] = 3
+
+    results = BenchmarkResults.model_validate(results_data)
+    assert results.runs[0].queue_wait_ms == 120
+
+    results_data["runs"][0]["queue_wait_ms"] = -1
+    with pytest.raises(ValidationError):
+        BenchmarkResults.model_validate(results_data)
+
+
+def test_legacy_results_wire_format_omits_absent_schedule_and_queue_fields(benchmark_inputs):
+    _, results_data = benchmark_inputs
+
+    serialized = BenchmarkResults.model_validate(results_data).model_dump(mode="json")
+
+    assert "schedule" not in serialized
+    assert "queue_wait_ms" not in serialized["runs"][0]
 
 
 def test_diff_budget_cli_writes_a_preflight_artifact(tmp_path):
@@ -1086,9 +1442,169 @@ def test_speed_comparison_requires_same_model_packet_and_complete_repetitions(be
         )
 
 
-def test_speed_comparison_cli_writes_artifact(tmp_path, benchmark_inputs):
-    import json
+def test_speed_comparison_reports_p95_queue_and_schedule(benchmark_inputs):
+    dataset, results = _speed_fixture(benchmark_inputs)
 
+    comparison = compare_speed(
+        dataset,
+        results,
+        baseline_configuration="baseline",
+        candidate_configuration="candidate",
+        repetitions=3,
+    )
+
+    assert comparison["schedule_assessment"] == "interleaved_validated"
+    assert comparison["aggregate"]["candidate_p95_elapsed_ms"] == 600
+    assert comparison["aggregate"]["candidate_elapsed_sample_count"] == 3
+    assert comparison["aggregate"]["candidate_queue_wait_ms"] == {
+        "sample_count": 3,
+        "observed_count": 2,
+        "missing_count": 1,
+        "median": 50,
+        "p95": 60,
+    }
+    assert comparison["cases"][0]["candidate_p95_elapsed_ms"] == 600
+
+
+def test_compare_speed_marks_non_alternating_interleaved_order_invalid(benchmark_inputs):
+    order = [
+        "baseline-1",
+        "baseline-2",
+        "candidate-1",
+        "candidate-2",
+        "baseline-3",
+        "candidate-3",
+    ]
+    dataset, results = _speed_fixture(benchmark_inputs, schedule_order=order)
+
+    comparison = compare_speed(
+        dataset,
+        results,
+        baseline_configuration="baseline",
+        candidate_configuration="candidate",
+        repetitions=3,
+    )
+
+    assert comparison["schedule_assessment"] == "invalid"
+
+
+def test_randomized_speed_schedule_remains_host_declared(benchmark_inputs):
+    from qa_orchestrator.benchmark import evaluate_speed_candidate
+
+    dataset, results = _speed_fixture(benchmark_inputs)
+    results_payload = results.model_dump(mode="json")
+    results_payload["schedule"]["strategy"] = "randomized"
+    randomized_results = BenchmarkResults.model_validate(results_payload)
+    comparison = compare_speed(
+        dataset,
+        randomized_results,
+        baseline_configuration="baseline",
+        candidate_configuration="candidate",
+        repetitions=3,
+    )
+
+    eligibility = evaluate_speed_candidate(
+        comparison, _speed_policy(dataset, randomized_results)
+    )
+
+    assert comparison["schedule_assessment"] == "randomized_host_declared"
+    assert eligibility["state"] == "passed"
+    assert "not independently verified" in eligibility["limitations"][0]
+
+
+def test_speed_candidate_accepts_nonstandard_configuration_ids(benchmark_inputs):
+    from qa_orchestrator.benchmark import evaluate_speed_candidate
+
+    dataset, results = _speed_fixture(benchmark_inputs)
+    results_payload = results.model_dump(mode="json")
+    for run in results_payload["runs"]:
+        run["configuration_id"] = (
+            "control-v1" if run["configuration_id"] == "baseline" else "candidate-v2"
+        )
+    renamed_results = BenchmarkResults.model_validate(results_payload)
+    comparison = compare_speed(
+        dataset,
+        renamed_results,
+        baseline_configuration="control-v1",
+        candidate_configuration="candidate-v2",
+        repetitions=3,
+    )
+
+    eligibility = evaluate_speed_candidate(
+        comparison, _speed_policy(dataset, renamed_results)
+    )
+
+    assert eligibility["state"] == "passed"
+
+
+def test_speed_candidate_fails_when_candidate_quality_policy_fails(benchmark_inputs):
+    from qa_orchestrator.benchmark import evaluate_speed_candidate
+
+    dataset, results = _speed_fixture(benchmark_inputs)
+    comparison = compare_speed(
+        dataset,
+        results,
+        baseline_configuration="baseline",
+        candidate_configuration="candidate",
+        repetitions=3,
+    )
+    comparison["quality_by_configuration"]["candidate"]["recall"] = 0.4
+    policy = _speed_policy(dataset, results)
+
+    result = evaluate_speed_candidate(comparison, policy)
+
+    assert result["state"] == "failed"
+    assert any("candidate" in reason and "recall" in reason for reason in result["reasons"])
+
+
+def test_speed_candidate_is_blocked_without_order_or_minimum_samples(benchmark_inputs):
+    from qa_orchestrator.benchmark import evaluate_speed_candidate
+
+    dataset, unscheduled_results = _speed_fixture(benchmark_inputs, include_schedule=False)
+    unscheduled = compare_speed(
+        dataset,
+        unscheduled_results,
+        baseline_configuration="baseline",
+        candidate_configuration="candidate",
+        repetitions=3,
+    )
+    policy = _speed_policy(dataset, unscheduled_results)
+    assert evaluate_speed_candidate(unscheduled, policy)["state"] == "blocked"
+
+    dataset, scheduled_results = _speed_fixture(benchmark_inputs)
+    scheduled = compare_speed(
+        dataset,
+        scheduled_results,
+        baseline_configuration="baseline",
+        candidate_configuration="candidate",
+        repetitions=3,
+    )
+    insufficient_policy = _speed_policy(
+        dataset, scheduled_results, min_speed_repetitions=4
+    )
+    assert evaluate_speed_candidate(scheduled, insufficient_policy)["state"] == "blocked"
+
+
+def test_speed_candidate_is_blocked_when_baseline_fails_quality_policy(benchmark_inputs):
+    from qa_orchestrator.benchmark import evaluate_speed_candidate
+
+    dataset, results = _speed_fixture(benchmark_inputs)
+    comparison = compare_speed(
+        dataset,
+        results,
+        baseline_configuration="baseline",
+        candidate_configuration="candidate",
+        repetitions=3,
+    )
+    comparison["quality_by_configuration"]["baseline"]["precision"] = 0.2
+
+    result = evaluate_speed_candidate(comparison, _speed_policy(dataset, results))
+
+    assert result["state"] == "blocked"
+    assert any("baseline" in reason for reason in result["reasons"])
+
+
+def _exercise_speed_comparison_cli(tmp_path, benchmark_inputs):
     dataset_data, result_data = benchmark_inputs
     runs = []
     for configuration, times in (("baseline", (100, 110)), ("candidate", (80, 90))):
@@ -1104,8 +1620,39 @@ def test_speed_comparison_cli_writes_artifact(tmp_path, benchmark_inputs):
     dataset_path = tmp_path / "dataset.json"
     results_path = tmp_path / "results.json"
     output_path = tmp_path / "comparison.json"
+    policy_path = tmp_path / "policy.json"
     dataset_path.write_text(json.dumps(dataset_data), encoding="utf-8")
-    results_path.write_text(json.dumps({"schema_version": 2, "runs": runs}), encoding="utf-8")
+    results_payload = {
+        "schema_version": 3,
+        "runs": runs,
+        "schedule": {
+            "schedule_id": "schedule-cli",
+            "strategy": "interleaved",
+            "run_order": [
+                "baseline-1",
+                "candidate-1",
+                "baseline-2",
+                "candidate-2",
+            ],
+        },
+    }
+    results_path.write_text(json.dumps(results_payload), encoding="utf-8")
+    score = score_benchmark(
+        BenchmarkDataset.model_validate(dataset_data),
+        BenchmarkResults.model_validate(results_payload),
+    )
+    policy = BenchmarkQualityGatePolicy(
+        policy_id="cli-speed-policy",
+        dataset_kind=score["dataset_kind"],
+        dataset_sha256=score["dataset_sha256"],
+        min_cases=1,
+        min_gold_findings=1,
+        min_precision=0,
+        min_recall=0,
+        max_missed_high_impact=0,
+        min_speed_repetitions=2,
+    )
+    policy_path.write_text(policy.model_dump_json(), encoding="utf-8")
 
     assert benchmark_main(
         [
@@ -1126,3 +1673,36 @@ def test_speed_comparison_cli_writes_artifact(tmp_path, benchmark_inputs):
     ) == 0
     comparison = json.loads(output_path.read_text(encoding="utf-8"))
     assert comparison["aggregate"]["median_improvement_percent"] == pytest.approx(19.0476190476)
+    assert comparison["eligibility"] == "exploratory"
+
+    assert benchmark_main(
+        [
+            "compare",
+            "--dataset",
+            str(dataset_path),
+            "--results",
+            str(results_path),
+            "--baseline",
+            "baseline",
+            "--candidate",
+            "candidate",
+            "--repetitions",
+            "2",
+            "--quality-policy",
+            str(policy_path),
+            "--output",
+            str(output_path),
+        ]
+    ) == 0
+    gated = json.loads(output_path.read_text(encoding="utf-8"))
+    assert gated["eligibility"]["state"] == "passed"
+
+
+def test_speed_comparison_cli_applies_quality_policy_and_reports_exploratory_without_it(
+    tmp_path, benchmark_inputs
+):
+    _exercise_speed_comparison_cli(tmp_path, benchmark_inputs)
+
+
+def test_speed_comparison_cli_writes_artifact(tmp_path, benchmark_inputs):
+    _exercise_speed_comparison_cli(tmp_path, benchmark_inputs)

@@ -144,7 +144,9 @@ Narrow routing, concurrent groups, the clean-profile synthesis shortcut, checkpo
 
 `execution_attempts` records fresh successful, failed and cancelled calls, queue wait, duration and available phase/token observations. Missing usage remains unknown, never zero. Checkpoint reuse is separate; `model_seconds` includes the CLI/process interval rather than provider-only inference. No automatic price estimate is produced.
 
-Benchmark tools score pinned runs using explicit adjudications and can report precision, eligible recall, high-impact misses, evidence validity, time, usage and repetition stability. They do not launch models or decide matches. Keep reference findings hidden and compare fresh matched runs. Unit tests do not prove review quality or speed. See [Benchmark](docs/BENCHMARK.md) and [Profile Evaluation](docs/PROFILE_EVALUATION.md).
+Benchmark tools score pinned runs using explicit adjudications; they do not launch models or decide matches. The explicit-threshold quality gate is experimental. A named policy pins the dataset kind and digest, case/gold coverage and quality thresholds; `blocked` means its evidence is incomplete or mismatched, while `failed` means measured quality misses a threshold. No approved production policy ships in this repository.
+
+Speed comparisons report p95 and sample counts, keep missing queue measurements unknown, and assess recorded run order. Interleaving must alternate configurations; randomized order is reported as host-declared, not independently verified. `compare` is exploratory without `--quality-policy`; a gated candidate must meet the same pinned policy as its baseline and the policy's minimum repetition count. These tools do not prove adjudicator correctness or fresh independent model execution. See [Benchmark](docs/BENCHMARK.md) and [Profile Evaluation](docs/PROFILE_EVALUATION.md).
 
 ## MCP tools
 
