@@ -49,6 +49,8 @@ def _finding(candidate_id: str, *, severity: str, title: str, change_origin: str
         impact="The caller receives an incorrect result.",
         failure_condition="When input is empty, the changed path returns the wrong value.",
         flip_condition="The bound caller contract proves that value is expected.",
+        expected_behavior="The API returns the contractually specified empty-input result.",
+        actual_behavior="The changed path returns a different result for empty input.",
         next_step="Add a regression test for the boundary input.",
         severity=severity,
         source_profiles=(ReviewAgent.CODE_REVIEWER,),
@@ -347,6 +349,8 @@ def test_renderer_orders_findings_and_includes_traceability():
     assert 'Source locations:** `"src/api.py:12"`' in rendered
     assert "Next step:** Add a regression test" in rendered
     assert "Failure condition:** When input is empty" in rendered
+    assert "Expected behavior:** The API returns the contractually specified empty\\-input result\\." in rendered
+    assert "Source-predicted actual behavior:** The changed path returns a different result for empty input\\." in rendered
     assert "Counterevidence that would change the conclusion" in rendered
     assert "## Coverage gaps" in rendered
     assert "## Unverified" in rendered
@@ -642,6 +646,7 @@ def test_renderer_maps_host_coverage_ledger_to_bound_changed_paths(bound_review_
                 ProfileChangedPathCoverage(
                     profile=ReviewAgent.CODE_REVIEWER,
                     context_selection_recorded=True,
+                    executor_input_receipt_verified=True,
                     source_excerpt_included_path_indexes=(0,),
                     reviewer_attested_path_indexes=(0,),
                     execution_metrics=ProfileExecutionMetrics(
@@ -688,6 +693,7 @@ def test_renderer_maps_host_coverage_ledger_to_bound_changed_paths(bound_review_
     assert 'Source text explicitly marked unavailable: `"src/binary.dat"`' in rendered
     assert 'Not explicitly attested as reviewed: `"src/binary.dat"`' in rendered
     assert 'Executor-attested as reviewed: `"src/service.py"`' in rendered
+    assert "executor input receipt verified" in rendered
     assert 'Paths with included text excerpts: `"src/service.py"`' in rendered
     assert "## Profile execution" in rendered
     assert "elapsed 3.00s; attempts 1; input tokens 1200; output tokens 240" in rendered
@@ -764,8 +770,11 @@ def test_report_marks_missing_input_manifest_unknown(bound_review_context):
         summary="Reviewed the API change.",
         profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
     )
+    legacy_context = ReviewContext.model_validate(
+        {**bound_review_context.model_dump(), "input_manifest": None}
+    )
 
-    rendered = render_final_report(report, context=bound_review_context)
+    rendered = render_final_report(report, context=legacy_context)
 
     assert "Input completeness: unknown" in rendered
 
@@ -791,6 +800,40 @@ def test_report_lists_manifest_criterion_missing_from_registry(bound_review_cont
 
     assert summary["missing_criterion_refs"] == ["R-2"]
     assert summary["status"] == "partial"
+
+
+def test_manifest_without_registered_requirement_is_partial(bound_review_context):
+    context_with_requirement = ReviewContext.model_validate(
+        {
+            **bound_review_context.model_dump(),
+            "evidence_refs": ("R1",),
+            "evidence_registry": (
+                EvidenceRecord(
+                    evidence_ref="R1",
+                    kind="requirement",
+                    locator="TASK-123#acceptance-1",
+                    sha256="5" * 64,
+                ),
+            ),
+        }
+    )
+    context = _context_with_input_sources(
+        context_with_requirement,
+        (_input_source("JIRA-1", criterion_refs=()),),
+    )
+
+    summary = evidence_module.input_manifest_completeness(context)
+    rendered = render_final_report(
+        FinalReviewReport(
+            summary="Reviewed the API change.",
+            profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        ),
+        context=context,
+    )
+
+    assert summary["status"] == "partial"
+    assert summary["unlisted_criterion_refs"] == ["R1"]
+    assert "**Unlisted registered criterion refs:** R1" in rendered
 
 
 def test_empty_criteria_can_be_complete_after_complete_extraction(bound_review_context):

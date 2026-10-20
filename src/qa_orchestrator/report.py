@@ -8,14 +8,15 @@ from typing import Literal
 
 from qa_orchestrator.contracts import (
     FinalReviewReport,
-    ImpactCoverageLedger,
     ReviewContext,
     ReviewVerificationRecord,
     review_changed_paths_sha256,
 )
 from qa_orchestrator.evidence import (
     complete_criterion_coverage,
+    impact_coverage_status,
     input_manifest_completeness,
+    validate_impact_coverage_context,
     validate_registered_locations,
 )
 
@@ -94,25 +95,6 @@ def _coverage_path_label(
     if context is not None and len(context.changed_files) == ledger_path_count:
         return _code(context.changed_files[index])
     return f"index {index}"
-
-
-def impact_coverage_status(ledger: ImpactCoverageLedger | None) -> str:
-    """Return closure status only for the candidates in a recorded bounded scan."""
-    if ledger is None:
-        return "unknown"
-    if (
-        ledger.discovery_state == "partial"
-        or ledger.omissions
-        or any(limit.reached or limit.uninspected for limit in ledger.limits)
-        or any(
-            candidate.disposition in {"unresolved", "not_checked"}
-            for candidate in ledger.candidates
-        )
-    ):
-        return "partial"
-    if ledger.discovery_state == "unknown":
-        return "unknown"
-    return "closed"
 
 
 def _render_coverage_ledger(
@@ -198,6 +180,8 @@ def _render_coverage_ledger(
         lines.append(
             f"- **{_text(profile.profile.value)}:** context selection "
             f"{'recorded' if profile.context_selection_recorded else 'not recorded'}; "
+            f"executor input receipt "
+            f"{'verified' if profile.executor_input_receipt_verified else 'unverified'}; "
             f"reviewer-attested {len(attested)}/{ledger.changed_path_count} paths."
         )
         if attested:
@@ -215,6 +199,11 @@ def _render_coverage_ledger(
             if available:
                 lines.append(
                     "  - Source-excerpt delivery cannot be confirmed because no selection receipt was recorded."
+                )
+        elif not profile.executor_input_receipt_verified:
+            if available:
+                lines.append(
+                    "  - Source-excerpt delivery cannot be confirmed because the executor input receipt is missing or does not match the selection."
                 )
         else:
             lines.append(
@@ -554,6 +543,13 @@ def render_final_report(
         lines.append(f"- **Unregistered declared criterion refs:** {missing_refs}")
     else:
         lines.append("- **Unregistered declared criterion refs:** none")
+    if input_summary["unlisted_criterion_refs"]:
+        unlisted_refs = ", ".join(
+            _text(reference) for reference in input_summary["unlisted_criterion_refs"]
+        )
+        lines.append(f"- **Unlisted registered criterion refs:** {unlisted_refs}")
+    else:
+        lines.append("- **Unlisted registered criterion refs:** none")
     lines.append("")
     lines.extend(("## Findings", ""))
     findings = sorted(
@@ -571,6 +567,8 @@ def render_final_report(
                 f"- **Affected area:** {_text(finding.affected_area) if finding.affected_area else 'не указана'}",
                 f"- **Change origin:** {_ORIGIN_LABELS[finding.change_origin]}",
                 f"- **Problem:** {_text(finding.description)}",
+                f"- **Expected behavior:** {_text(finding.expected_behavior) if finding.expected_behavior else 'not stated'}",
+                f"- **Source-predicted actual behavior:** {_text(finding.actual_behavior) if finding.actual_behavior else 'not stated'}",
                 f"- **Failure condition:** {_text(finding.failure_condition) if finding.failure_condition else 'не указано'}",
                 f"- **Counterevidence that would change the conclusion:** {_text(finding.flip_condition) if finding.flip_condition else 'не указано'}",
                 f"- **Evidence refs:** {_refs(finding.evidence_refs, context)}",
@@ -664,6 +662,8 @@ def render_final_report(
                 lines.extend(
                     (
                         f"- **Original description:** {_text(candidate.description)}",
+                        f"- **Expected behavior:** {_text(candidate.expected_behavior) if candidate.expected_behavior else 'not stated'}",
+                        f"- **Source-predicted actual behavior:** {_text(candidate.actual_behavior) if candidate.actual_behavior else 'not stated'}",
                         f"- **Failure condition:** {_text(candidate.failure_condition) if candidate.failure_condition else 'не указано'}",
                         f"- **Counterevidence that would change the conclusion:** {_text(candidate.flip_condition) if candidate.flip_condition else 'не указано'}",
                         f"- **Original evidence refs:** {_refs(candidate.evidence_refs, context)}",
@@ -717,23 +717,7 @@ def render_final_report(
 
 def validate_final_report_context(report: FinalReviewReport, context: ReviewContext) -> None:
     report = complete_criterion_coverage(context, report)
-    impact_ledger = report.impact_coverage
-    if impact_ledger is not None:
-        if (
-            impact_ledger.head_sha != context.head_sha
-            or impact_ledger.changed_paths_sha256
-            != review_changed_paths_sha256(context.changed_files)
-            or context.neighbor_discovery_sha256 is None
-            or impact_ledger.discovery_sha256 != context.neighbor_discovery_sha256
-        ):
-            raise ValueError("impact coverage ledger does not match the bound review")
-        impact_refs = {
-            ref
-            for candidate in impact_ledger.candidates
-            for ref in candidate.evidence_refs
-        }
-        if impact_refs - set(context.evidence_refs):
-            raise ValueError("impact coverage cites refs outside the bound context")
+    validate_impact_coverage_context(report, context)
     ledger = report.coverage_ledger
     if ledger is not None:
         if (

@@ -1,13 +1,16 @@
 import hashlib
 import json
 import subprocess
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
 
 from qa_orchestrator.contracts import (
     EvidenceRecord,
+    ProfileAttemptMetrics,
     ProfileContextSelection,
+    ProfileExecutionMetrics,
     ProfileReviewReport,
     ReviewAgent,
     ReviewContext,
@@ -19,6 +22,7 @@ from qa_orchestrator.evidence import (
     discover_neighbor_evidence,
     evidence_main,
     neighbor_discovery_sha256,
+    profile_input_receipt_verified,
     register_evidence,
     validate_registered_locations,
     verify_evidence,
@@ -60,6 +64,21 @@ def pinned_evidence(tmp_path):
         evidence_packet_sha256=hashlib.sha256(packet.read_bytes()).hexdigest(),
         changed_files=("src/api.py",),
         evidence_refs=("S1", "D1"),
+        input_manifest={
+            "sources": (
+                {
+                    "source_id": "MR-1",
+                    "kind": "merge_request",
+                    "locator": "https://github.com/example/repo/pull/1",
+                    "required": True,
+                    "retrieval_status": "complete",
+                    "pagination_status": "not_applicable",
+                    "extraction_status": "complete",
+                    "criterion_refs": (),
+                },
+            )
+        },
+        neighbor_discovery_sha256="4" * 64,
     )
     definitions = [
         {
@@ -86,7 +105,45 @@ def candidate(line=2, evidence_ref="S1"):
         source_locations=({"path": "src/api.py", "start_line": line},),
         failure_condition="The changed branch returns the wrong API value.",
         flip_condition="The pinned contract or caller proves the returned value is expected.",
+        expected_behavior="The API returns the value promised by the pinned contract.",
+        actual_behavior="Under the stated input, the changed branch returns a different value.",
     )
+
+
+def test_profile_input_receipt_requires_matching_packet_and_written_prompt(
+    bound_review_context,
+    make_profile_review_report,
+):
+    report = make_profile_review_report(ReviewAgent.CODE_REVIEWER)
+    assert profile_input_receipt_verified(bound_review_context, report)
+
+    metrics = report.execution_metrics
+    attempt = metrics.attempts[-1]
+    prepared_only = report.model_copy(
+        update={
+            "execution_metrics": metrics.model_copy(
+                update={
+                    "attempts": (
+                        attempt.model_copy(update={"prompt_write_status": "prepared"}),
+                    )
+                }
+            )
+        }
+    )
+    wrong_packet = report.model_copy(
+        update={
+            "execution_metrics": metrics.model_copy(
+                update={
+                    "attempts": (
+                        attempt.model_copy(update={"selected_packet_sha256": "a" * 64}),
+                    )
+                }
+            )
+        }
+    )
+
+    assert not profile_input_receipt_verified(bound_review_context, prepared_only)
+    assert not profile_input_receipt_verified(bound_review_context, wrong_packet)
 
 
 def test_legacy_source_record_keeps_its_wire_shape(pinned_evidence):
@@ -216,6 +273,29 @@ def test_legacy_text_source_session_can_finish_with_its_existing_location(
                 scope="Pinned head source review",
                 finding_candidates=(legacy_candidate,),
                 reviewed_changed_paths=("src/api.py",),
+                    execution_metrics=ProfileExecutionMetrics(
+                        started_at=datetime(2026, 10, 20, 12, tzinfo=UTC),
+                        completed_at=datetime(2026, 10, 20, 12, 0, 1, tzinfo=UTC),
+                        attempts=(
+                            ProfileAttemptMetrics(
+                                profile=ReviewAgent.CODE_REVIEWER,
+                                attempt=1,
+                                outcome="completed",
+                                review_head_sha=legacy.head_sha,
+                                review_diff_sha256=legacy.diff_sha256,
+                                started_at=datetime(2026, 10, 20, 12, tzinfo=UTC),
+                                completed_at=datetime(2026, 10, 20, 12, 0, 1, tzinfo=UTC),
+                                queue_seconds=0,
+                                executor_seconds=1,
+                                submitted_prompt_sha256="8" * 64,
+                                prompt_write_status="written",
+                                source_packet_sha256=legacy.evidence_packet_sha256,
+                                selected_packet_sha256="7" * 64,
+                                included_evidence_refs=legacy.evidence_refs,
+                                included_source_paths=(),
+                            ),
+                        ),
+                    ),
             ),
         ),
         risk_signals=DeepReviewSignals(),

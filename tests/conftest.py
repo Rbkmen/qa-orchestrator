@@ -1,10 +1,14 @@
 """Keep tests independent of the user's model policy and recovery store."""
 
+from datetime import UTC, datetime
+
 import pytest
 
 from qa_orchestrator.contracts import (
     FinalReviewFinding,
     FinalReviewReport,
+    ImpactCoverageLedger,
+    ProfileAttemptMetrics,
     ProfileContextSelection,
     ProfileExecutionMetrics,
     ProfileReviewReport,
@@ -14,6 +18,7 @@ from qa_orchestrator.contracts import (
     ReviewFindingCandidate,
     ReviewFindingLocation,
     ReviewFindingSource,
+    review_changed_paths_sha256,
 )
 
 
@@ -39,6 +44,21 @@ def bound_review_context():
         evidence_packet_sha256="3" * 64,
         changed_files=("src/service.py",),
         evidence_refs=("E1", "E2"),
+        input_manifest={
+            "sources": (
+                {
+                    "source_id": "MR-123",
+                    "kind": "merge_request",
+                    "locator": "https://gitlab.example/group/service/-/merge_requests/123",
+                    "required": True,
+                    "retrieval_status": "complete",
+                    "pagination_status": "not_applicable",
+                    "extraction_status": "complete",
+                    "criterion_refs": (),
+                },
+            )
+        },
+        neighbor_discovery_sha256="4" * 64,
     )
 
 
@@ -56,6 +76,8 @@ def review_finding_candidate():
         impact="The caller can receive an incorrect result.",
         failure_condition="A repeated request reaches the write operation twice.",
         flip_condition="A source-backed idempotency guard prevents the second write.",
+        expected_behavior="One logical request produces at most one write.",
+        actual_behavior="Under a retry, the changed path reaches the write operation twice.",
     )
 
 
@@ -67,6 +89,7 @@ def make_profile_review_report(bound_review_context):
         context_selection=None,
         omit_context_selection=False,
         reviewed_changed_paths=None,
+        omit_input_receipt=False,
         findings=(),
         coverage_gaps=(),
         unverified=(),
@@ -81,6 +104,45 @@ def make_profile_review_report(bound_review_context):
                 changed_files_count=len(bound_review_context.changed_files),
                 max_bytes=1024,
                 selected_bytes=512,
+            )
+        if execution_metrics is None and context_selection is not None and not omit_input_receipt:
+            attempt_time = datetime(2026, 10, 20, 12, tzinfo=UTC)
+            included_refs = set(context_selection.included_refs)
+            included_source_paths = tuple(
+                sorted(
+                    {
+                        entry.path
+                        for entry in bound_review_context.evidence_registry
+                        if entry.kind == "source"
+                        and entry.revision == bound_review_context.head_sha
+                        and entry.source_text_available is True
+                        and entry.path in bound_review_context.changed_files
+                        and entry.evidence_ref in included_refs
+                    }
+                )
+            )
+            attempt = ProfileAttemptMetrics(
+                profile=profile,
+                attempt=1,
+                outcome="completed",
+                review_head_sha=bound_review_context.head_sha,
+                review_diff_sha256=bound_review_context.diff_sha256,
+                started_at=attempt_time,
+                completed_at=attempt_time,
+                queue_seconds=0,
+                executor_seconds=0,
+                submitted_prompt_sha256="9" * 64,
+                prompt_write_status="written",
+                source_packet_sha256=context_selection.source_packet_sha256,
+                selected_packet_sha256=context_selection.selected_packet_sha256,
+                included_evidence_refs=context_selection.included_refs,
+                omitted_evidence_refs=context_selection.omitted_refs,
+                included_source_paths=included_source_paths,
+            )
+            execution_metrics = ProfileExecutionMetrics(
+                started_at=attempt_time,
+                completed_at=attempt_time,
+                attempts=(attempt,),
             )
         return ProfileReviewReport(
             profile=profile,
@@ -102,7 +164,34 @@ def make_profile_review_report(bound_review_context):
 
 
 @pytest.fixture
-def make_final_review_report(bound_review_context):
+def make_impact_coverage():
+    def make(context):
+        if context.neighbor_discovery_sha256 is None:
+            return None
+        return ImpactCoverageLedger(
+            head_sha=context.head_sha,
+            changed_paths_sha256=review_changed_paths_sha256(context.changed_files),
+            discovery_sha256=context.neighbor_discovery_sha256,
+            discovery_method="test_fixture",
+            discovery_version=1,
+            discovery_state="ready",
+            limits=(
+                {
+                    "name": "candidate_limit",
+                    "value": 200,
+                    "reached": False,
+                    "uninspected": False,
+                },
+            ),
+            candidates=(),
+            omissions=(),
+        )
+
+    return make
+
+
+@pytest.fixture
+def make_final_review_report(bound_review_context, make_impact_coverage):
     from qa_orchestrator.refutation import make_refutation_check
 
     def make_finding(finding, sources):
@@ -150,6 +239,7 @@ def make_final_review_report(bound_review_context):
             finding_candidates=final_findings,
             coverage_gaps=tuple(coverage_gaps),
             unverified=tuple(unverified),
+            impact_coverage=make_impact_coverage(review_context),
             candidate_decisions=tuple(decisions),
         )
 

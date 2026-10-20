@@ -6,7 +6,13 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from qa_orchestrator.contracts import ProfileExecutionMetrics, ReviewAgent, ReviewBundle
+from qa_orchestrator.contracts import (
+    ProfileAttemptMetrics,
+    ProfileContextSelection,
+    ProfileExecutionMetrics,
+    ReviewAgent,
+    ReviewBundle,
+)
 from qa_orchestrator.model_policy import ModelProvider, ModelSelection
 from qa_orchestrator.orchestration import (
     DeepReviewSignals,
@@ -77,11 +83,41 @@ def test_completed_review_artifacts_survive_restart_until_normal_expiry(
         status="completed",
         selected_profile=ReviewAgent.CODE_REVIEWER,
     )
+    attempt_started = clock()
+    attempt_completed = clock() + timedelta(seconds=4)
+    selection = ProfileContextSelection(
+        source_packet_sha256=bound_review_context.evidence_packet_sha256,
+        selected_packet_sha256="8" * 64,
+        included_refs=bound_review_context.evidence_refs,
+        changed_files_count=len(bound_review_context.changed_files),
+        max_bytes=1024,
+        selected_bytes=512,
+    )
     execution_metrics = ProfileExecutionMetrics(
-        started_at=clock(),
-        completed_at=clock() + timedelta(seconds=4),
+        started_at=attempt_started,
+        completed_at=attempt_completed,
         input_tokens=900,
         output_tokens=160,
+        attempts=(
+            ProfileAttemptMetrics(
+                profile=ReviewAgent.CODE_REVIEWER,
+                attempt=1,
+                outcome="completed",
+                review_head_sha=bound_review_context.head_sha,
+                review_diff_sha256=bound_review_context.diff_sha256,
+                started_at=attempt_started,
+                completed_at=attempt_completed,
+                queue_seconds=0,
+                executor_seconds=4,
+                submitted_prompt_sha256="9" * 64,
+                prompt_write_status="written",
+                source_packet_sha256=bound_review_context.evidence_packet_sha256,
+                selected_packet_sha256=selection.selected_packet_sha256,
+                included_evidence_refs=selection.included_refs,
+                omitted_evidence_refs=selection.omitted_refs,
+                included_source_paths=(),
+            ),
+        ),
     )
     reviewed = first_process.advance(
         run_id=started.run_id,
@@ -91,6 +127,7 @@ def test_completed_review_artifacts_survive_restart_until_normal_expiry(
         profile_reports=[
             make_profile_review_report(
                 ReviewAgent.CODE_REVIEWER,
+                context_selection=selection,
                 findings=(review_finding_candidate,),
                 execution_metrics=execution_metrics,
             )

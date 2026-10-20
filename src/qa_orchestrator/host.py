@@ -174,22 +174,30 @@ class HostReviewAdapter:
                                 }
                             )
                         )
-                        if observation.selected_packet_sha256 is not None and (
+                        receipt_present = any(
+                            (
+                                observation.submitted_prompt_sha256 is not None,
+                                observation.prompt_write_status is not None,
+                                observation.source_packet_sha256 is not None,
+                                observation.selected_packet_sha256 is not None,
+                                bool(observation.included_evidence_refs),
+                                bool(observation.omitted_evidence_refs),
+                                bool(observation.included_source_paths),
+                            )
+                        )
+                        if receipt_present and (
                             observation.source_packet_sha256 != selection.source_packet_sha256
                             or observation.selected_packet_sha256
                             != selection.selected_packet_sha256
                             or observation.included_evidence_refs != selection.included_refs
                             or observation.omitted_evidence_refs != selection.omitted_refs
                             or observation.included_source_paths != selected_paths
+                            or observation.prompt_write_status != "written"
+                            or observation.submitted_prompt_sha256 is None
                         ):
                             raise ValueError(
                                 "executor input receipt does not match report context selection"
                             )
-                        observation.source_packet_sha256 = selection.source_packet_sha256
-                        observation.selected_packet_sha256 = selection.selected_packet_sha256
-                        observation.included_evidence_refs = selection.included_refs
-                        observation.omitted_evidence_refs = selection.omitted_refs
-                        observation.included_source_paths = selected_paths
                     usage = report.execution_metrics
                     if usage:
                         for name in ("input_tokens", "output_tokens"):

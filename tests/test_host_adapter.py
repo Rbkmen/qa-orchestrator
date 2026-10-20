@@ -94,12 +94,38 @@ def test_host_rejects_attestation_for_path_outside_bound_change(bound_review_con
         HostReviewAdapter._with_changed_path_coverage_gaps(bound_review_context, invalid)
 
 
-async def test_finish_review_exports_markdown_with_the_accepted_outcome(host_session, tmp_path):
+async def test_finish_review_exports_markdown_with_the_accepted_outcome(
+    host_session,
+    make_impact_coverage,
+    tmp_path,
+):
     service, run_id = host_session(profile="python_reviewer")
     adapter = HostReviewAdapter(service)
 
     async def execute(job):
-        return report(job.profile, job.session.review_context)
+        result = report(job.profile, job.session.review_context)
+        selection = result.context_selection
+        observation = job.observation
+        observation.submitted_prompt_sha256 = "8" * 64
+        observation.prompt_write_status = "written"
+        observation.source_packet_sha256 = selection.source_packet_sha256
+        observation.selected_packet_sha256 = selection.selected_packet_sha256
+        observation.included_evidence_refs = selection.included_refs
+        observation.omitted_evidence_refs = selection.omitted_refs
+        observation.included_source_paths = tuple(
+            sorted(
+                {
+                    entry.path
+                    for entry in job.session.review_context.evidence_registry
+                    if entry.kind == "source"
+                    and entry.revision == job.session.review_context.head_sha
+                    and entry.source_text_available is True
+                    and entry.path in job.session.review_context.changed_files
+                    and entry.evidence_ref in selection.included_refs
+                }
+            )
+        )
+        return result
 
     await adapter.run_primary_review(run_id, execute, lambda _: DeepReviewSignals())
     current = service.get_qa_orchestration(run_id)
@@ -108,6 +134,7 @@ async def test_finish_review_exports_markdown_with_the_accepted_outcome(host_ses
     final_report = FinalReviewReport(
         summary="Review completed against the pinned context.",
         profiles_reviewed=(ReviewAgent.PYTHON_REVIEWER,),
+        impact_coverage=make_impact_coverage(current.review_context),
         verification_records=(
             ReviewVerificationRecord(
                 verification_id="V-01",
@@ -177,8 +204,8 @@ async def test_attempt_ledger_preserves_failed_usage_and_sums_known_retries(host
     context = service.get_qa_orchestration(run_id).review_context
     assert result.execution_attempts[0].review_head_sha == context.head_sha
     assert result.execution_attempts[0].review_diff_sha256 == context.diff_sha256
-    assert result.execution_attempts[1].included_evidence_refs == context.evidence_refs
-    assert result.execution_attempts[1].selected_packet_sha256 == context.evidence_packet_sha256
+    assert result.execution_attempts[1].included_evidence_refs == ()
+    assert result.execution_attempts[1].selected_packet_sha256 is None
     assert result.execution_attempts[1].prompt_write_status is None
     assert "secret" not in str(result.execution_attempts)
 

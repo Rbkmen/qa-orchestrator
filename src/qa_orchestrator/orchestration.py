@@ -34,7 +34,10 @@ from qa_orchestrator.contracts import (
 )
 from qa_orchestrator.evidence import (
     complete_criterion_coverage,
+    profile_input_receipt_verified,
+    review_completion_gaps,
     validate_context_selection,
+    validate_impact_coverage_context,
     validate_registered_locations,
 )
 from qa_orchestrator.model_policy import (
@@ -433,7 +436,14 @@ def _build_review_coverage_ledger(
     for profile in profiles:
         report = reports_by_profile.get(profile)
         selection = report.context_selection if report is not None else None
-        included_refs = set(selection.included_refs) if selection is not None else set()
+        input_receipt_verified = (
+            profile_input_receipt_verified(context, report) if report is not None else False
+        )
+        included_refs = (
+            set(selection.included_refs)
+            if selection is not None and input_receipt_verified
+            else set()
+        )
         included_indexes = tuple(
             index
             for index, path in enumerate(context.changed_files)
@@ -449,6 +459,7 @@ def _build_review_coverage_ledger(
             ProfileChangedPathCoverage(
                 profile=profile,
                 context_selection_recorded=selection is not None,
+                executor_input_receipt_verified=input_receipt_verified,
                 source_excerpt_included_path_indexes=included_indexes,
                 reviewer_attested_path_indexes=attested_indexes,
                 execution_metrics=report.execution_metrics if report is not None else None,
@@ -534,6 +545,10 @@ class QaOrchestrationSession(BaseModel):
     selected_bundle: ReviewBundle | None = None
     selected_profile: ReviewAgent | None = None
     review_context: ReviewContext | None = None
+    review_completion_mode: Literal["legacy", "strict"] = Field(
+        default="legacy",
+        description="Legacy preserves restored sessions; new bound sessions require complete inputs and impact coverage.",
+    )
     review_profiles: list[ReviewAgent] = Field(default_factory=list)
     current_profile: ReviewAgent | None = None
     completed_profiles: list[ReviewAgent] = Field(default_factory=list)
@@ -603,6 +618,8 @@ class QaOrchestrationSession(BaseModel):
             raise ValueError("complete QA audit trace cannot be empty")
         if self.review_context is None and (self.profile_reports or self.final_review_report):
             raise ValueError("review artifacts require a bound review context")
+        if self.review_completion_mode == "strict" and self.review_context is None:
+            raise ValueError("strict review completion requires a bound review context")
         if self.profile_reports and tuple(report.profile for report in self.profile_reports) != tuple(
             self.completed_profiles
         ):
@@ -618,6 +635,18 @@ class QaOrchestrationSession(BaseModel):
             and self.final_review_report is None
         ):
             raise ValueError("completed review-bound sessions require a final review report")
+        if (
+            self.status is OrchestrationStatus.COMPLETED
+            and self.review_completion_mode == "strict"
+            and self.review_context is not None
+            and self.final_review_report is not None
+        ):
+            gaps = review_completion_gaps(self.review_context, self.final_review_report)
+            if gaps:
+                raise ValueError(
+                    "strict completed session has incomplete review coverage: "
+                    + "; ".join(gaps)
+                )
         if (
             _review_artifact_payload_size(self.profile_reports, self.final_review_report)
             > _MAX_SESSION_REVIEW_ARTIFACT_BYTES
@@ -876,6 +905,9 @@ class QaOrchestrator:
                     )
                 ),
                 review_context=validated_review_context,
+                review_completion_mode=(
+                    "strict" if validated_review_context is not None else "legacy"
+                ),
                 model_policy=self._model_policies[OrchestrationStep.TRIAGE],
                 next_action=_NEXT_ACTIONS[OrchestrationStep.TRIAGE],
                 expires_at=now + timedelta(seconds=self._ttl_seconds),
@@ -1214,15 +1246,16 @@ class QaOrchestrator:
                     profiles_without_receipts = [
                         profile.profile.value
                         for profile in coverage_ledger.profiles
-                        if not profile.context_selection_recorded
+                        if not profile.executor_input_receipt_verified
                     ]
                     if profiles_without_receipts:
                         missing_profiles = ", ".join(profiles_without_receipts[:10])
                         if len(profiles_without_receipts) > 10:
                             missing_profiles += ", ..."
                         raise OrchestrationError(
-                            "completed review requires a host context-selection receipt for every "
-                            f"profile; missing: {missing_profiles}"
+                            "completed review requires a matching executor input receipt with "
+                            "completed CLI stdin delivery for every profile; missing or "
+                            f"unverified: {missing_profiles}"
                         )
                     review_profiles = [
                         profile
@@ -1436,9 +1469,11 @@ class QaOrchestrator:
                         if (finding.severity is None or not finding.source_locations
                             or not finding.affected_area or not finding.affected_area.strip()
                             or not finding.impact or not finding.impact.strip()
-                            or not finding.failure_condition or not finding.flip_condition):
+                            or not finding.failure_condition or not finding.flip_condition
+                            or not finding.expected_behavior or not finding.actual_behavior):
                             raise OrchestrationError(
-                                "confirmed findings require severity, failure/flip conditions, source locations, affected area, and impact"
+                                "confirmed findings require severity, expected/actual behavior, "
+                                "failure/flip conditions, source locations, affected area, and impact"
                             )
 
             finish_sha256 = _stable_json_sha256(
@@ -1500,6 +1535,28 @@ class QaOrchestrator:
                 )
             if validated_report is not None and session.review_context is None:
                 raise OrchestrationError("final review report requires a bound review context")
+            if validated_report is not None:
+                try:
+                    validate_impact_coverage_context(
+                        validated_report,
+                        session.review_context,
+                    )
+                except ValueError as exc:
+                    raise OrchestrationError(str(exc)) from exc
+            if (
+                final_status is OrchestrationStatus.COMPLETED
+                and session.review_completion_mode == "strict"
+            ):
+                if session.review_context is None or validated_report is None:
+                    raise OrchestrationError(
+                        "strict completed reviews require a bound context and final report"
+                    )
+                gaps = review_completion_gaps(session.review_context, validated_report)
+                if gaps:
+                    raise OrchestrationError(
+                        "completed review requires complete input and impact coverage: "
+                        + "; ".join(gaps)
+                    )
 
             updated = self._refresh_expiry(
                 session.model_copy(
@@ -1625,11 +1682,15 @@ class QaOrchestrator:
                             "profile report attests changed paths outside the bound context"
                         )
                     if any(
-                        not candidate.failure_condition or not candidate.flip_condition
+                        not candidate.failure_condition
+                        or not candidate.flip_condition
+                        or not candidate.expected_behavior
+                        or not candidate.actual_behavior
                         for candidate in report.finding_candidates
                     ):
                         raise OrchestrationError(
-                            "defect candidates require failure_condition and flip_condition"
+                            "defect candidates require failure_condition and flip_condition; "
+                            "expected_behavior and actual_behavior are also required"
                         )
                     report_refs = {
                         reference

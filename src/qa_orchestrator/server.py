@@ -482,7 +482,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
                     "Required when its outcome is completed; each finding cites registered evidence refs "
                     "and the original profile-local candidate IDs and evidence that support it. The report "
                     "must include one candidate_decisions entry per submitted candidate. Every defect "
-                    "candidate needs failure_condition and flip_condition, and every outcome needs a "
+                    "candidate needs failure_condition, flip_condition, expected_behavior, and "
+                    "actual_behavior (source-predicted, not runtime proof), and every outcome needs a "
                     "bound refutation assessment: not_refuted for confirmed/duplicate, refuted for "
                     "rejected, unverified for unverified. Rejected/unverified outcomes preserve the original "
                     "candidate snapshot. Confirmed findings "
@@ -490,7 +491,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
                     "verification_records capture test/CI/runtime scenarios, results, environment, run "
                     "reference, reason, and exact reviewed head SHA; these remain host-supplied and "
                     "are not independently authenticated by the orchestrator. The report "
-                    "is limited to 72 KiB; profile plus final reports are limited to 288 KiB per session."
+                    "is limited to 80 KiB; profile plus final reports are limited to 288 KiB per session."
                 )
             ),
         ] = None,

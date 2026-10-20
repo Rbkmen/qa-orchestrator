@@ -346,6 +346,59 @@ def test_orchestration_session_rejects_disabled_ownership_flags():
         )
 
 
+def test_legacy_completed_session_without_completion_mode_loads_as_legacy(
+    bound_review_context,
+):
+    legacy_context = ReviewContext.model_validate(
+        {
+            **bound_review_context.model_dump(),
+            "input_manifest": None,
+            "neighbor_discovery_sha256": None,
+        }
+    )
+    session = QaOrchestrationSession(
+        run_id="qar-0123456789abcdef0123456789abcdef",
+        task_type="ordinary_review",
+        status=OrchestrationStatus.COMPLETED,
+        current_step=OrchestrationStep.AWAITING_HOST_OUTCOME,
+        review_context=legacy_context,
+        completed_profiles=[ReviewAgent.CODE_REVIEWER],
+        final_review_report=FinalReviewReport(
+            summary="Review completed.",
+            profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        ),
+        next_action="Review completed.",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    payload = session.model_dump(mode="json")
+    payload.pop("review_completion_mode", None)
+
+    loaded = QaOrchestrationSession.model_validate(payload)
+
+    assert loaded.review_completion_mode == "legacy"
+    assert loaded.status is OrchestrationStatus.COMPLETED
+
+
+def test_persisted_strict_completed_session_rejects_missing_scope_coverage(
+    bound_review_context,
+):
+    with pytest.raises(ValidationError, match="strict completed session"):
+        QaOrchestrationSession(
+            run_id="qar-0123456789abcdef0123456789abcdef",
+            task_type="ordinary_review",
+            status=OrchestrationStatus.COMPLETED,
+            current_step=OrchestrationStep.AWAITING_HOST_OUTCOME,
+            review_context=bound_review_context,
+            review_completion_mode="strict",
+            completed_profiles=[ReviewAgent.CODE_REVIEWER],
+            final_review_report=FinalReviewReport(
+                summary="Review completed.",
+                profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+            ),
+            next_action="Review completed.",
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+
 def test_review_context_requires_full_unique_review_identity(bound_review_context):
     assert bound_review_context.base_sha == "0" * 40
     assert bound_review_context.diff_sha256 == "2" * 64
@@ -426,7 +479,14 @@ def test_review_input_manifest_rejects_duplicate_source_ids_and_criteria_refs(
 
 
 def test_legacy_review_context_without_input_manifest_round_trips(bound_review_context):
-    legacy_json = bound_review_context.model_dump_json()
+    legacy_context = ReviewContext.model_validate(
+        {
+            **bound_review_context.model_dump(),
+            "input_manifest": None,
+            "neighbor_discovery_sha256": None,
+        }
+    )
+    legacy_json = legacy_context.model_dump_json()
 
     context = ReviewContext.model_validate_json(legacy_json)
 
@@ -616,7 +676,7 @@ def test_profile_execution_metrics_require_an_ordered_aware_interval():
 
 
 def test_profile_and_final_reports_have_serialized_size_limits():
-    large_notes = tuple(ReviewNote(text="x" * 2000) for _ in range(40))
+    large_notes = tuple(ReviewNote(text="x" * 2000) for _ in range(41))
 
     with pytest.raises(ValidationError, match="profile report exceeds"):
         ProfileReviewReport(
@@ -697,7 +757,7 @@ def test_legacy_reports_near_the_old_size_limit_round_trip(report_type):
     current_json = report.model_dump_json()
     current_size = len(current_json.encode("utf-8"))
 
-    assert legacy_size <= 64 * 1024 < current_size <= 72 * 1024
+    assert legacy_size <= 64 * 1024 < current_size <= 80 * 1024
     assert report_type.model_validate_json(current_json) == report
     assert expanded_base_size > old_base_size
 

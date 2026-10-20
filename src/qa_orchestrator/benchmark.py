@@ -110,11 +110,11 @@ class BenchmarkCase(BaseModel):
 class BenchmarkDataset(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1, 2] = 1
+    schema_version: Literal[1, 2, 3] = 1
     kind: Literal["synthetic", "reviewbench_reference", "curated"]
     source: str = Field(min_length=1, max_length=1024)
     source_sha256: Sha256Digest | None = None
-    source_revision_status: Literal["caller_supplied_unverified"] | None = None
+    source_revision_status: Literal["caller_supplied_unverified", "checkout_verified"] | None = None
     cases: tuple[BenchmarkCase, ...] = Field(min_length=1, max_length=1000)
 
     @model_validator(mode="after")
@@ -123,8 +123,12 @@ class BenchmarkDataset(BaseModel):
             raise ValueError("case IDs must be unique")
         if self.schema_version == 1 and self.source_revision_status is not None:
             raise ValueError("schema version 1 cannot declare source revision status")
-        if self.schema_version == 2 and self.source_revision_status != "caller_supplied_unverified":
+        if self.schema_version == 2 and self.source_revision_status != (
+            "caller_supplied_unverified"
+        ):
             raise ValueError("schema version 2 requires explicit source revision status")
+        if self.schema_version == 3 and self.source_revision_status != "checkout_verified":
+            raise ValueError("schema version 3 requires a verified source checkout")
         return self
 
     @model_serializer(mode="wrap")
@@ -1843,12 +1847,14 @@ def import_reviewbench_test_set(
     repositories_root: Path,
     *,
     source_revision: str,
+    source_checkout: Path | None = None,
 ) -> BenchmarkDataset:
     return import_reviewbench_case_set(
         test_set_path,
         findings_path,
         repositories_root,
         source_revision=source_revision,
+        source_checkout=source_checkout,
     )
 
 
@@ -1859,6 +1865,7 @@ def import_reviewbench_case_set(
     *,
     source_revision: str,
     source_path: str = "corpus/test",
+    source_checkout: Path | None = None,
 ) -> BenchmarkDataset:
     if (
         not isinstance(source_path, str)
@@ -1873,6 +1880,7 @@ def import_reviewbench_case_set(
             repositories_root,
             source_revision=source_revision,
             source_path=source_path,
+            source_checkout=source_checkout,
         )
     except (KeyError, TypeError) as exc:
         raise ValueError("invalid ReviewBench case-set documents") from exc
@@ -1885,12 +1893,26 @@ def _import_reviewbench_case_set(
     *,
     source_revision: str,
     source_path: str,
+    source_checkout: Path | None,
 ) -> BenchmarkDataset:
     if not re.fullmatch(r"[0-9a-fA-F]{40}", source_revision):
         raise ValueError("ReviewBench source revision must be a full commit SHA")
 
-    tasks_raw = tasks_path.read_bytes()
-    findings_raw = findings_path.read_bytes()
+    if source_checkout is None:
+        tasks_raw = tasks_path.read_bytes()
+        findings_raw = findings_path.read_bytes()
+        schema_version = 2
+        revision_status = "caller_supplied_unverified"
+    else:
+        tasks_raw, findings_raw = _read_verified_reviewbench_inputs(
+            tasks_path,
+            findings_path,
+            source_checkout=source_checkout,
+            source_revision=source_revision,
+            source_path=source_path,
+        )
+        schema_version = 3
+        revision_status = "checkout_verified"
     tasks = json.loads(tasks_raw)
     findings_by_case = json.loads(findings_raw)
     if not isinstance(tasks, list) or not tasks or not isinstance(findings_by_case, dict):
@@ -1963,16 +1985,99 @@ def _import_reviewbench_case_set(
         )
 
     return BenchmarkDataset(
-        schema_version=2,
+        schema_version=schema_version,
         kind="reviewbench_reference",
         source=(
             "https://github.com/review-bench/ReviewBench/tree/"
             f"{source_revision.lower()}/{source_path}"
         ),
         source_sha256=hashlib.sha256(tasks_raw + b"\0" + findings_raw).hexdigest(),
-        source_revision_status="caller_supplied_unverified",
+        source_revision_status=revision_status,
         cases=tuple(cases),
     )
+
+
+def _read_verified_reviewbench_inputs(
+    tasks_path: Path,
+    findings_path: Path,
+    *,
+    source_checkout: Path,
+    source_revision: str,
+    source_path: str,
+) -> tuple[bytes, bytes]:
+    try:
+        checkout = source_checkout.resolve(strict=True)
+        if not checkout.is_dir():
+            raise ValueError("ReviewBench source checkout must be a directory")
+    except OSError as exc:
+        raise ValueError("ReviewBench source checkout does not exist") from exc
+
+    root_result = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if root_result.returncode:
+        raise ValueError("ReviewBench source checkout is not a local Git checkout")
+    root = Path(root_result.stdout.strip()).resolve()
+
+    resolved_revision = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "rev-parse",
+            "--verify",
+            f"{source_revision.lower()}^{{commit}}",
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if resolved_revision.returncode or resolved_revision.stdout.strip().lower() != (
+        source_revision.lower()
+    ):
+        raise ValueError("ReviewBench source revision does not resolve to a commit")
+
+    try:
+        source_dir = (root / source_path).resolve(strict=True)
+        source_dir_relative = source_dir.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise ValueError("ReviewBench source path must be a directory inside the source checkout") from exc
+    if not source_dir.is_dir():
+        raise ValueError("ReviewBench source path must be a directory inside the source checkout")
+
+    verified_inputs = []
+    for input_path in (tasks_path, findings_path):
+        if input_path.is_symlink():
+            raise ValueError("ReviewBench inputs must not be symlinks")
+        try:
+            resolved_input = input_path.resolve(strict=True)
+            input_relative = resolved_input.relative_to(root)
+            input_relative.relative_to(source_dir_relative)
+        except (OSError, ValueError) as exc:
+            raise ValueError("ReviewBench inputs must be inside the source checkout path") from exc
+        if not resolved_input.is_file():
+            raise ValueError("ReviewBench inputs must be regular files in the source checkout")
+
+        content = resolved_input.read_bytes()
+        committed_blob = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "show",
+                f"{source_revision.lower()}:{input_relative.as_posix()}",
+            ],
+            capture_output=True,
+            check=False,
+        )
+        if committed_blob.returncode or committed_blob.stdout != content:
+            raise ValueError("ReviewBench input does not match the committed ReviewBench source")
+        verified_inputs.append(content)
+
+    return verified_inputs[0], verified_inputs[1]
 
 
 def _import_reviewbench(golden_path: Path, repository_path: Path) -> BenchmarkDataset:
@@ -2142,9 +2247,14 @@ def benchmark_main(argv: list[str]) -> int:
     prepare_set.add_argument(
         "--source-revision",
         required=True,
-        help="Full commit SHA supplied by caller; not verified against the checkout",
+        help="Full ReviewBench commit SHA",
     )
     prepare_set.add_argument("--source-path", default="corpus/test")
+    prepare_set.add_argument(
+        "--source-checkout",
+        type=Path,
+        help="Local ReviewBench Git checkout; verifies the revision and exact input file blobs",
+    )
     prepare_set.add_argument("--output", required=True, type=Path)
     diff_budget = subparsers.add_parser(
         "diff-budget", help="Flag raw diffs that exceed a supplied context byte budget"
@@ -2215,6 +2325,7 @@ def benchmark_main(argv: list[str]) -> int:
             args.repositories_root,
             source_revision=args.source_revision,
             source_path=args.source_path,
+            source_checkout=args.source_checkout,
         ).model_dump(mode="json")
     elif args.command == "diff-budget":
         dataset = BenchmarkDataset.model_validate_json(args.dataset.read_bytes())

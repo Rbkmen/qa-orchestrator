@@ -124,7 +124,7 @@ See [Evidence Registry](docs/EVIDENCE_REGISTRY.md) and [context packing](docs/RE
 
 Reports separate candidates, coverage gaps, unverified claims and evidence maps. The host assigns every candidate one verdict: `confirmed`, `rejected`, `duplicate`, or `unverified`, with rationale and evidence. Final findings retain profile/candidate lineage; confirmation requires severity, impact, affected area and source locations. Finalization checks the complete decision ledger.
 
-Paired `failure_condition` and `flip_condition` describe failure prerequisites and refuting evidence. Conditioned candidates require a context/candidate-bound counterevidence check; confirmation or duplicate linkage requires `not_refuted`. The host performs that inspection. Legacy candidates may omit both conditions.
+`failure_condition` and `flip_condition` describe the failure trigger and evidence that would refute it. New candidates also state `expected_behavior` from a requirement/contract and `actual_behavior` predicted from source under that trigger; predicted behavior is not runtime evidence. Confirmed findings name the affected consumer or contract in `affected_area` when supported. Conditioned candidates require a context/candidate-bound counterevidence check; confirmation or duplicate linkage requires `not_refuted`. The host performs that inspection. Legacy candidates may omit these fields.
 
 Explicit scoped `ReviewRuleset` rules can raise concerns or guard against known false-positive patterns. They bind reports through a digest and guide inspection; they do not automatically suppress findings or learn from reviews. See [rules and counterevidence](docs/REVIEW_UPGRADES.md).
 

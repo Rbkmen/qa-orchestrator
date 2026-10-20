@@ -348,10 +348,12 @@ retained structured report can be rendered again with `qa-orch report render`.
 
 ## 8. Candidate counterevidence
 
-New review routes request paired `failure_condition` and `flip_condition` on
-defect candidates. They describe the actual failure preconditions and concrete
-evidence that would refute the claim. Both may be absent on legacy candidates;
-half-specified or blank conditions are rejected.
+New review routes request paired `failure_condition` and `flip_condition`, plus
+`expected_behavior` and `actual_behavior`, on defect candidates. The first pair
+describes the trigger and evidence that would refute the claim. The second states
+the contract-backed expected result and source-predicted result under that trigger;
+source-predicted behavior is not runtime evidence. These fields may be absent on
+legacy candidates; half-specified or blank pairs are rejected.
 
 For a candidate with conditions, the host must attach a `refutation` check to its
 final candidate decision. Construct one only after inspecting the evidence:

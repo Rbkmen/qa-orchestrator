@@ -1133,6 +1133,120 @@ def test_reviewbench_test_set_cli_imports_pinned_cases_and_metadata(
         )
 
 
+def test_reviewbench_import_verifies_source_checkout_and_file_blobs(tmp_path):
+    repositories_root = tmp_path / "mirrors"
+    repository = repositories_root / "acme_repo"
+    reviewbench_checkout = tmp_path / "ReviewBench"
+    source_dir = reviewbench_checkout / "corpus" / "test"
+    repository.mkdir(parents=True)
+    source_dir.mkdir(parents=True)
+
+    def git(repo, *args):
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    for repo in (repository, reviewbench_checkout):
+        subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+        git(repo, "config", "user.name", "Benchmark Test")
+        git(repo, "config", "user.email", "benchmark@example.invalid")
+
+    (repository / "src.py").write_text("value = 1\n", encoding="utf-8")
+    git(repository, "add", "src.py")
+    git(repository, "commit", "--quiet", "-m", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    (repository / "src.py").write_text("value = 2\n", encoding="utf-8")
+    git(repository, "add", "src.py")
+    git(repository, "commit", "--quiet", "-m", "head")
+    head = git(repository, "rev-parse", "HEAD")
+
+    case_id = f"acme_repo_1-{head[:8]}"
+    test_set_path = source_dir / "test.json"
+    findings_path = source_dir / "findings.json"
+    test_set_path.write_text(
+        json.dumps(
+            [
+                {
+                    "nwo": "acme/repo",
+                    "pr_number": 1,
+                    "repo": "https://github.com/acme/repo",
+                    "base": base,
+                    "head": head,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    findings_path.write_text(
+        json.dumps(
+            {
+                case_id: [
+                    {
+                        "file": "src.py",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "severity": "high",
+                        "category": "correctness",
+                        "message": "The changed value breaks the contract.",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    git(reviewbench_checkout, "add", "corpus/test/test.json", "corpus/test/findings.json")
+    git(reviewbench_checkout, "commit", "--quiet", "-m", "pin ReviewBench test data")
+    source_revision = git(reviewbench_checkout, "rev-parse", "HEAD")
+    output_path = tmp_path / "dataset.json"
+    command = [
+        "import-reviewbench-set",
+        "--test-set",
+        str(test_set_path),
+        "--findings",
+        str(findings_path),
+        "--repositories-root",
+        str(repositories_root),
+        "--source-revision",
+        source_revision,
+        "--source-path",
+        "corpus/test",
+        "--source-checkout",
+        str(reviewbench_checkout),
+        "--output",
+        str(output_path),
+    ]
+
+    assert benchmark_main(command) == 0
+    dataset = BenchmarkDataset.model_validate_json(output_path.read_bytes())
+    assert dataset.schema_version == 3
+    assert dataset.source_revision_status == "checkout_verified"
+    assert dataset.source.endswith(f"/{source_revision}/corpus/test")
+
+    test_set_path.write_text(test_set_path.read_text(encoding="utf-8") + " ", encoding="utf-8")
+    with pytest.raises(ValueError, match="does not match the committed ReviewBench source"):
+        benchmark_main(command)
+
+    test_set_path.write_text(test_set_path.read_text(encoding="utf-8").rstrip(), encoding="utf-8")
+    source_revision_index = command.index("--source-revision")
+    wrong_revision_command = [
+        *command[: source_revision_index + 1],
+        "f" * 40,
+        *command[source_revision_index + 2 :],
+    ]
+    with pytest.raises(ValueError, match="does not resolve to a commit"):
+        benchmark_main(wrong_revision_command)
+
+    outside_test_set = tmp_path / "outside-test.json"
+    outside_test_set.write_bytes(test_set_path.read_bytes())
+    outside_command = command.copy()
+    outside_command[outside_command.index("--test-set") + 1] = str(outside_test_set)
+    with pytest.raises(ValueError, match="must be inside the source checkout"):
+        benchmark_main(outside_command)
+
+
 def test_reviewbench_test_set_import_rejects_missing_gold_before_git(tmp_path, monkeypatch):
     test_set_path = tmp_path / "test.json"
     findings_path = tmp_path / "findings.json"

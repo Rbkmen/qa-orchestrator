@@ -6,6 +6,9 @@ from pydantic import ValidationError
 
 from qa_orchestrator.contracts import (
     EvidenceRecord,
+    FinalReviewReport,
+    ImpactCoverageLedger,
+    ProfileAttemptMetrics,
     ProfileChangedPathCoverage,
     ProfileContextSelection,
     ProfileExecutionMetrics,
@@ -39,6 +42,72 @@ def _evidenced_signals(**signals):
         **signals,
         rationale="The reviewed evidence supports this escalation signal.",
         evidence_refs=("E1",),
+    )
+
+
+def _completion_context(base_context, *, input_status="complete"):
+    return ReviewContext.model_validate(
+        {
+            **base_context.model_dump(),
+            "input_manifest": {
+                "sources": [
+                    {
+                        "source_id": "MR-123",
+                        "kind": "merge_request",
+                        "locator": "https://gitlab.example/group/service/-/merge_requests/123",
+                        "required": True,
+                        "retrieval_status": input_status,
+                        "pagination_status": "not_applicable",
+                        "extraction_status": "complete",
+                        "criterion_refs": [],
+                    }
+                ]
+            },
+            "neighbor_discovery_sha256": "4" * 64,
+        }
+    )
+
+
+def _impact_ledger(context, **overrides):
+    return ImpactCoverageLedger.model_validate(
+        {
+            "head_sha": context.head_sha,
+            "changed_paths_sha256": review_changed_paths_sha256(context.changed_files),
+            "discovery_sha256": context.neighbor_discovery_sha256,
+            "discovery_method": "codegraph",
+            "discovery_version": 1,
+            "discovery_state": "ready",
+            "limits": [
+                {
+                    "name": "candidate_limit",
+                    "value": 200,
+                    "reached": False,
+                    "uninspected": False,
+                }
+            ],
+            "candidates": [],
+            "omissions": [],
+            **overrides,
+        }
+    )
+
+
+def _await_bound_review_outcome(orchestrator, context, make_profile_review_report):
+    session = orchestrator.start("ordinary_review", context)
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_profile=ReviewAgent.CODE_REVIEWER,
+    )
+    return orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profile=ReviewAgent.CODE_REVIEWER,
+        profile_reports=[make_profile_review_report(ReviewAgent.CODE_REVIEWER)],
+        risk_signals=DeepReviewSignals(),
+        skip_synthesis=True,
     )
 
 
@@ -214,7 +283,8 @@ def test_review_bound_flow_validates_and_retains_structured_reports(
     make_final_review_report,
 ):
     orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
-    started = orchestrator.start("ordinary_review", bound_review_context)
+    context = _completion_context(bound_review_context)
+    started = orchestrator.start("ordinary_review", context)
     assert started.recommended_profiles == [ReviewAgent.PYTHON_REVIEWER]
     assert started.recommended_bundles == [
         ReviewBundle.ORDINARY_MR,
@@ -297,6 +367,10 @@ def test_review_bound_flow_validates_and_retains_structured_reports(
     final_report = make_final_review_report(
         (ReviewAgent.CODE_REVIEWER,),
         findings=((review_finding_candidate, (ReviewAgent.CODE_REVIEWER,)),),
+        context=context,
+    )
+    final_report = final_report.model_copy(
+        update={"impact_coverage": _impact_ledger(context)}
     )
     unreported_candidate = ReviewFindingCandidate(
         **{**review_finding_candidate.model_dump(), "candidate_id": "F-99"}
@@ -443,15 +517,37 @@ def test_finish_replaces_coverage_ledger_with_host_observed_path_coverage(
         max_bytes=1024,
         selected_bytes=256,
     )
+    attempt_started = datetime(2026, 10, 19, 12, tzinfo=UTC)
+    attempt_completed = datetime(2026, 10, 19, 12, 0, 3, tzinfo=UTC)
     profile_report = make_profile_review_report(
         ReviewAgent.CODE_REVIEWER,
         context_selection=selection,
         reviewed_changed_paths=("src/service.py",),
         execution_metrics=ProfileExecutionMetrics(
-            started_at=datetime(2026, 10, 19, 12, tzinfo=UTC),
-            completed_at=datetime(2026, 10, 19, 12, 0, 3, tzinfo=UTC),
+            started_at=attempt_started,
+            completed_at=attempt_completed,
             input_tokens=1200,
             output_tokens=240,
+            attempts=(
+                ProfileAttemptMetrics(
+                    profile=ReviewAgent.CODE_REVIEWER,
+                    attempt=1,
+                    outcome="completed",
+                    review_head_sha=context.head_sha,
+                    review_diff_sha256=context.diff_sha256,
+                    started_at=attempt_started,
+                    completed_at=attempt_completed,
+                    queue_seconds=0,
+                    executor_seconds=3,
+                    submitted_prompt_sha256="8" * 64,
+                    prompt_write_status="written",
+                    source_packet_sha256=context.evidence_packet_sha256,
+                    selected_packet_sha256=selection.selected_packet_sha256,
+                    included_evidence_refs=selection.included_refs,
+                    omitted_evidence_refs=selection.omitted_refs,
+                    included_source_paths=("src/service.py",),
+                ),
+            ),
         ),
     )
     orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
@@ -674,7 +770,7 @@ def test_completed_review_requires_context_selection_receipts(
     )
     report = make_final_review_report((ReviewAgent.CODE_REVIEWER,))
 
-    with pytest.raises(OrchestrationError, match="context-selection receipt"):
+    with pytest.raises(OrchestrationError, match="executor input receipt"):
         orchestrator.finish(
             run_id=session.run_id,
             outcome="completed",
@@ -686,6 +782,57 @@ def test_completed_review_requires_context_selection_receipts(
         final_review_report=report,
     )
     assert partial.final_review_report.coverage_ledger.profiles[0].context_selection_recorded is False
+
+
+def test_completed_review_rejects_unverified_executor_input_receipt(
+    bound_review_context,
+    make_profile_review_report,
+):
+    context = _completion_context(bound_review_context)
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review", context)
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_profile=ReviewAgent.CODE_REVIEWER,
+    )
+    # The profile returned a selection claim, but no host-observed executor
+    # receipt proves that the corresponding packet was written to the CLI.
+    report = make_profile_review_report(
+        ReviewAgent.CODE_REVIEWER,
+        omit_input_receipt=True,
+    )
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profile=ReviewAgent.CODE_REVIEWER,
+        profile_reports=[report],
+        risk_signals=DeepReviewSignals(),
+        skip_synthesis=True,
+    )
+    final_report = FinalReviewReport(
+        summary="Reviewed the bound change.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        impact_coverage=_impact_ledger(context),
+    )
+
+    with pytest.raises(OrchestrationError, match="executor input receipt"):
+        orchestrator.finish(
+            run_id=session.run_id,
+            outcome="completed",
+            final_review_report=final_report,
+        )
+
+    partial = orchestrator.finish(
+        run_id=session.run_id,
+        outcome="partial",
+        final_review_report=final_report,
+    )
+    profile_coverage = partial.final_review_report.coverage_ledger.profiles[0]
+    assert profile_coverage.executor_input_receipt_verified is False
+    assert profile_coverage.source_excerpt_included_path_indexes == ()
 
 
 def test_completed_review_requires_registered_text_excerpts_to_reach_a_reviewer(
@@ -773,7 +920,8 @@ def test_finish_rejects_review_artifacts_over_the_session_size_limit(
     make_final_review_report,
 ):
     orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
-    session = orchestrator.start("ordinary_review", bound_review_context)
+    context = _completion_context(bound_review_context)
+    session = orchestrator.start("ordinary_review", context)
     session = orchestrator.advance(
         run_id=session.run_id,
         completed_step=OrchestrationStep.TRIAGE,
@@ -808,6 +956,10 @@ def test_finish_rejects_review_artifacts_over_the_session_size_limit(
     final_report = make_final_review_report(
         tuple(session.completed_profiles),
         coverage_gaps=large_final_gaps,
+        context=context,
+    )
+    final_report = final_report.model_copy(
+        update={"impact_coverage": _impact_ledger(context)}
     )
 
     with pytest.raises(OrchestrationError, match="session review artifacts exceed"):
@@ -935,6 +1087,182 @@ def test_final_host_outcome_completes_session_and_is_idempotent():
 
     repeated = orchestrator.finish(run_id=session.run_id, outcome="completed")
     assert repeated.status is OrchestrationStatus.COMPLETED
+
+
+def test_new_bound_session_uses_strict_review_completion_mode(bound_review_context):
+    session = QaOrchestrator(ttl_seconds=1800, max_sessions=10).start(
+        "ordinary_review", bound_review_context
+    )
+
+    assert session.review_completion_mode == "strict"
+
+
+@pytest.mark.parametrize(
+    ("input_status", "include_manifest", "ledger_state", "ledger_digest", "gap"),
+    [
+        ("complete", False, "ready", None, "input manifest"),
+        ("partial", True, "ready", None, "input manifest"),
+        ("complete", True, None, None, "impact coverage"),
+        ("complete", True, "partial", None, "impact coverage"),
+        ("complete", True, "ready", "9" * 64, "impact coverage"),
+    ],
+)
+def test_strict_bound_completion_rejects_unknown_or_incomplete_coverage(
+    bound_review_context,
+    make_profile_review_report,
+    input_status,
+    include_manifest,
+    ledger_state,
+    ledger_digest,
+    gap,
+):
+    context = _completion_context(
+        bound_review_context,
+        input_status=input_status,
+    )
+    if not include_manifest:
+        context = ReviewContext.model_validate(
+            {
+                **context.model_dump(),
+                "input_manifest": None,
+            }
+        )
+    ledger = None
+    if ledger_state is not None:
+        ledger_overrides = {"discovery_state": ledger_state}
+        if ledger_digest is not None:
+            ledger_overrides["discovery_sha256"] = ledger_digest
+        ledger = _impact_ledger(context, **ledger_overrides)
+    report = FinalReviewReport(
+        summary="Reviewed the bound change.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        impact_coverage=ledger,
+    )
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = _await_bound_review_outcome(
+        orchestrator,
+        context,
+        make_profile_review_report,
+    )
+
+    with pytest.raises(OrchestrationError, match=gap) as error:
+        orchestrator.finish(
+            run_id=session.run_id,
+            outcome="completed",
+            final_review_report=report,
+        )
+    if input_status == "partial" and include_manifest:
+        assert "MR-123" in str(error.value)
+        assert "retrieval partial" in str(error.value)
+
+
+def test_incomplete_cross_service_consumer_map_blocks_completed_review(
+    bound_review_context,
+    make_profile_review_report,
+):
+    context = _completion_context(bound_review_context)
+    manifest = context.input_manifest.model_dump(mode="python")
+    manifest["sources"] = (
+        *manifest["sources"],
+        {
+            "source_id": "SVC-CONSUMER-MAP",
+            "kind": "service_consumer_map",
+            "locator": "docs/service-consumers.yml",
+            "required": True,
+            "retrieval_status": "partial",
+            "pagination_status": "not_applicable",
+            "extraction_status": "partial",
+            "criterion_refs": (),
+        },
+    )
+    context = ReviewContext.model_validate(
+        {**context.model_dump(), "input_manifest": manifest}
+    )
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = _await_bound_review_outcome(
+        orchestrator, context, make_profile_review_report
+    )
+    report = FinalReviewReport(
+        summary="Reviewed the bound change.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        impact_coverage=_impact_ledger(context),
+    )
+
+    with pytest.raises(OrchestrationError, match="SVC-CONSUMER-MAP.*retrieval partial"):
+        orchestrator.finish(
+            run_id=session.run_id,
+            outcome="completed",
+            final_review_report=report,
+        )
+
+
+def test_strict_bound_completion_accepts_complete_matching_ledgers(
+    bound_review_context,
+    make_profile_review_report,
+):
+    context = _completion_context(bound_review_context)
+    report = FinalReviewReport(
+        summary="Reviewed the bound change.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        impact_coverage=_impact_ledger(context),
+    )
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = _await_bound_review_outcome(
+        orchestrator,
+        context,
+        make_profile_review_report,
+    )
+
+    completed = orchestrator.finish(
+        run_id=session.run_id,
+        outcome="completed",
+        final_review_report=report,
+    )
+
+    assert completed.status is OrchestrationStatus.COMPLETED
+
+
+@pytest.mark.parametrize("outcome", ["partial", "blocked"])
+def test_incomplete_bound_review_can_finish_as_partial_or_blocked(
+    bound_review_context,
+    make_profile_review_report,
+    outcome,
+):
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = _await_bound_review_outcome(
+        orchestrator,
+        bound_review_context,
+        make_profile_review_report,
+    )
+
+    finished = orchestrator.finish(run_id=session.run_id, outcome=outcome)
+
+    assert finished.status.value == outcome
+
+
+def test_partial_bound_review_rejects_impact_ledger_for_another_discovery(
+    bound_review_context,
+    make_profile_review_report,
+):
+    context = _completion_context(bound_review_context)
+    report = FinalReviewReport(
+        summary="Review stopped with partial impact coverage.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        impact_coverage=_impact_ledger(context, discovery_sha256="9" * 64),
+    )
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = _await_bound_review_outcome(
+        orchestrator,
+        context,
+        make_profile_review_report,
+    )
+
+    with pytest.raises(OrchestrationError, match="impact coverage ledger does not match"):
+        orchestrator.finish(
+            run_id=session.run_id,
+            outcome="partial",
+            final_review_report=report,
+        )
 
 
 def test_final_host_outcome_can_stop_after_synthesis():

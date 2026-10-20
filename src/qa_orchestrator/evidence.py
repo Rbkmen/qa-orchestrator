@@ -14,10 +14,12 @@ from pathlib import Path, PurePosixPath
 from qa_orchestrator.contracts import (
     EvidenceRecord,
     FinalReviewReport,
+    ImpactCoverageLedger,
     ProfileReviewReport,
     ReviewContext,
     ReviewCriterionCoverage,
     ReviewFindingCandidate,
+    review_changed_paths_sha256,
 )
 
 _DISCOVERY_MAX_SYMBOLS = 128
@@ -273,6 +275,52 @@ def validate_context_selection(context: ReviewContext, report: ProfileReviewRepo
         raise ValueError("profile report cites evidence omitted from its context")
 
 
+def profile_input_receipt_verified(context: ReviewContext, report: ProfileReviewReport) -> bool:
+    """Check that the final attempt records the exact selected packet and a completed stdin write."""
+    selection = report.context_selection
+    metrics = report.execution_metrics
+    if selection is None or metrics is None or not metrics.attempts:
+        return False
+    try:
+        validate_context_selection(context, report)
+    except ValueError:
+        return False
+
+    attempt = metrics.attempts[-1]
+    if (
+        attempt.profile != report.profile
+        or attempt.outcome != "completed"
+        or attempt.attempt != metrics.attempt_count
+        or sum(item.outcome == "completed" for item in metrics.attempts) != 1
+        or attempt.review_head_sha != context.head_sha
+        or attempt.review_diff_sha256 != context.diff_sha256
+        or attempt.prompt_write_status != "written"
+        or attempt.submitted_prompt_sha256 is None
+        or attempt.source_packet_sha256 != context.evidence_packet_sha256
+        or attempt.source_packet_sha256 != selection.source_packet_sha256
+        or attempt.selected_packet_sha256 != selection.selected_packet_sha256
+        or attempt.included_evidence_refs != selection.included_refs
+        or attempt.omitted_evidence_refs != selection.omitted_refs
+    ):
+        return False
+
+    included_refs = set(attempt.included_evidence_refs)
+    expected_source_paths = tuple(
+        sorted(
+            {
+                entry.path
+                for entry in context.evidence_registry
+                if entry.kind == "source"
+                and entry.revision == context.head_sha
+                and entry.source_text_available is True
+                and entry.path in context.changed_files
+                and entry.evidence_ref in included_refs
+            }
+        )
+    )
+    return attempt.included_source_paths == expected_source_paths
+
+
 def input_manifest_completeness(context: ReviewContext | None) -> dict[str, object]:
     """Derive required-input status from host-authored manifest metadata."""
     manifest = context.input_manifest if context is not None else None
@@ -320,6 +368,7 @@ def input_manifest_completeness(context: ReviewContext | None) -> dict[str, obje
         for source in sources
         for criterion_ref in source.criterion_refs
     }
+    unlisted_criteria = sorted(registered_criteria - declared_criteria)
     required_criteria = {
         criterion_ref
         for source in required_sources
@@ -337,9 +386,9 @@ def input_manifest_completeness(context: ReviewContext | None) -> dict[str, obje
     elif not required_sources:
         status = "unknown"
         status_reason = "no required source was declared"
-    elif required_incomplete or missing_required_criterion_refs:
+    elif required_incomplete or missing_required_criterion_refs or unlisted_criteria:
         status = "partial"
-        status_reason = "one or more required sources or criteria are incomplete"
+        status_reason = "one or more required sources or criteria are incomplete or unlisted"
     else:
         status = "complete"
         status_reason = "all required sources and declared criteria are accounted for"
@@ -360,7 +409,100 @@ def input_manifest_completeness(context: ReviewContext | None) -> dict[str, obje
         "incomplete_sources": incomplete_sources,
         "missing_criterion_refs": missing_criterion_refs,
         "missing_required_criterion_refs": missing_required_criterion_refs,
+        "unlisted_criterion_refs": unlisted_criteria,
     }
+
+
+def impact_coverage_status(ledger: ImpactCoverageLedger | None) -> str:
+    """Return closure only for candidates in the recorded bounded discovery."""
+    if ledger is None:
+        return "unknown"
+    if (
+        ledger.discovery_state == "partial"
+        or ledger.omissions
+        or any(limit.reached or limit.uninspected for limit in ledger.limits)
+        or any(
+            candidate.disposition in {"unresolved", "not_checked"}
+            for candidate in ledger.candidates
+        )
+    ):
+        return "partial"
+    if ledger.discovery_state == "unknown":
+        return "unknown"
+    return "closed"
+
+
+def validate_impact_coverage_context(
+    report: FinalReviewReport,
+    context: ReviewContext,
+    *,
+    require_ledger: bool = False,
+) -> None:
+    """Validate that an impact ledger belongs to this exact bounded review."""
+    ledger = report.impact_coverage
+    if ledger is None:
+        if require_ledger:
+            raise ValueError("impact coverage ledger is required")
+        return
+    if (
+        ledger.head_sha != context.head_sha
+        or ledger.changed_paths_sha256 != review_changed_paths_sha256(context.changed_files)
+        or context.neighbor_discovery_sha256 is None
+        or ledger.discovery_sha256 != context.neighbor_discovery_sha256
+    ):
+        raise ValueError("impact coverage ledger does not match the bound review")
+    impact_refs = {
+        ref
+        for candidate in ledger.candidates
+        for ref in candidate.evidence_refs
+    }
+    if impact_refs - set(context.evidence_refs):
+        raise ValueError("impact coverage cites refs outside the bound context")
+
+
+def review_completion_gaps(
+    context: ReviewContext,
+    report: FinalReviewReport,
+) -> tuple[str, ...]:
+    """Describe why a new bound review cannot be finalized as completed."""
+    gaps = []
+    input_status = input_manifest_completeness(context)
+    if input_status["status"] != "complete":
+        gaps.append(
+            f"input manifest is {input_status['status']}: {input_status['status_reason']}"
+        )
+        incomplete_required = [
+            source for source in input_status["incomplete_sources"] if source["required"]
+        ]
+        if incomplete_required:
+            examples = [
+                f"{source['source_id']} ({', '.join(source['reasons'])})"
+                for source in incomplete_required[:5]
+            ]
+            if len(incomplete_required) > len(examples):
+                examples.append(f"{len(incomplete_required) - len(examples)} more")
+            gaps.append("incomplete required sources: " + ", ".join(examples))
+        missing_criteria = input_status["missing_required_criterion_refs"]
+        if missing_criteria:
+            examples = list(missing_criteria[:5])
+            if len(missing_criteria) > len(examples):
+                examples.append(f"{len(missing_criteria) - len(examples)} more")
+            gaps.append("required criterion refs missing from registry: " + ", ".join(examples))
+        unlisted_criteria = input_status["unlisted_criterion_refs"]
+        if unlisted_criteria:
+            examples = list(unlisted_criteria[:5])
+            if len(unlisted_criteria) > len(examples):
+                examples.append(f"{len(unlisted_criteria) - len(examples)} more")
+            gaps.append("registered criterion refs missing from manifest: " + ", ".join(examples))
+    try:
+        validate_impact_coverage_context(report, context, require_ledger=True)
+    except ValueError as exc:
+        gaps.append(str(exc))
+    if report.impact_coverage is not None:
+        status = impact_coverage_status(report.impact_coverage)
+        if status != "closed":
+            gaps.append(f"impact coverage status is {status}")
+    return tuple(gaps)
 
 
 def complete_criterion_coverage(

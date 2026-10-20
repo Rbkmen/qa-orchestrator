@@ -19,11 +19,14 @@ The batch importer accepts a task list and matching findings map from a
 ReviewBench checkout. For the official test set, use
 `corpus/test/test.json` and `corpus/test/findings.json`. For a separated subset
 derived from the wider corpus, use `--tasks` and set `--source-path` to a path
-inside `corpus` (the default is `corpus/test`). The source URL uses the supplied
-revision and path, but the importer does not verify that revision against the
-checkout. Schema version 2 marks it as `caller_supplied_unverified`.
-`source_sha256` binds the exact task-list and findings input bytes, not their
-Git origin. Each repository mirror must already exist locally under
+inside `corpus` (the default is `corpus/test`). Without `--source-checkout`, the
+source URL uses the caller-supplied revision and path, and schema version 2
+marks the revision `caller_supplied_unverified`. With `--source-checkout`, the
+importer requires a local Git checkout, verifies that the full SHA resolves to
+a commit there, and checks that both input files are inside the selected
+`--source-path` directory and byte-for-byte match that commit. Schema version 3
+marks this as `checkout_verified`. `source_sha256` binds the exact task-list and
+findings input bytes. Each repository mirror must already exist locally under
 `<repositories-root>/<owner>_<repo>`; this command does not clone repositories
 or launch reviews. For example:
 
@@ -36,19 +39,21 @@ qa-orch benchmark import-reviewbench-set \
   --test-set /path/to/ReviewBench/corpus/test/test.json \
   --findings /path/to/ReviewBench/corpus/test/findings.json \
   --repositories-root /path/to/review-bench-mirrors \
+  --source-checkout /path/to/ReviewBench \
   --source-revision FULL_REVIEWBENCH_COMMIT_SHA \
   --output /path/to/run/reviewbench-test-25.json
 ```
 
 For a locally curated dev subset, pass its task list with `--tasks`, the matching
 findings map, and `--source-path corpus`; keep that artifact separate from the
-official test set. Every local mirror must contain the exact base and head
-commits named by the task list. The importer hashes each binary diff, verifies
-that every case has a matching gold record, records the caller-supplied
-ReviewBench source revision and a combined SHA-256 over the two input files,
-and preserves finding scope,
-difficulty, and context requirements. It also retains the PR title/body as task context, pins a hash of
-that context, and records the language and exact diff byte count. The host must
+official test set. In verified mode, `--source-path` must name a directory
+inside the checkout that contains both input files. Every local mirror must
+contain the exact base and head commits named by the task list. The importer
+hashes each binary diff, verifies that every case has a matching gold record,
+records the ReviewBench source revision and a combined SHA-256 over the two
+input files, and preserves finding scope, difficulty, and context requirements.
+It also retains the PR title/body as task context, pins a hash of that context,
+and records the language and exact diff byte count. The host must
 put the dataset's `task_context_sha256` into each `BenchmarkRun`; the scorer
 rejects results from a different task prompt. The hash is SHA-256 over compact
 UTF-8 JSON `{"title":"...","body":"..."}` with Unicode preserved; a missing

@@ -72,7 +72,7 @@ def review_changed_paths_sha256(paths: tuple[str, ...]) -> str:
 
 # Added defaulted fields expand legacy persisted reports when they are loaded.
 _MAX_PROFILE_REVIEW_REPORT_BYTES = 72 * 1024
-_MAX_FINAL_REVIEW_REPORT_BYTES = 72 * 1024
+_MAX_FINAL_REVIEW_REPORT_BYTES = 80 * 1024
 
 
 class EvidenceRecord(BaseModel):
@@ -666,15 +666,39 @@ class ReviewFindingCandidate(BaseModel):
             "new submitted defect candidates. Optional only for legacy persisted payloads."
         ),
     )
+    expected_behavior: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=2000,
+        description=(
+            "Expected result supported by a requirement, contract, or invariant; required for "
+            "new submitted defect candidates."
+        ),
+    )
+    actual_behavior: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=2000,
+        description=(
+            "Source-derived result when the failure condition occurs; this is not runtime "
+            "observation unless separately verified. Required for new submitted defect candidates."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_source_locations(self) -> "ReviewFindingCandidate":
         if (self.failure_condition is None) != (self.flip_condition is None):
             raise ValueError("provide both failure_condition and flip_condition")
+        if (self.expected_behavior is None) != (self.actual_behavior is None):
+            raise ValueError("provide both expected_behavior and actual_behavior")
         if self.failure_condition is not None and (
             not self.failure_condition.strip() or not self.flip_condition.strip()
         ):
             raise ValueError("refutation conditions must not be blank")
+        if self.expected_behavior is not None and (
+            not self.expected_behavior.strip() or not self.actual_behavior.strip()
+        ):
+            raise ValueError("expected and actual behavior must not be blank")
         location_keys = {
             (location.path, location.start_line, location.end_line)
             for location in self.source_locations
@@ -778,12 +802,13 @@ class ProfileContextSelection(BaseModel):
 
 
 class ProfileChangedPathCoverage(BaseModel):
-    """Host-recorded profile coverage plus optional executor-reported execution metrics."""
+    """Host-recorded profile coverage and executor handoff status."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     profile: ReviewAgent
     context_selection_recorded: bool
+    executor_input_receipt_verified: bool = False
     source_excerpt_included_path_indexes: tuple[ChangedPathIndex, ...] = Field(
         default=(), max_length=500
     )

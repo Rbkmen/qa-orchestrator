@@ -109,6 +109,37 @@ def test_profile_candidates_require_failure_and_flip_conditions(
         )
 
 
+def test_profile_candidates_require_expected_and_actual_behavior(
+    bound_review_context, review_finding_candidate, make_profile_review_report
+):
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review", bound_review_context)
+    orchestrator.advance(
+        run_id=session.run_id,
+        completed_step="triage",
+        status="completed",
+        selected_profile=ReviewAgent.CODE_REVIEWER,
+    )
+    missing_behavior = review_finding_candidate.model_copy(
+        update={"expected_behavior": None, "actual_behavior": None}
+    )
+
+    with pytest.raises(OrchestrationError, match="expected_behavior and actual_behavior"):
+        orchestrator.advance(
+            run_id=session.run_id,
+            completed_step="primary_review",
+            status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+            profile_reports=[
+                make_profile_review_report(
+                    ReviewAgent.CODE_REVIEWER,
+                    findings=(missing_behavior,),
+                )
+            ],
+            risk_signals=DeepReviewSignals(),
+        )
+
+
 def test_legacy_candidate_without_conditions_can_finish_as_unverified(reviewed_candidate):
     orchestrator, run_id, report = reviewed_candidate
     session = orchestrator.get(run_id)
@@ -231,6 +262,7 @@ def test_rejected_finding_regressions_keep_counterevidence_and_no_final_finding(
     bound_review_context,
     review_finding_candidate,
     make_profile_review_report,
+    make_impact_coverage,
 ):
     rules = ReviewRuleset(
         rules=(
@@ -291,6 +323,7 @@ def test_rejected_finding_regressions_keep_counterevidence_and_no_final_finding(
         review_rules_sha256=rules.digest,
         summary="The candidate was checked against its counterevidence and rejected.",
         profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        impact_coverage=make_impact_coverage(context),
         candidate_decisions=(
             ReviewCandidateDecision(
                 source={"profile": "code_reviewer", "candidate_id": candidate.candidate_id},
@@ -325,6 +358,20 @@ def test_candidate_refutation_conditions_require_a_complete_nonblank_pair(review
     with pytest.raises(ValidationError, match="blank"):
         ReviewFindingCandidate.model_validate({
             **payload, "failure_condition": "Repeat request", "flip_condition": "   "})
+
+
+def test_candidate_behavior_requires_a_complete_nonblank_pair(review_finding_candidate):
+    from qa_orchestrator.contracts import ReviewFindingCandidate
+
+    payload = review_finding_candidate.model_dump()
+    with pytest.raises(ValidationError, match="both expected_behavior and actual_behavior"):
+        ReviewFindingCandidate.model_validate(
+            {**payload, "expected_behavior": "The contract result", "actual_behavior": None}
+        )
+    with pytest.raises(ValidationError, match="behavior must not be blank"):
+        ReviewFindingCandidate.model_validate(
+            {**payload, "expected_behavior": "  ", "actual_behavior": "Source-predicted result"}
+        )
 
 
 def test_refutation_check_is_bound_to_context_and_candidate(review_finding_candidate, bound_review_context):
