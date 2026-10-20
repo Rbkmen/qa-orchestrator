@@ -314,11 +314,17 @@ class ReviewFindingCandidate(BaseModel):
     )
     failure_condition: str | None = Field(
         default=None, min_length=1, max_length=2000,
-        description="Specific preconditions that make the alleged failure occur.",
+        description=(
+            "Specific preconditions that make the alleged failure occur; required for new "
+            "submitted defect candidates. Optional only for legacy persisted payloads."
+        ),
     )
     flip_condition: str | None = Field(
         default=None, min_length=1, max_length=2000,
-        description="Concrete source/contract evidence that would refute this candidate.",
+        description=(
+            "Concrete source/contract evidence that would refute this candidate; required for "
+            "new submitted defect candidates. Optional only for legacy persisted payloads."
+        ),
     )
 
     @model_validator(mode="after")
@@ -511,6 +517,13 @@ class ReviewCandidateDecision(BaseModel):
     evidence_refs: tuple[EvidenceRefId, ...] = Field(min_length=1, max_length=32)
     final_finding_id: str | None = Field(default=None, pattern=r"^F-[0-9]{2,}$")
     refutation: RefutationCheck | None = None
+    candidate_snapshot: ReviewFindingCandidate | None = Field(
+        default=None,
+        description=(
+            "Original profile candidate retained for rejected or unverified outcomes; new "
+            "final reports must preserve it so possible bugs remain visible."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_final_link(self) -> "ReviewCandidateDecision":
@@ -521,6 +534,11 @@ class ReviewCandidateDecision(BaseModel):
             raise ValueError("confirmation requires a resolved, not_refuted refutation check")
         if (self.verdict in {"confirmed", "duplicate"}) != (self.final_finding_id is not None):
             raise ValueError("only confirmed and duplicate decisions require final_finding_id")
+        if (
+            self.candidate_snapshot is not None
+            and self.candidate_snapshot.candidate_id != self.source.candidate_id
+        ):
+            raise ValueError("candidate snapshot ID must match its decision source")
         if not self.rationale.strip():
             raise ValueError("candidate decision rationale must not be blank")
         if len(set(self.evidence_refs)) != len(self.evidence_refs):

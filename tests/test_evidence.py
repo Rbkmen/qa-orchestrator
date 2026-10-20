@@ -81,6 +81,8 @@ def candidate(line=2, evidence_ref="S1"):
         verification_gap="No runtime check",
         evidence_refs=(evidence_ref,),
         source_locations=({"path": "src/api.py", "start_line": line},),
+        failure_condition="The changed branch returns the wrong API value.",
+        flip_condition="The pinned contract or caller proves the returned value is expected.",
     )
 
 
@@ -215,6 +217,7 @@ def test_legacy_text_source_session_can_finish_with_its_existing_location(
     final_report = make_final_review_report(
         (ReviewAgent.CODE_REVIEWER,),
         findings=((legacy_candidate, (ReviewAgent.CODE_REVIEWER,)),),
+        context=legacy,
     )
 
     finished = orchestrator.finish(
@@ -678,6 +681,80 @@ def test_discovery_follows_local_typescript_imports_to_action_contract(tmp_path)
     assert "layerAtom" in {
         symbol["symbol"] for symbol in by_path["src/layerAtom.ts"]["matched_symbols"]
     }
+
+
+def test_discovery_finds_reverse_importers_and_exposes_test_audit_candidates(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args])
+
+    git("init", "--quiet")
+    files = {
+        "src/engine/price.ts": (
+            "export function calculatePrice(items: number[]) {\n"
+            "  return items.reduce((sum, item) => sum + item, 0);\n"
+            "}\n"
+        ),
+        "src/routes/cart.ts": (
+            'import { calculatePrice as total } from "../engine/price";\n'
+            "export function cartTotal(items: number[]) { return total(items); }\n"
+        ),
+        "tests/billing/price.test.ts": (
+            'test("calculates the price", () => { calculatePrice([1, 2]); });\n'
+        ),
+    }
+    for path, content in files.items():
+        target = repository / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").decode().strip()
+
+    changed = repository / "src/engine/price.ts"
+    changed_source = files["src/engine/price.ts"].replace("sum + item", "sum - item")
+    changed_source += "\n".join(
+        f"export function changedSymbol{index}() {{ return {index}; }}"
+        for index in range(140)
+    )
+    changed.write_text(changed_source, encoding="utf-8")
+    changed_test = repository / "tests/billing/price.test.ts"
+    changed_test.write_text(
+        files["tests/billing/price.test.ts"].replace(
+            "calculates the price", "calculates the changed price"
+        ),
+        encoding="utf-8",
+    )
+    git("add", "src/engine/price.ts", "tests/billing/price.test.ts")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "head")
+    head = git("rev-parse", "HEAD").decode().strip()
+    diff = git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head, "--")
+    context = ReviewContext(
+        repository="github.com/example/repo",
+        base_sha=base,
+        head_sha=head,
+        diff_sha256=hashlib.sha256(diff).hexdigest(),
+        evidence_packet_sha256=hashlib.sha256(b"packet").hexdigest(),
+        changed_files=("src/engine/price.ts", "tests/billing/price.test.ts"),
+        evidence_refs=("S1", "D1"),
+    )
+
+    manifest = discover_neighbor_evidence(context, repository)
+
+    by_path = {entry["path"]: entry for entry in manifest["candidate_records"]}
+    assert "src/routes/cart.ts" in by_path
+    assert "imports_changed_path" in by_path["src/routes/cart.ts"]["reasons"]
+    assert by_path["src/routes/cart.ts"]["imported_changed_paths"] == [
+        "src/engine/price.ts"
+    ]
+    assert manifest["test_audit"]["test_files_scanned"] == 1
+    assert manifest["changed_sources_skipped_symbol_scan"] == 1
+    assert len(manifest["test_audit"]["candidates"]) == 1
+    audit_candidate = manifest["test_audit"]["candidates"][0]
+    assert audit_candidate["category"] == "no_direct_assertion"
+    assert audit_candidate["path"] == "tests/billing/price.test.ts"
 
 
 def test_discovery_skips_symbol_search_when_neighbor_file_exceeds_byte_cap(

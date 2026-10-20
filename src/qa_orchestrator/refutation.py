@@ -38,8 +38,12 @@ def validate_refutation_check(
     candidate: ReviewFindingCandidate,
     check: RefutationCheck,
 ) -> None:
-    if candidate.failure_condition is None or candidate.flip_condition is None:
-        raise ValueError("refutation check requires explicit candidate conditions")
+    if (
+        candidate.failure_condition is None or candidate.flip_condition is None
+    ) and check.status != "unverified":
+        raise ValueError(
+            "legacy candidates without explicit conditions can only have an unverified check"
+        )
     if check.context_sha256 != _digest(context):
         raise ValueError("refutation context identity mismatch")
     if check.candidate_sha256 != _digest(candidate):

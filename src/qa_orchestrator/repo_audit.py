@@ -11,6 +11,7 @@ import re
 import subprocess
 import tempfile
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -546,44 +547,186 @@ def _python_tests(source: str) -> tuple[int, list[dict], int, list[tuple[int, st
     return test_count, candidates, candidate_count, duplicate_bodies
 
 
-_JS_TEST_DECLARATION = re.compile(r"\b(?:test|it)\s*(?:\.\s*(?:skip|only))?\s*\(")
 _JS_ASSERTION = re.compile(r"\b(?:expect|assert)\s*\(|\.to(?:Be|Equal|Match|Contain|Have|Throw)\b")
 _JS_FLAKY = re.compile(r"\b(?:waitForTimeout|setTimeout)\s*\(")
-_JS_SKIP = re.compile(r"\b(?:test|it)\s*\.\s*(?P<mode>skip|only)\s*\(")
 
 
 def _line_at(source: str, offset: int) -> int:
     return source.count("\n", 0, offset) + 1
 
 
-def _test_candidates(path: str, source: bytes) -> tuple[list[dict], int]:
+def _mask_javascript_non_code(source: str) -> str:
+    """Blank comments and quoted strings while preserving offsets and newlines."""
+    masked = list(source)
+    index = 0
+    while index < len(source):
+        if source.startswith("//", index):
+            end = source.find("\n", index + 2)
+            end = len(source) if end < 0 else end
+            for position in range(index, end):
+                masked[position] = " "
+            index = end
+            continue
+        if source.startswith("/*", index):
+            end = source.find("*/", index + 2)
+            end = len(source) if end < 0 else end + 2
+            for position in range(index, end):
+                if source[position] != "\n":
+                    masked[position] = " "
+            index = end
+            continue
+        if source[index] in {"'", '"', "`"}:
+            quote = source[index]
+            end = index + 1
+            while end < len(source):
+                if source[end] == "\\":
+                    end += 2
+                    continue
+                if source[end] == quote:
+                    end += 1
+                    break
+                end += 1
+            for position in range(index, min(end, len(source))):
+                if source[position] != "\n":
+                    masked[position] = " "
+            index = end
+            continue
+        index += 1
+    return "".join(masked)
+
+
+def _matching_javascript_delimiter(
+    source: str, opening: int, *, max_scan: int
+) -> tuple[int | None, int]:
+    opener = source[opening]
+    closer = {"(": ")", "[": "]", "{": "}"}[opener]
+    depth = 0
+    scanned = 0
+    for position in range(opening, min(len(source), opening + max_scan)):
+        scanned += 1
+        if source[position] == opener:
+            depth += 1
+        elif source[position] == closer:
+            depth -= 1
+            if depth == 0:
+                return position, scanned
+    return None, scanned
+
+
+def _skip_javascript_space(source: str, position: int) -> int:
+    while position < len(source) and source[position].isspace():
+        position += 1
+    return position
+
+
+def _javascript_test_declarations(source: str) -> list[dict[str, int | str | None]]:
+    return _javascript_test_scan(source)[0]
+
+
+def _javascript_test_scan(
+    source: str,
+) -> tuple[list[dict[str, int | str | None]], bool]:
+    """Find test/it calls, including test.each(...)(...) and it.each(...)(...)."""
+    declarations = []
+    delimiter_scan_budget = len(source) * 4
+    delimiter_chars_scanned = 0
+    covered_until = -1
+    for match in re.finditer(r"\b(?P<name>test|it)\b", source):
+        if match.start() <= covered_until:
+            continue
+        cursor = match.end()
+        mode = None
+        while True:
+            cursor = _skip_javascript_space(source, cursor)
+            if cursor >= len(source) or source[cursor] != ".":
+                break
+            property_match = re.match(r"\.\s*([A-Za-z_$][\w$]*)", source[cursor:])
+            if property_match is None:
+                break
+            property_name = property_match.group(1)
+            cursor += property_match.end()
+            if property_name == "each":
+                cursor = _skip_javascript_space(source, cursor)
+                if cursor >= len(source) or source[cursor] != "(":
+                    break
+                remaining_scan = delimiter_scan_budget - delimiter_chars_scanned
+                if remaining_scan <= 0:
+                    return declarations, True
+                table_end, scanned = _matching_javascript_delimiter(
+                    source, cursor, max_scan=remaining_scan
+                )
+                delimiter_chars_scanned += scanned
+                if table_end is None:
+                    return declarations, True
+                cursor = table_end + 1
+                continue
+            if property_name in {"skip", "only", "todo"}:
+                mode = property_name
+                continue
+            if property_name == "concurrent":
+                continue
+            break
+        cursor = _skip_javascript_space(source, cursor)
+        if cursor >= len(source) or source[cursor] != "(":
+            continue
+        remaining_scan = delimiter_scan_budget - delimiter_chars_scanned
+        if remaining_scan <= 0:
+            return declarations, True
+        call_end, scanned = _matching_javascript_delimiter(
+            source, cursor, max_scan=remaining_scan
+        )
+        delimiter_chars_scanned += scanned
+        if call_end is None:
+            return declarations, True
+        declarations.append(
+            {"start": match.start(), "open": cursor, "close": call_end, "mode": mode}
+        )
+        covered_until = call_end
+    return declarations, False
+
+
+def _test_candidates(
+    path: str,
+    source: bytes,
+    *,
+    javascript_masked: str | None = None,
+    javascript_declarations: list[dict[str, int | str | None]] | None = None,
+) -> tuple[list[dict], int]:
     suffix = PurePosixPath(path).suffix.lower()
     try:
         text = source.decode("utf-8")
     except UnicodeDecodeError:
         return [], 0
     if suffix in {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}:
-        declarations = list(_JS_TEST_DECLARATION.finditer(text))
-        if declarations and not _JS_ASSERTION.search(text):
-            candidates = [
-                {
-                    "category": "no_direct_assertion",
-                    "line": _line_at(text, declarations[0].start()),
-                }
-            ]
-            candidate_count = 1
-        else:
-            candidates = []
-            candidate_count = 0
-        for match in _JS_FLAKY.finditer(text):
+        masked = javascript_masked or _mask_javascript_non_code(text)
+        declarations = javascript_declarations
+        if declarations is None:
+            declarations, _ = _javascript_test_scan(masked)
+        candidates = []
+        candidate_count = 0
+        seen_candidates = set()
+
+        def add_candidate(category: str, offset: int) -> None:
+            nonlocal candidate_count
+            line = _line_at(text, offset)
+            key = (category, line)
+            if key in seen_candidates:
+                return
+            seen_candidates.add(key)
             candidate_count += 1
             if len(candidates) < _MAX_CANDIDATES:
-                candidates.append({"category": "fixed_wait", "line": _line_at(text, match.start())})
-        for match in _JS_SKIP.finditer(text):
-            category = "skipped_test" if match.group("mode") == "skip" else "focused_test"
-            candidate_count += 1
-            if len(candidates) < _MAX_CANDIDATES:
-                candidates.append({"category": category, "line": _line_at(text, match.start())})
+                candidates.append({"category": category, "line": line})
+
+        for declaration in declarations:
+            body = masked[declaration["open"] + 1 : declaration["close"]]
+            if not _JS_ASSERTION.search(body):
+                add_candidate("no_direct_assertion", declaration["start"])
+            mode = declaration["mode"]
+            if mode in {"skip", "todo", "only"}:
+                category = "skipped_test" if mode in {"skip", "todo"} else "focused_test"
+                add_candidate(category, declaration["start"])
+        for match in _JS_FLAKY.finditer(masked):
+            add_candidate("fixed_wait", match.start())
         return candidates, candidate_count
     return [], 0
 
@@ -593,20 +736,116 @@ def _candidate_id(category: str, path: str, line: int, related: str = "") -> str
     return "T-" + hashlib.sha256(value).hexdigest()[:12]
 
 
+def _normalized_test_target(path: str) -> str:
+    name = PurePosixPath(path).stem
+    lowered = name.lower()
+    for prefix in ("test_", "test-"):
+        if lowered.startswith(prefix):
+            name = name[len(prefix) :]
+            break
+    else:
+        if (
+            name.startswith(("Test", "test"))
+            and len(name) > 4
+            and name[4].isupper()
+        ):
+            name = name[4:]
+    lowered = name.lower()
+    for suffix in (".test", "_test", "-test", ".spec", "_spec", "-spec"):
+        if lowered.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    else:
+        if name.endswith(("Test", "Spec")) and len(name) > 4:
+            name = name[:-4]
+    return re.sub(r"[^a-z0-9]+", "", name.lower())
+
+
+def audit_test_source(path: str, source: bytes) -> dict[str, Any]:
+    """Return bounded static test candidates for one pinned source blob."""
+    suffix = PurePosixPath(path).suffix.lower()
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError:
+        return {
+            "tests_identified": 0,
+            "candidate_count": 0,
+            "candidates": [],
+            "javascript_test_declaration_scan_truncated": False,
+            "source_decoding_error": True,
+        }
+    if suffix == ".py":
+        tests_identified, raw_candidates, candidate_count, _ = _python_tests(text)
+        javascript_scan_truncated = False
+    elif suffix in {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}:
+        masked = _mask_javascript_non_code(text)
+        declarations, javascript_scan_truncated = _javascript_test_scan(masked)
+        tests_identified = len(declarations)
+        raw_candidates, candidate_count = _test_candidates(
+            path,
+            source,
+            javascript_masked=masked,
+            javascript_declarations=declarations,
+        )
+    else:
+        return {
+            "tests_identified": 0,
+            "candidate_count": 0,
+            "candidates": [],
+            "javascript_test_declaration_scan_truncated": False,
+            "source_decoding_error": False,
+        }
+    source_sha256 = hashlib.sha256(source).hexdigest()
+    candidates = [
+        {
+            "candidate_id": _candidate_id(candidate["category"], path, candidate["line"]),
+            **candidate,
+            "path": path,
+            "evidence_sha256": source_sha256,
+        }
+        for candidate in raw_candidates[:_MAX_CANDIDATES]
+    ]
+    return {
+        "tests_identified": tests_identified,
+        "candidate_count": candidate_count,
+        "candidates": candidates,
+        "javascript_test_declaration_scan_truncated": javascript_scan_truncated,
+        "source_decoding_error": False,
+    }
+
+
 def audit_test_suite(
     repository: Path,
     revision: str = "HEAD",
     *,
     max_files: int = _MAX_AUDIT_FILES,
+    changed_paths: Sequence[str] = (),
     cache_dir: Path | None = None,
     use_cache: bool = True,
 ) -> dict[str, Any]:
     """Report bounded, source-anchored test-suite candidates from committed Git blobs."""
     if not 1 <= max_files <= _MAX_TEST_FILES:
         raise ValueError(f"max_files must be between 1 and {_MAX_TEST_FILES}")
+    if isinstance(changed_paths, str) or any(
+        not isinstance(path, str) or not path.strip() for path in changed_paths
+    ):
+        raise ValueError("changed_paths must contain non-empty repository-relative paths")
     root, commit, objects = _snapshot(Path(repository), revision)
     paths = _test_paths(sorted(objects))
-    selected_paths = paths[:max_files]
+    changed = set(changed_paths)
+    changed_targets = {
+        _normalized_test_target(path)
+        for path in changed
+        if _normalized_test_target(path)
+    }
+    selected_paths = sorted(
+        paths,
+        key=lambda path: (
+            0 if path in changed else
+            1 if _normalized_test_target(path) in changed_targets else 2,
+            path,
+        ),
+    )[:max_files]
     sources, skipped = _read_blobs(
         root,
         objects,
@@ -617,6 +856,8 @@ def audit_test_suite(
     raw_candidates: list[dict[str, Any]] = []
     raw_candidate_count = 0
     duplicate_bodies: dict[str, tuple[str, int, str]] = {}
+    javascript_scan_truncated_paths = []
+    javascript_source_decoding_error_paths = []
     test_count = 0
     for path in sorted(sources):
         source = sources[path]
@@ -625,11 +866,27 @@ def audit_test_suite(
                 source.decode("utf-8", errors="ignore")
             )
             test_count += file_test_count
-        else:
-            text = source.decode("utf-8", errors="ignore")
-            test_count += len(_JS_TEST_DECLARATION.findall(text))
-            candidates, candidate_count = _test_candidates(path, source)
+        elif PurePosixPath(path).suffix.lower() in {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}:
+            try:
+                text = source.decode("utf-8")
+            except UnicodeDecodeError:
+                javascript_source_decoding_error_paths.append(path)
+                candidates, candidate_count = [], 0
+            else:
+                masked = _mask_javascript_non_code(text)
+                declarations, scan_truncated = _javascript_test_scan(masked)
+                if scan_truncated:
+                    javascript_scan_truncated_paths.append(path)
+                test_count += len(declarations)
+                candidates, candidate_count = _test_candidates(
+                    path,
+                    source,
+                    javascript_masked=masked,
+                    javascript_declarations=declarations,
+                )
             body_hashes = []
+        else:
+            candidates, candidate_count, body_hashes = [], 0, []
         raw_candidate_count += candidate_count
         source_sha256 = hashlib.sha256(source).hexdigest()
         for candidate in candidates:
@@ -689,9 +946,12 @@ def audit_test_suite(
         "profile_fingerprint": profile["profile_fingerprint"],
         "test_files_total": len(paths),
         "test_files_scanned": len(sources),
+        "selection_strategy": "changed_tests_then_related_basename_then_path_order",
         "test_files_skipped_by_limit_or_size": len(skipped)
         + max(0, len(paths) - len(selected_paths)),
         "tests_identified": test_count,
+        "javascript_test_declaration_scan_truncated_paths": javascript_scan_truncated_paths,
+        "javascript_source_decoding_error_paths": javascript_source_decoding_error_paths,
         "candidate_count": raw_candidate_count,
         "candidates": candidates,
         "candidates_omitted": max(0, raw_candidate_count - len(candidates)),
@@ -712,6 +972,12 @@ def repo_audit_main(argv: list[str]) -> int:
         command.add_argument("--no-cache", action="store_true")
         command.add_argument("--output", type=Path)
     audit.add_argument("--max-files", default=_MAX_AUDIT_FILES, type=int)
+    audit.add_argument(
+        "--changed-path",
+        action="append",
+        default=[],
+        help="Prioritize this changed source/test path; may be repeated",
+    )
     args = parser.parse_args(argv)
     settings = Settings.from_env()
     if args.command == "profile":
@@ -726,6 +992,7 @@ def repo_audit_main(argv: list[str]) -> int:
             args.repository,
             args.revision,
             max_files=args.max_files,
+            changed_paths=tuple(args.changed_path),
             cache_dir=settings.data_dir,
             use_cache=not args.no_cache,
         )

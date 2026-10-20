@@ -4,10 +4,11 @@ These commands give a bounded view of a repository beyond one merge request. The
 
 ```bash
 qa-orch repo profile --repository /path/to/repository
-qa-orch repo audit-tests --repository /path/to/repository
+qa-orch repo audit-tests --repository /path/to/repository \
+  --changed-path src/checkout.ts --max-files 250
 ```
 
-Use `--revision <commit-or-ref>` to select another committed snapshot, `--output <file>` to save JSON, and `--no-cache` to skip the local profile cache. `audit-tests` accepts `--max-files` from 1 through 5000; the default is 1000. Each source blob is limited to 1 MiB and the audit reads at most 32 MiB of test sources. Skipped file counts are included in the result.
+Use `--revision <commit-or-ref>` to select another committed snapshot, `--output <file>` to save JSON, and `--no-cache` to skip the local profile cache. Repeat `--changed-path` for each changed source or test file; exact changed tests and tests with matching basenames are scanned first. `audit-tests` accepts `--max-files` from 1 through 5000; the default is 1000. Each source blob is limited to 1 MiB and the audit reads at most 32 MiB of test sources. The result reports the selection strategy and skipped-file count.
 
 ## Project profile
 
@@ -22,10 +23,11 @@ The profile leaves `critical_flows.configured` false. A repository scan cannot e
 `audit-tests` returns candidate signals with a stable candidate ID, source path and line, and SHA-256 of the exact Git blob. Current checks cover:
 
 - Python test functions without a direct assertion or recognized assertion call, and calls such as `now()`, `today()` and `random()`;
+- JavaScript/TypeScript `test`/`it` callbacks, including `test.each`/`it.each`, without a direct assertion in that specific callback; comments and ordinary quoted strings are ignored;
 - fixed waits such as `sleep()`, `waitForTimeout()` and `setTimeout()` in Python or JavaScript/TypeScript;
 - Python skip/xfail decorators and JavaScript/TypeScript `test.skip` / `it.skip` or focused `test.only` / `it.only`;
 - exact repeated Python test bodies.
 
-These are heuristics for follow-up, not findings or proof of flakiness. A helper can contain the assertion, a wait can be intentional, and two identical bodies may still test separate contracts. JavaScript/TypeScript assertion detection is file-level; its time/random calls and duplicate bodies are not checked yet. Python syntax that cannot be parsed produces no Python candidates; JavaScript/TypeScript source must be UTF-8 to produce candidates. `tests_identified` counts discovered declarations, not parameterized runtime cases. Other languages are inventoried but do not yet receive these assertion and flakiness checks. Output is capped at 500 candidates; `candidate_count` and `candidates_omitted` make truncation explicit.
+These are heuristics for follow-up, not findings or proof of flakiness. A helper can contain the assertion, a wait can be intentional, and two identical bodies may still test separate contracts. JavaScript/TypeScript callback detection is a lightweight lexical scan, so assertions hidden in template-literal interpolation, delegated helpers, dynamic test aliases, or unusual syntax can be missed. Delimiter scanning is capped at four times the source length; nested test declarations inside a recognized callback are not counted separately, and malformed or deeply nested source may be incomplete. The output lists files whose declaration scans were truncated and paths that could not be decoded. Time/random calls and duplicate bodies are not checked yet. Python syntax that cannot be parsed produces no Python candidates; JavaScript/TypeScript source must be UTF-8 to produce candidates. `tests_identified` counts discovered declarations, not parameterized runtime cases. Other languages are inventoried but do not yet receive these assertion and flakiness checks. Output is capped at 500 candidates; `candidate_count` and `candidates_omitted` make truncation explicit.
 
 The scanner does not calculate coverage percentages, run tests, infer critical user flows, or prove that a test is included in CI. CI command discovery is a profile hint only. Use the source hashes and locations to review each candidate before making a QA decision.

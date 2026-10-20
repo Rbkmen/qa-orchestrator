@@ -490,14 +490,27 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
         aggregates[configuration] = {
             "runs": len(rows),
             "cases": sorted({r["case_id"] for r in rows}),
+            "case_count": len({r["case_id"] for r in rows}),
             "missing_cases": missing_cases,
             "coverage_complete": not missing_cases,
+            "candidate_count": count,
+            "unverified_candidates": sum(r["unverified"] for r in rows),
             "precision": sum(r["valid"] for r in rows) / count if count else None,
             "recall": sum(r["matched_gold"] for r in rows) / gold_count
             if not missing_cases and gold_count and all(r["recall"] is not None for r in rows)
             else None,
             "precision_is_lower_bound": any(r["unverified"] for r in rows),
+            "missed_high_impact": sum(r["missed_high_impact"] for r in rows),
+            "evidence_validation_rate": (
+                sum(r["evidence_validated"] for r in rows) / count if count else None
+            ),
+            "location_validation_rate": (
+                sum(r["location_validated"] for r in rows) / count if count else None
+            ),
             "mean_elapsed_ms": sum(r["elapsed_ms"] for r in rows) / len(rows) if rows else None,
+            "median_elapsed_ms": (
+                statistics.median(r["elapsed_ms"] for r in rows) if rows else None
+            ),
             "input_tokens": sum(r["input_tokens"] for r in rows)
             if rows and all(r["input_tokens"] is not None for r in rows)
             else None,
@@ -521,6 +534,175 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
     if results.failures:
         payload["failures"] = [failure.model_dump(mode="json") for failure in results.failures]
     return payload
+
+
+def evaluate_quality_gate(
+    score: dict,
+    *,
+    configuration_id: str,
+    min_precision: float,
+    min_recall: float,
+    min_cases: int = 1,
+    max_missed_high_impact: int = 0,
+    min_evidence_validation_rate: float | None = None,
+    min_location_validation_rate: float | None = None,
+    max_mean_elapsed_ms: float | None = None,
+) -> dict:
+    """Evaluate explicit quality and optional speed thresholds on a scored run."""
+    if not isinstance(score, dict):
+        raise TypeError("score must be a JSON object")
+    if score.get("scoring") != "local_explicit_adjudication":
+        raise ValueError("quality gate requires a local explicit-adjudication score")
+    if not isinstance(configuration_id, str) or not configuration_id.strip():
+        raise ValueError("configuration_id must not be empty")
+    if type(min_cases) is not int or min_cases < 1:
+        raise ValueError("min_cases must be a positive integer")
+    if type(max_missed_high_impact) is not int or max_missed_high_impact < 0:
+        raise ValueError("max_missed_high_impact must be a non-negative integer")
+
+    def validate_rate(name: str, value: float | None, *, optional: bool) -> None:
+        if value is None and optional:
+            return
+        if type(value) not in {int, float} or not math.isfinite(value) or not 0 <= value <= 1:
+            raise ValueError(f"{name} must be between 0 and 1")
+
+    validate_rate("min_precision", min_precision, optional=False)
+    validate_rate("min_recall", min_recall, optional=False)
+    validate_rate(
+        "min_evidence_validation_rate", min_evidence_validation_rate, optional=True
+    )
+    validate_rate(
+        "min_location_validation_rate", min_location_validation_rate, optional=True
+    )
+    if max_mean_elapsed_ms is not None and (
+        type(max_mean_elapsed_ms) not in {int, float}
+        or not math.isfinite(max_mean_elapsed_ms)
+        or max_mean_elapsed_ms < 0
+    ):
+        raise ValueError("max_mean_elapsed_ms must be a non-negative finite number")
+
+    configurations = score.get("configurations")
+    if not isinstance(configurations, dict) or configuration_id not in configurations:
+        raise ValueError("quality gate configuration is absent from the score")
+    aggregate = configurations[configuration_id]
+    if not isinstance(aggregate, dict):
+        raise TypeError("configuration aggregate must be an object")
+    cases = aggregate.get("cases")
+    missing_cases = aggregate.get("missing_cases")
+    coverage_complete = aggregate.get("coverage_complete")
+    if not isinstance(cases, list) or any(
+        not isinstance(case, str) or not case.strip() for case in cases
+    ):
+        raise ValueError("configuration cases must be a list of non-empty strings")
+    if not isinstance(missing_cases, list) or any(
+        not isinstance(case, str) or not case.strip() for case in missing_cases
+    ):
+        raise ValueError("missing_cases must be a list of non-empty strings")
+    if type(coverage_complete) is not bool or coverage_complete != (not missing_cases):
+        raise ValueError("coverage_complete does not match missing_cases")
+
+    def validate_observed_rate(name: str) -> float | int | None:
+        value = aggregate.get(name)
+        if value is not None and (
+            type(value) not in {int, float}
+            or not math.isfinite(value)
+            or not 0 <= value <= 1
+        ):
+            raise ValueError(f"scored {name} must be between 0 and 1")
+        return value
+
+    precision = validate_observed_rate("precision")
+    recall = validate_observed_rate("recall")
+    evidence_validation_rate = validate_observed_rate("evidence_validation_rate")
+    location_validation_rate = validate_observed_rate("location_validation_rate")
+    precision_is_lower_bound = aggregate.get("precision_is_lower_bound")
+    if type(precision_is_lower_bound) is not bool:
+        raise ValueError("precision_is_lower_bound must be a boolean")
+    missed_high_impact = aggregate.get("missed_high_impact")
+    if type(missed_high_impact) is not int or missed_high_impact < 0:
+        raise ValueError("missed_high_impact must be a non-negative integer")
+    mean_elapsed_ms = aggregate.get("mean_elapsed_ms")
+    if mean_elapsed_ms is not None and (
+        type(mean_elapsed_ms) not in {int, float}
+        or not math.isfinite(mean_elapsed_ms)
+        or mean_elapsed_ms < 0
+    ):
+        raise ValueError("mean_elapsed_ms must be a non-negative finite number")
+
+    case_count = len(set(cases))
+    observed = {
+        "case_count": case_count,
+        "cases": cases,
+        "missing_cases": missing_cases,
+        "coverage_complete": coverage_complete,
+        "precision": precision,
+        "precision_is_lower_bound": precision_is_lower_bound,
+        "recall": recall,
+        "missed_high_impact": missed_high_impact,
+        "evidence_validation_rate": evidence_validation_rate,
+        "location_validation_rate": location_validation_rate,
+        "mean_elapsed_ms": mean_elapsed_ms,
+    }
+    reasons = []
+    if not observed["coverage_complete"]:
+        reasons.append("case coverage is incomplete")
+    if case_count < min_cases:
+        reasons.append(f"only {case_count} case(s) scored; {min_cases} required")
+    if observed["precision"] is None:
+        reasons.append("precision is unavailable")
+    elif observed["precision"] < min_precision:
+        reasons.append(f"precision {observed['precision']:.4f} is below {min_precision:.4f}")
+    if observed["precision_is_lower_bound"]:
+        reasons.append("precision is only a lower bound because adjudications are unresolved")
+    if observed["recall"] is None:
+        reasons.append("recall is unavailable")
+    elif observed["recall"] < min_recall:
+        reasons.append(f"recall {observed['recall']:.4f} is below {min_recall:.4f}")
+    missed = observed["missed_high_impact"]
+    if not isinstance(missed, int) or missed > max_missed_high_impact:
+        count = missed if isinstance(missed, int) else "unknown"
+        reasons.append(
+            f"missed {count} high-impact gold finding(s); maximum is {max_missed_high_impact}"
+        )
+    for metric, threshold, label in (
+        ("evidence_validation_rate", min_evidence_validation_rate, "evidence validation"),
+        ("location_validation_rate", min_location_validation_rate, "location validation"),
+    ):
+        value = observed[metric]
+        if threshold is not None and (value is None or value < threshold):
+            reasons.append(
+                f"{label} rate {value if value is not None else 'unavailable'} "
+                f"is below {threshold:.4f}"
+            )
+    elapsed = observed["mean_elapsed_ms"]
+    if max_mean_elapsed_ms is not None and (
+        elapsed is None or elapsed > max_mean_elapsed_ms
+    ):
+        reasons.append(
+            f"mean elapsed time {elapsed if elapsed is not None else 'unavailable'} ms "
+            f"exceeds {max_mean_elapsed_ms:g} ms"
+        )
+    return {
+        "schema_version": 1,
+        "configuration_id": configuration_id,
+        "dataset_kind": score.get("dataset_kind"),
+        "passed": not reasons,
+        "thresholds": {
+            "min_cases": min_cases,
+            "min_precision": min_precision,
+            "min_recall": min_recall,
+            "max_missed_high_impact": max_missed_high_impact,
+            "min_evidence_validation_rate": min_evidence_validation_rate,
+            "min_location_validation_rate": min_location_validation_rate,
+            "max_mean_elapsed_ms": max_mean_elapsed_ms,
+        },
+        "observed": observed,
+        "reasons": reasons,
+        "scope": (
+            "Checks aggregate metrics from explicit host/reviewer adjudications. It cannot "
+            "verify adjudicator correctness or prove that a model executed the review."
+        ),
+    }
 
 
 def score_reliability(
@@ -1113,6 +1295,19 @@ def benchmark_main(argv: list[str]) -> int:
     score.add_argument("--dataset", required=True, type=Path)
     score.add_argument("--results", required=True, type=Path)
     score.add_argument("--output", type=Path)
+    quality_gate = subparsers.add_parser(
+        "quality-gate", aliases=["gate"], help="Apply explicit quality and speed thresholds"
+    )
+    quality_gate.add_argument("--score", required=True, type=Path)
+    quality_gate.add_argument("--configuration", required=True)
+    quality_gate.add_argument("--min-cases", default=1, type=int)
+    quality_gate.add_argument("--min-precision", required=True, type=float)
+    quality_gate.add_argument("--min-recall", required=True, type=float)
+    quality_gate.add_argument("--max-missed-high-impact", default=0, type=int)
+    quality_gate.add_argument("--min-evidence-validation-rate", type=float)
+    quality_gate.add_argument("--min-location-validation-rate", type=float)
+    quality_gate.add_argument("--max-mean-elapsed-ms", type=float)
+    quality_gate.add_argument("--output", type=Path)
     reliability = subparsers.add_parser("reliability", help="Score fresh repeated review runs")
     reliability.add_argument("--dataset", required=True, type=Path)
     reliability.add_argument("--results", required=True, type=Path)
@@ -1151,7 +1346,20 @@ def benchmark_main(argv: list[str]) -> int:
     diff_budget.add_argument("--max-context-bytes", required=True, type=int)
     diff_budget.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
-    if args.command == "import-reviewbench":
+    if args.command in {"quality-gate", "gate"}:
+        score = json.loads(args.score.read_bytes())
+        payload = evaluate_quality_gate(
+            score,
+            configuration_id=args.configuration,
+            min_cases=args.min_cases,
+            min_precision=args.min_precision,
+            min_recall=args.min_recall,
+            max_missed_high_impact=args.max_missed_high_impact,
+            min_evidence_validation_rate=args.min_evidence_validation_rate,
+            min_location_validation_rate=args.min_location_validation_rate,
+            max_mean_elapsed_ms=args.max_mean_elapsed_ms,
+        )
+    elif args.command == "import-reviewbench":
         payload = import_reviewbench(args.golden, args.repository).model_dump(mode="json")
     elif args.command == "import-reviewbench-set":
         payload = import_reviewbench_case_set(
@@ -1184,4 +1392,4 @@ def benchmark_main(argv: list[str]) -> int:
         args.output.write_text(output, encoding="utf-8")
     else:
         print(output, end="")
-    return 0
+    return 1 if args.command in {"quality-gate", "gate"} and not payload["passed"] else 0

@@ -270,19 +270,26 @@ qa-orch evidence discover --context registered-context.json \
 The bounded scan reads only the pinned Git head, reports symbol matches and line
 numbers, and includes source records with content hashes that can be reviewed for
 the full evidence registry. Symbol search checks up to 32 deterministic,
-path-related files, in batches, instead of scanning every tracked blob. Candidate
-search reads are capped at 32 paths and 16 MB total (with a per-file size limit);
-candidate source reads are also capped at twice the requested result count, up to 200.
-The manifest reports both limits and the number of symbol-search paths omitted
-by the cap. A missing match does not prove that a caller is absent; reconcile
-likely callers with CodeGraph. For changed Python and JavaScript/TypeScript files,
-it follows local Python imports, relative or common root-alias JS/TS imports, and
-common Python mock targets to matching references and declarations. Exact local
-Python module paths from imports are prioritized even when the module filename
-shares no tokens with the changed test or imported symbol. For changed
-test files, it also suggests applicable ancestor package and test dependency
-manifests. It continues to suggest tests by repository path convention. These are
-candidates: review and reconcile them with CodeGraph, select
+path-related files, in batches, instead of scanning every tracked blob. A separate
+module-name search uses at most 48 names from changed modules and symbols and caps
+the path-list output at 32 MB; matching files are suggestions until their import
+edges are checked from pinned source. Candidate symbol reads remain capped at 32
+paths and 16 MB (with a per-file size limit), and final candidate source reads are
+capped at twice the requested result count, up to 200. The manifest reports these
+limits, omissions, and scanned-file counts; `changed_source_symbol_collection_truncated` and
+`changed_sources_skipped_symbol_scan` distinguish symbol-budget truncation from the
+continued changed-test and direct-import scans. A missing match does not prove that a
+caller is absent; reconcile likely callers with CodeGraph. For changed Python and
+JavaScript/TypeScript files, it follows local Python imports, relative or common
+root-alias JS/TS imports, and common Python mock targets to matching references
+and declarations. It also finds direct Python/JS/TS importers that use changed
+modules, even when paths and imported names do not overlap. For changed and
+selected neighbor test files, it exposes bounded assertion/wait/skip audit
+candidates. Run `qa-orch repo audit-tests` with repeated `--changed-path` values
+for a broader repository-wide scan; both are heuristic suggestions, not confirmed
+defects. For changed test files, discovery also suggests applicable ancestor
+package and test dependency manifests. It continues to suggest tests by repository
+path convention. These are candidates: review and reconcile them with CodeGraph, select
 the necessary paths, add their refs to the unbound context, and add their record
 objects to the full records list passed to `qa-orch evidence build`. Keep every
 existing record in that list because `build` replaces the registry. It does not

@@ -60,6 +60,13 @@ The MCP server only publishes the schedule and validates reported transition ord
 
 Use the [local benchmark runner](BENCHMARK.md) to import pinned ReviewBench references and score explicit adjudications. It keeps missing cases and unknown token usage visible and does not perform automatic semantic judging.
 
+After scoring, `qa-orch benchmark quality-gate` can enforce approved minimum
+precision/recall and maximum high-impact misses, with optional evidence,
+location, and latency limits. No representative adjudicated benchmark is checked
+into this repository, so CI tests the gate behavior with synthetic data; run the
+gate on a complete, locally adjudicated set before claiming review-quality
+improvement.
+
 Use a fixed set of real, completed changes with human-adjudicated expected findings. Keep the same source snapshot, Evidence Packet, host instructions, profile checklists, model, and reasoning for each schedule under comparison. Match findings by the underlying failure mode, not wording; have a reviewer confirm evidence before counting a match.
 
 Record per case:
@@ -94,7 +101,7 @@ The schedule remains an unmeasured experiment. Apply the benchmark protocol abov
 
 **Evidence:** `E1` states that the consumer expects minor units; `E2` shows the changed code dividing by 100; `E3` shows the consumer still dividing by 100.
 
-**Expected:** Return one candidate for double scaling, supported by `E1`–`E3`, with a confidence and verification gap. Do not assign severity or release readiness.
+**Expected:** Return one candidate for double scaling, supported by `E1`–`E3`, with a concrete failure condition, a source/contract-based flip condition, confidence, and verification gap. Do not assign severity or release readiness.
 
 ### 3. Coverage gap only — `pr_test_analyzer`
 

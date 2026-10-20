@@ -13,6 +13,7 @@ from qa_orchestrator.benchmark import (
     benchmark_main,
     check_diff_budget,
     compare_speed,
+    evaluate_quality_gate,
     import_reviewbench,
     import_reviewbench_case_set,
     import_reviewbench_test_set,
@@ -123,6 +124,143 @@ def test_scoring_uses_explicit_verdicts_and_counts_duplicate_noise(benchmark_inp
     assert strata["scope"]["exacerbated-by-pr"]["recall"] == 0.0
     assert strata["difficulty"]["easy"]["recall"] == 1.0
     assert strata["context_required"]["broader-project-context"]["recall"] == 0.0
+
+
+def test_quality_gate_checks_complete_coverage_quality_and_latency():
+    score = {
+        "scoring": "local_explicit_adjudication",
+        "dataset_kind": "curated",
+        "configurations": {
+            "candidate": {
+                "coverage_complete": True,
+                "cases": ["case-a", "case-b"],
+                "missing_cases": [],
+                "precision": 0.92,
+                "recall": 0.86,
+                "precision_is_lower_bound": False,
+                "missed_high_impact": 0,
+                "evidence_validation_rate": 0.95,
+                "location_validation_rate": 0.9,
+                "mean_elapsed_ms": 8000,
+            }
+        },
+    }
+
+    result = evaluate_quality_gate(
+        score,
+        configuration_id="candidate",
+        min_cases=2,
+        min_precision=0.9,
+        min_recall=0.8,
+        max_missed_high_impact=0,
+        min_evidence_validation_rate=0.9,
+        min_location_validation_rate=0.85,
+        max_mean_elapsed_ms=10000,
+    )
+
+    assert result["passed"] is True
+    assert result["observed"]["case_count"] == 2
+    assert result["dataset_kind"] == "curated"
+
+
+def test_quality_gate_fails_incomplete_or_unresolved_runs():
+    score = {
+        "scoring": "local_explicit_adjudication",
+        "dataset_kind": "reviewbench_reference",
+        "configurations": {
+            "candidate": {
+                "coverage_complete": False,
+                "cases": ["case-a"],
+                "missing_cases": ["case-b"],
+                "precision": 0.99,
+                "recall": None,
+                "precision_is_lower_bound": True,
+                "missed_high_impact": 1,
+                "evidence_validation_rate": 0.5,
+                "location_validation_rate": 0.5,
+                "mean_elapsed_ms": 20000,
+            }
+        },
+    }
+
+    result = evaluate_quality_gate(
+        score,
+        configuration_id="candidate",
+        min_cases=2,
+        min_precision=0.9,
+        min_recall=0.8,
+        max_missed_high_impact=0,
+        min_evidence_validation_rate=0.8,
+        min_location_validation_rate=0.8,
+        max_mean_elapsed_ms=10000,
+    )
+
+    assert result["passed"] is False
+    assert result["reasons"]
+    assert "case coverage is incomplete" in result["reasons"]
+    assert "recall is unavailable" in result["reasons"]
+    assert any(reason.startswith("precision is only a lower bound") for reason in result["reasons"])
+    assert any(reason.startswith("missed 1 high-impact gold finding(s)") for reason in result["reasons"])
+
+
+def test_quality_gate_rejects_malformed_score_aggregate():
+    score = {
+        "scoring": "local_explicit_adjudication",
+        "configurations": {"candidate": []},
+    }
+
+    with pytest.raises(TypeError, match="configuration aggregate must be an object"):
+        evaluate_quality_gate(
+            score,
+            configuration_id="candidate",
+            min_precision=0.9,
+            min_recall=0.8,
+        )
+
+
+def test_quality_gate_cli_returns_nonzero_when_thresholds_fail(tmp_path):
+    score_path = tmp_path / "score.json"
+    score_path.write_text(
+        json.dumps(
+            {
+                "scoring": "local_explicit_adjudication",
+                "dataset_kind": "curated",
+                "configurations": {
+                    "candidate": {
+                        "coverage_complete": True,
+                        "cases": ["case-a"],
+                        "missing_cases": [],
+                        "precision": 0.5,
+                        "recall": 0.5,
+                        "precision_is_lower_bound": False,
+                        "missed_high_impact": 0,
+                        "evidence_validation_rate": 1.0,
+                        "location_validation_rate": 1.0,
+                        "mean_elapsed_ms": 100,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = benchmark_main(
+        [
+            "quality-gate",
+            "--score",
+            str(score_path),
+            "--configuration",
+            "candidate",
+            "--min-cases",
+            "1",
+            "--min-precision",
+            "0.9",
+            "--min-recall",
+            "0.8",
+        ]
+    )
+
+    assert result == 1
 
 
 def test_scores_reject_different_source_snapshot(benchmark_inputs):

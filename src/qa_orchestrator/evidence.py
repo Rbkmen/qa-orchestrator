@@ -25,6 +25,8 @@ _DISCOVERY_MAX_CANDIDATES = 200
 _DISCOVERY_MAX_CANDIDATE_SCAN_PATHS = 200
 _DISCOVERY_MAX_SYMBOL_SEARCH_PATHS = 32
 _DISCOVERY_MAX_SYMBOL_SEARCH_BYTES = 16_000_000
+_DISCOVERY_MAX_MODULE_SEARCH_TERMS = 48
+_DISCOVERY_MAX_MODULE_SEARCH_BYTES = 32_000_000
 _DISCOVERY_SYMBOL_SEARCH_BATCH_SIZE = 32
 _IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]{2,127}$")
 _IGNORED_IDENTIFIERS = {
@@ -364,26 +366,76 @@ def _tracked_module_paths(module: str, tracked_paths: set[str]) -> set[str]:
     }
 
 
-def _referenced_module_paths(path: str, source: bytes, tracked_paths: set[str]) -> set[str]:
-    """Resolve exact local Python modules imported by a changed source file."""
-    if not path.endswith(".py"):
-        return set()
-    try:
-        tree = ast.parse(source.decode("utf-8"))
-    except (UnicodeDecodeError, SyntaxError):
+def _normalized_relative_module_path(path: str, module: str) -> str:
+    parts = list(PurePosixPath(path).parent.parts)
+    for part in module.split("/"):
+        if not part or part == ".":
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    return "/".join(parts)
+
+
+def _tracked_typescript_module_paths(
+    path: str, module: str, tracked_paths: set[str]
+) -> set[str]:
+    if module.startswith("."):
+        target = _normalized_relative_module_path(path, module)
+    elif module.startswith(("@/", "~/")):
+        target = module[2:]
+        if not any(f"{target}{suffix}" in tracked_paths for suffix in (".ts", ".tsx", ".js", ".jsx")):
+            target = f"src/{target}"
+    elif module.startswith("src/"):
+        target = module
+    else:
         return set()
 
-    paths: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            module = _relative_python_module(path, node.module, node.level)
-            paths.update(_tracked_module_paths(module, tracked_paths))
-            for alias in node.names:
-                paths.update(_tracked_module_paths(f"{module}/{alias.name}", tracked_paths))
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                paths.update(_tracked_module_paths(alias.name, tracked_paths))
-    return paths
+    variants = [target]
+    suffixes = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts", ".json")
+    if PurePosixPath(target).suffix.lower() in suffixes:
+        suffix = PurePosixPath(target).suffix
+        if suffix in {".js", ".jsx", ".mjs", ".cjs"}:
+            stem = target[: -len(suffix)]
+            variants.extend(f"{stem}{replacement}" for replacement in (".ts", ".tsx", ".mts", ".cts"))
+    else:
+        variants.extend(f"{target}{suffix}" for suffix in suffixes)
+    variants.extend(f"{target}/index{suffix}" for suffix in suffixes if suffix != ".json")
+    return {candidate for candidate in variants if candidate in tracked_paths}
+
+
+def _referenced_module_paths(path: str, source: bytes, tracked_paths: set[str]) -> set[str]:
+    """Resolve static local Python or JavaScript/TypeScript imports."""
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError:
+        return set()
+    if PurePosixPath(path).suffix.lower() == ".py":
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            return set()
+        paths: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = _relative_python_module(path, node.module, node.level)
+                paths.update(_tracked_module_paths(module, tracked_paths))
+                for alias in node.names:
+                    paths.update(_tracked_module_paths(f"{module}/{alias.name}", tracked_paths))
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    paths.update(_tracked_module_paths(alias.name, tracked_paths))
+        return paths
+    if PurePosixPath(path).suffix.lower() in {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}:
+        paths = set()
+        for match in _TS_IMPORT.finditer(text):
+            paths.update(
+                _tracked_typescript_module_paths(path, match.group("module"), tracked_paths)
+            )
+        return paths
+    return set()
 
 
 def _local_dotted_symbol(target: str, tracked_paths: set[str]) -> str | None:
@@ -574,12 +626,18 @@ def discover_neighbor_evidence(
         raise ValueError("neighbor scan exceeds the tracked-path limit")
     tracked_set = set(tracked)
     changed = set(context.changed_files)
+    from qa_orchestrator.repo_audit import audit_test_source
+
+    test_audit_by_path: dict[str, dict] = {}
+    test_audit_files_scanned = 0
     defined_symbols: set[str] = set()
     referenced_symbols: set[str] = set()
     referenced_module_paths: set[str] = set()
     total_bytes = 0
     scanned_sources = 0
     skipped_by_limits = 0
+    collect_changed_symbols = True
+    changed_sources_skipped_symbol_scan = 0
     for path in sorted(changed & tracked_set):
         size = int(_git(repository, "cat-file", "-s", f"{context.head_sha}:{path}"))
         if size > _DISCOVERY_MAX_SOURCE_BYTES or total_bytes + size > _DISCOVERY_MAX_TOTAL_BYTES:
@@ -588,11 +646,17 @@ def discover_neighbor_evidence(
         source = _git(repository, "show", f"{context.head_sha}:{path}")
         total_bytes += len(source)
         scanned_sources += 1
-        defined_symbols.update(_defined_symbols(path, source))
-        referenced_symbols.update(_referenced_symbols(path, source, tracked_set))
+        if collect_changed_symbols:
+            defined_symbols.update(_defined_symbols(path, source))
+            referenced_symbols.update(_referenced_symbols(path, source, tracked_set))
+            if len(defined_symbols | referenced_symbols) >= _DISCOVERY_MAX_SYMBOLS:
+                collect_changed_symbols = False
+        else:
+            changed_sources_skipped_symbol_scan += 1
         referenced_module_paths.update(_referenced_module_paths(path, source, tracked_set))
-        if len(defined_symbols | referenced_symbols) >= _DISCOVERY_MAX_SYMBOLS:
-            break
+        if _TEST_PATH.search(path):
+            test_audit_by_path[path] = audit_test_source(path, source)
+            test_audit_files_scanned += 1
     ordered_defined_symbols = tuple(
         sorted(defined_symbols, key=lambda name: (-len(name), name))[:_DISCOVERY_MAX_SYMBOLS]
     )
@@ -602,6 +666,16 @@ def discover_neighbor_evidence(
     ordered_symbols = tuple(
         dict.fromkeys((*ordered_referenced_symbols, *ordered_defined_symbols))
     )[:_DISCOVERY_MAX_SYMBOLS]
+
+    module_names = []
+    for path in sorted(changed):
+        name = PurePosixPath(path).stem
+        if name in {"__init__", "index"}:
+            name = PurePosixPath(path).parent.name
+        if _IDENTIFIER.fullmatch(name) and name.lower() not in _IGNORED_IDENTIFIERS:
+            module_names.append(name)
+    all_module_search_terms = tuple(dict.fromkeys((*module_names, *ordered_symbols)))
+    module_search_terms = all_module_search_terms[:_DISCOVERY_MAX_MODULE_SEARCH_TERMS]
 
     changed_path_tokens = set().union(*(_path_tokens(path) for path in changed)) if changed else set()
     symbol_path_tokens = (
@@ -683,18 +757,51 @@ def discover_neighbor_evidence(
             except UnicodeDecodeError as exc:
                 raise ValueError("neighbor paths must be valid UTF-8") from exc
 
+    module_name_search_paths: set[str] = set()
+    module_name_search_bytes = 0
+    if module_search_terms:
+        command = ["git", "-C", str(repository), "grep", "-I", "-F", "-w", "-l", "-z", "-i"]
+        for term in module_search_terms:
+            command.extend(("-e", term))
+        command.extend((context.head_sha, "--"))
+        result = subprocess.run(command, capture_output=True, check=False)
+        if result.returncode not in {0, 1}:
+            raise ValueError("pinned module-name search failed")
+        module_name_search_bytes = len(result.stdout)
+        if module_name_search_bytes > _DISCOVERY_MAX_MODULE_SEARCH_BYTES:
+            raise ValueError("module-name search result exceeds the output limit")
+        try:
+            module_name_search_paths.update(
+                part.decode("utf-8").split(":", 1)[-1]
+                for part in result.stdout.split(b"\0")
+                if part
+            )
+        except UnicodeDecodeError as exc:
+            raise ValueError("module-name search paths must be valid UTF-8") from exc
+
     candidates = []
-    candidate_paths = sorted(
-        (grep_paths | referenced_module_paths | test_paths | dependency_manifest_paths) - changed,
+    all_candidate_paths = sorted(
+        (
+            grep_paths
+            | module_name_search_paths
+            | referenced_module_paths
+            | test_paths
+            | dependency_manifest_paths
+        )
+        - changed,
         key=lambda path: (
             0 if path in dependency_manifest_paths else
             1 if path in referenced_module_paths else
-            2 if path in grep_paths and "test" in _neighbor_categories(path) else
-            3 if path in grep_paths and "contract" in _neighbor_categories(path) else
-            4 if path in grep_paths else 5,
+            2 if path in module_name_search_paths else
+            3 if path in test_paths else
+            4 if path in grep_paths and "test" in _neighbor_categories(path) else
+            5 if path in grep_paths and "contract" in _neighbor_categories(path) else
+            6 if path in grep_paths else 7,
             path,
         ),
-    )[:min(_DISCOVERY_MAX_CANDIDATE_SCAN_PATHS, max_candidates * 2)]
+    )
+    candidate_scan_limit = min(_DISCOVERY_MAX_CANDIDATE_SCAN_PATHS, max_candidates * 2)
+    candidate_paths = all_candidate_paths[:candidate_scan_limit]
     for path in candidate_paths:
         if path not in tracked_set:
             continue
@@ -712,6 +819,12 @@ def discover_neighbor_evidence(
             text = source.decode("utf-8")
         except UnicodeDecodeError:
             continue
+        test_audit = (
+            audit_test_source(path, source) if _TEST_PATH.search(path) else None
+        )
+        if test_audit is not None:
+            test_audit_by_path[path] = test_audit
+            test_audit_files_scanned += 1
         matches_by_symbol: dict[str, list[int]] = {}
         if ordered_symbols:
             alternatives = "|".join(re.escape(symbol) for symbol in ordered_symbols)
@@ -728,6 +841,9 @@ def discover_neighbor_evidence(
             for symbol, lines in sorted(matches_by_symbol.items())
         ]
         categories = list(_neighbor_categories(path))
+        imported_changed_paths = sorted(
+            _referenced_module_paths(path, source, tracked_set) & changed
+        )
         declarations = set(matches_by_symbol) & set(_defined_symbols(path, source))
         if declarations and categories == ["caller"]:
             categories = ["declaration"]
@@ -751,6 +867,14 @@ def discover_neighbor_evidence(
             reasons.append("test_dependency_manifest")
         if path in referenced_module_paths:
             reasons.append("local_module_import")
+        if imported_changed_paths:
+            categories.append("importer")
+            reasons.append("imports_changed_path")
+        if test_audit and test_audit["candidate_count"]:
+            reasons.extend(
+                f"test_audit_{candidate['category']}"
+                for candidate in test_audit["candidates"]
+            )
         if not reasons:
             continue
         candidates.append(
@@ -759,6 +883,8 @@ def discover_neighbor_evidence(
                 "categories": list(categories),
                 "matched_symbols": matches,
                 "reasons": reasons,
+                "imported_changed_paths": imported_changed_paths,
+                "test_audit_candidates": test_audit["candidates"] if test_audit else [],
                 "size_bytes": len(source),
                 "sha256": hashlib.sha256(source).hexdigest(),
             }
@@ -775,6 +901,11 @@ def discover_neighbor_evidence(
     )
     candidates = candidates[:max_candidates]
     used_refs = set(context.evidence_refs)
+    test_audit_evidence_refs_by_path = {
+        entry.path: entry.evidence_ref
+        for entry in context.evidence_registry
+        if entry.kind == "source" and entry.revision == context.head_sha and entry.path
+    }
     records = []
     next_id = 1
     for candidate in candidates:
@@ -790,6 +921,11 @@ def discover_neighbor_evidence(
         )
         used_refs.add(record.evidence_ref)
         next_id += 1
+        test_audit_evidence_refs_by_path[candidate["path"]] = record.evidence_ref
+        candidate["test_audit_candidates"] = [
+            {**audit_candidate, "evidence_ref": record.evidence_ref}
+            for audit_candidate in candidate["test_audit_candidates"]
+        ]
         records.append({**candidate, "record": record.model_dump(mode="json")})
 
     return {
@@ -803,9 +939,21 @@ def discover_neighbor_evidence(
         "referenced_symbols": list(ordered_referenced_symbols),
         "referenced_module_paths": sorted(referenced_module_paths),
         "searched_symbols": list(ordered_symbols),
+        "module_search_terms": list(module_search_terms),
+        "module_search_terms_omitted": max(
+            0, len(all_module_search_terms) - len(module_search_terms)
+        ),
+        "module_name_search_paths": len(module_name_search_paths),
+        "module_name_search_bytes": module_name_search_bytes,
+        "module_name_search_bytes_limit": _DISCOVERY_MAX_MODULE_SEARCH_BYTES,
+        "module_name_search_exhaustive": False,
+        "changed_source_symbol_collection_truncated": not collect_changed_symbols,
+        "changed_sources_skipped_symbol_scan": changed_sources_skipped_symbol_scan,
         "candidate_records": records,
         "candidate_limit": max_candidates,
-        "candidate_scan_limit": min(_DISCOVERY_MAX_CANDIDATE_SCAN_PATHS, max_candidates * 2),
+        "candidate_paths_considered": len(candidate_paths),
+        "candidate_paths_omitted_by_limit": max(0, len(all_candidate_paths) - len(candidate_paths)),
+        "candidate_scan_limit": candidate_scan_limit,
         "symbol_search_scope": "ranked_path_candidates",
         "symbol_search_path_limit": _DISCOVERY_MAX_SYMBOL_SEARCH_PATHS,
         "symbol_search_bytes_limit": _DISCOVERY_MAX_SYMBOL_SEARCH_BYTES,
@@ -817,12 +965,45 @@ def discover_neighbor_evidence(
             len(symbol_search_candidate_paths) - len(symbol_search_paths)
         ),
         "symbol_search_exhaustive": False,
+        "test_audit": {
+            "scope": "changed paths and selected neighbor test files",
+            "test_files_scanned": test_audit_files_scanned,
+            "javascript_test_declaration_scan_truncated_paths": [
+                path
+                for path, audit in sorted(test_audit_by_path.items())
+                if audit["javascript_test_declaration_scan_truncated"]
+            ],
+            "source_decoding_error_paths": [
+                path
+                for path, audit in sorted(test_audit_by_path.items())
+                if audit["source_decoding_error"]
+            ],
+            "candidate_count": sum(
+                audit["candidate_count"] for audit in test_audit_by_path.values()
+            ),
+            "candidates": [
+                {
+                    **candidate,
+                    "evidence_ref": test_audit_evidence_refs_by_path.get(path),
+                }
+                for path in sorted(test_audit_by_path)
+                for candidate in test_audit_by_path[path]["candidates"]
+            ],
+            "limitations": [
+                "Static candidates require source review and are not confirmed defects.",
+                "Only changed paths and test files within the bounded neighbor scan are audited.",
+                "Run qa-orch repo audit-tests for a bounded repository-wide scan.",
+            ],
+        },
         "source_files_scanned": scanned_sources,
         "sources_skipped_by_scan_limits": skipped_by_limits,
         "exhaustive": False,
         "notes": [
             "These are host-review suggestions, not an evidence-completeness claim.",
             "Symbol search is limited to ranked path-related files; missing callers are not evidence of absence.",
+            "Module-name search and direct-import verification are bounded; omitted paths and terms remain possible.",
+            "Changed source symbol extraction stops at its symbol budget, while direct import and changed-test scans continue within byte limits.",
+            "Test-audit signals cover changed and selected neighbor test files only; use repo audit-tests for wider coverage.",
             "Reconcile callers/contracts with CodeGraph before binding neighbor evidence.",
             "Add accepted record objects and refs to the full registry before building the Evidence Packet.",
         ],

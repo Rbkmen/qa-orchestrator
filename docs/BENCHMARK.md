@@ -88,6 +88,28 @@ qa-orch benchmark score --dataset /path/to/run/dataset.json \
 
 The output reports precision, recall against complete reference sets, missed high-impact findings, correctness by confidence tier, validated evidence/locations, time, and token counts. It also breaks gold recall down by severity, category, PR scope, difficulty, and required context so misses can guide the next prompt or evidence change. Missing token usage stays unknown. Aggregates stay separate by configuration and explicitly list unreviewed cases; overall and stratified recall are unavailable for incomplete case coverage or incomplete gold.
 
+Apply a deterministic gate to a scored aggregate before accepting a prompt, model,
+or scheduling change:
+
+```sh
+qa-orch benchmark quality-gate --score /path/to/run/score.json \
+  --configuration candidate --min-cases 25 \
+  --min-precision <approved-threshold> --min-recall <approved-threshold> \
+  --max-missed-high-impact 0 \
+  --min-evidence-validation-rate <approved-threshold> \
+  --min-location-validation-rate <approved-threshold> \
+  --max-mean-elapsed-ms <approved-budget> \
+  --output /path/to/run/quality-gate.json
+```
+
+Precision and recall thresholds are required. Case coverage must be complete,
+recall must be available, and unresolved adjudications fail the gate because they
+leave precision as a lower bound. Evidence/location and mean-latency thresholds
+are optional. The command returns exit code 1 when a threshold fails, so CI can
+consume an approved aggregate without launching model calls. Keep datasets,
+per-run outputs and raw model text outside the repository. A passing gate still
+depends on correct human/host adjudications; the scorer cannot validate them.
+
 Run matched configurations on the same cases and repetitions before comparing speed or quality. Preserve raw candidates, references and per-run scores locally outside the repository. Only aggregate, clearly labeled results should be published. See [Profile Evaluation](PROFILE_EVALUATION.md) for the benchmark protocol and Python schedule comparison.
 
 For a reliability score, keep the adjudicator identity fixed across repetitions

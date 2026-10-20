@@ -31,7 +31,10 @@ def _repository(tmp_path, files):
     for relative, content in files.items():
         path = repository / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        if isinstance(content, bytes):
+            path.write_bytes(content)
+        else:
+            path.write_text(content, encoding="utf-8")
     _commit(repository, "initial")
     return repository
 
@@ -216,6 +219,183 @@ def test_python_audit_does_not_count_nested_tests_or_assertions_in_helpers(tmp_p
     assert {(candidate["category"], candidate["line"]) for candidate in audit["candidates"]} == {
         ("no_direct_assertion", 1)
     }
+
+
+def test_javascript_audit_checks_assertions_per_test_and_ignores_comments_and_strings(tmp_path):
+    repository = _repository(
+        tmp_path,
+        {
+            "tests/ui.test.ts": (
+                'test("asserted", () => { expect(true).toBe(true); });\n'
+                'test("missing", () => {\n'
+                '  // expect(false).toBe(true);\n'
+                '  const message = "expect(false).toBe(true)";\n'
+                '  render(message);\n'
+                '});\n'
+            )
+        },
+    )
+
+    audit = audit_test_suite(repository, use_cache=False)
+
+    assert audit["tests_identified"] == 2
+    assert [(item["category"], item["line"]) for item in audit["candidates"]] == [
+        ("no_direct_assertion", 2)
+    ]
+
+
+def test_javascript_audit_recognizes_each_parameterized_test(tmp_path):
+    repository = _repository(
+        tmp_path,
+        {
+            "tests/cases.test.ts": (
+                'test.each([[1], [2]])("asserted %i", (value) => {\n'
+                "  expect(value).toBeGreaterThan(0);\n"
+                "});\n"
+                'it.each([[0]])("missing %i", (value) => {\n'
+                "  processValue(value);\n"
+                "});\n"
+            )
+        },
+    )
+
+    audit = audit_test_suite(repository, use_cache=False)
+
+    assert audit["tests_identified"] == 2
+    assert [(item["category"], item["line"]) for item in audit["candidates"]] == [
+        ("no_direct_assertion", 4)
+    ]
+
+
+def test_javascript_audit_deduplicates_same_category_on_same_line(tmp_path):
+    repository = _repository(
+        tmp_path,
+        {
+            "tests/many.test.ts": (
+                'it("first", () => {}); it("second", () => {}); '
+                'setTimeout(() => {}, 10); setTimeout(() => {}, 20);\n'
+            )
+        },
+    )
+
+    audit = audit_test_suite(repository, use_cache=False)
+
+    candidate_ids = [item["candidate_id"] for item in audit["candidates"]]
+    assert len(candidate_ids) == len(set(candidate_ids))
+    assert audit["candidate_count"] == len(audit["candidates"]) == 2
+    assert {item["category"] for item in audit["candidates"]} == {
+        "no_direct_assertion",
+        "fixed_wait",
+    }
+
+
+def test_javascript_audit_bounds_nested_test_callback_scanning(tmp_path):
+    source = 'test("outer", () => {' * 400 + "expect(true);" + "});" * 400
+    repository = _repository(tmp_path, {"tests/nested.test.ts": source})
+
+    audit = audit_test_suite(repository, use_cache=False)
+
+    assert audit["tests_identified"] == 1
+    assert audit["candidates"] == []
+
+
+def test_javascript_audit_reports_unmatched_test_delimiters(tmp_path):
+    repository = _repository(
+        tmp_path,
+        {"tests/incomplete.test.ts": 'test("missing close", () => {'},
+    )
+
+    audit = audit_test_suite(repository, use_cache=False)
+
+    assert audit["javascript_test_declaration_scan_truncated_paths"] == [
+        "tests/incomplete.test.ts"
+    ]
+
+
+def test_javascript_audit_reports_non_utf8_test_sources(tmp_path):
+    repository = _repository(tmp_path, {"tests/binary.test.ts": b"test(\xff"})
+
+    audit = audit_test_suite(repository, use_cache=False)
+
+    assert audit["javascript_source_decoding_error_paths"] == ["tests/binary.test.ts"]
+    assert audit["tests_identified"] == 0
+    assert audit["candidates"] == []
+
+
+def test_test_audit_prioritizes_changed_and_related_test_files(tmp_path):
+    repository = _repository(
+        tmp_path,
+        {
+            "src/checkout.ts": "export function checkout() { return true; }\n",
+            "tests/test_accounts.ts": "test('accounts', () => { expect(true).toBe(true); });\n",
+            "tests/test_checkout.ts": "test('checkout', () => { checkout(); });\n",
+        },
+    )
+
+    audit = audit_test_suite(
+        repository,
+        max_files=1,
+        changed_paths=("src/checkout.ts",),
+        use_cache=False,
+    )
+
+    assert audit["test_files_scanned"] == 1
+    assert audit["test_files_skipped_by_limit_or_size"] == 1
+    assert {item["path"] for item in audit["candidates"]} == {"tests/test_checkout.ts"}
+
+
+def test_test_audit_prioritizes_matching_test_basename_when_changed_path_is_a_test(tmp_path):
+    repository = _repository(
+        tmp_path,
+        {
+            "tests/a/accounts.test.ts": 'test("accounts", () => {});\n',
+            "tests/b/checkout_test.ts": 'test("checkout", () => {});\n',
+            "tests/z/checkout.test.ts": 'test("changed checkout", () => {});\n',
+        },
+    )
+
+    audit = audit_test_suite(
+        repository,
+        max_files=2,
+        changed_paths=("tests/z/checkout.test.ts",),
+        use_cache=False,
+    )
+
+    assert {item["path"] for item in audit["candidates"]} == {
+        "tests/b/checkout_test.ts",
+        "tests/z/checkout.test.ts",
+    }
+
+
+def test_repo_audit_cli_accepts_repeated_change_scope_arguments(tmp_path, capsys):
+    from qa_orchestrator.cli import main
+
+    repository = _repository(
+        tmp_path,
+        {
+            "src/checkout.ts": "export function checkout() { return true; }\n",
+            "tests/test_checkout.ts": "test('checkout', () => { checkout(); });\n",
+        },
+    )
+
+    result = main(
+        [
+            "repo",
+            "audit-tests",
+            "--repository",
+            str(repository),
+            "--changed-path",
+            "src/checkout.ts",
+            "--changed-path",
+            "tests/test_checkout.ts",
+            "--no-cache",
+        ]
+    )
+
+    assert result == 0
+    audit = json.loads(capsys.readouterr().out)
+    assert audit["test_files_scanned"] == 1
+    assert audit["selection_strategy"] == "changed_tests_then_related_basename_then_path_order"
 
 
 def test_repo_profile_is_available_through_the_cli(tmp_path, capsys):

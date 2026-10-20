@@ -88,7 +88,7 @@ orchestration/evidence/finding contract. Workspace and repository rules may add 
   task or MR claim; exclude unrelated defects and do not treat pre-existence alone as release severity.
 - Keep one compact per-task Evidence Packet with changed behavior, verified facts, source locators, and stable `E1`, `E2`, ... refs. Give each profile only relevant sections;
   reopen only the source needed to confirm a concrete candidate or resolve a named link. Do not repeat full diffs or raw logs.
-- Use stable `F-01`, `F-02`, ... candidate IDs. Each candidate cites evidence, states confidence and verification gaps, and, when supported, includes `source_locations` (`path`,
+- Use stable `F-01`, `F-02`, ... candidate IDs. Every defect candidate must include a concrete `failure_condition` and a source/contract-based `flip_condition` that would refute it. Each candidate cites evidence, states confidence and verification gaps, and, when supported, includes `source_locations` (`path`,
   `start_line`, optional `end_line`), `affected_area`, and concrete `impact`; profiles do not assign severity. Keep coverage gaps, evidence maps, and unverified items separate;
   deduplicate candidates during synthesis.
 - Before confirming a candidate, check relevant callers/consumers, validation, error handling, and other guards. Add only needed refs; leave unchecked links/guards in the verification gap.
@@ -103,17 +103,17 @@ orchestration/evidence/finding contract. Workspace and repository rules may add 
 - For a new review with a complete diff and packet, pass `review_context` to `start_qa_orchestration`: repository identifier; distinct full base/head commit IDs; SHA-256 of exact
   diff bytes and compact packet bytes; changed paths; unique packet evidence IDs. Do not pass source contents or credentials. Omit it only for the legacy session contract.
 - In a bound session, submit one `profile_reports` item for every completed profile, in the same order as `completed_profile(s)`. Each candidate has a stable local ID, title,
-  description, confidence, verification gap, and registered evidence IDs. Keep findings out of `code_explorer`/`pr_test_analyzer` reports; keep gaps, unverified items, and evidence
+  description, failure and flip conditions, confidence, verification gap, and registered evidence IDs. Keep findings out of `code_explorer`/`pr_test_analyzer` reports; keep gaps, unverified items, and evidence
   maps separate. Include `execution_metrics` only for accurate host-observed timestamps/token counts; the server does not verify them.
 - A completed bound review requires `final_review_report` in `finish_qa_orchestration`; `profiles_reviewed` must match the route. Each final finding links its source profiles,
   original profile-local candidate IDs, and registered evidence IDs. The server checks source pairs, registered evidence, and source-location support, not truth; the host authors
   and validates the final decision.
 - For every submitted profile candidate, add a host-owned `candidate_decisions` entry with source, verdict (`confirmed`, `rejected`, `duplicate`, `unverified`), rationale, and
-  registered evidence refs. Confirmed/duplicate decisions link `final_finding_id`; rejected/unverified do not. Every final finding needs a confirmed source, exact source linkage,
-  host-selected severity/impact/affected area, and precise source locations. Keep rejected/unverified candidates traceable.
-- For candidates with failure/flip conditions, create a host-owned `refutation` assessment (`refuted`, `not_refuted`, `unverified`) with rationale/refs, bound to the exact
-  candidate and full context using `make_refutation_check`. Confirmation/duplicate requires `not_refuted`, which alone does not prove a defect. Source/context changes invalidate
-  it. Inspect counterevidence during existing synthesis; request another reviewer only for a named material uncertainty.
+  registered evidence refs. Confirmed/duplicate decisions link `final_finding_id`; rejected/unverified decisions include the exact original `candidate_snapshot`. Every final finding needs a confirmed source, exact source linkage,
+  host-selected severity/impact/affected area, failure and flip conditions, and precise source locations. Keep rejected/unverified candidates traceable.
+- For every submitted candidate, create a host-owned `refutation` assessment with rationale/refs, bound to the exact candidate and full context using
+  `make_refutation_check`: `not_refuted` for confirmed/duplicate, `refuted` for rejected, and `unverified` for unverified. `not_refuted` alone does not prove a defect.
+  Source/context changes invalidate the check. Inspect counterevidence during existing synthesis; request another reviewer only for a named material uncertainty.
 - Bound reports recover through `get_qa_orchestration` after restart only when local session storage is configured; TTL/capacity/explicit deletion also apply. Legacy reports with
   empty `source_candidates` can only be replayed as the same idempotent finalization; new reports require source candidate IDs.
 - For coordinate-verifiable reviews, provide a complete `review_context.evidence_registry` and run the host-local `qa-orch evidence` checker. Register exact base/head revisions,

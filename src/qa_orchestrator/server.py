@@ -481,7 +481,11 @@ def build_server(service: OrchestratorService) -> FastMCP:
                     "Structured synthesized findings and coverage for a review_context-bound session. "
                     "Required when its outcome is completed; each finding cites registered evidence refs "
                     "and the original profile-local candidate IDs and evidence that support it. The report "
-                    "must include one candidate_decisions entry per submitted candidate. Confirmed findings "
+                    "must include one candidate_decisions entry per submitted candidate. Every defect "
+                    "candidate needs failure_condition and flip_condition, and every outcome needs a "
+                    "bound refutation assessment: not_refuted for confirmed/duplicate, refuted for "
+                    "rejected, unverified for unverified. Rejected/unverified outcomes preserve the original "
+                    "candidate snapshot. Confirmed findings "
                     "require host severity, impact, affected area, and source locations. The report "
                     "is limited to 72 KiB; profile plus final reports are limited to 288 KiB per session."
                 )

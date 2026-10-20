@@ -89,6 +89,8 @@ def render_final_report(
                 f"- **Affected area:** {_text(finding.affected_area) if finding.affected_area else 'не указана'}",
                 f"- **Change origin:** {_ORIGIN_LABELS[finding.change_origin]}",
                 f"- **Problem:** {_text(finding.description)}",
+                f"- **Failure condition:** {_text(finding.failure_condition) if finding.failure_condition else 'не указано'}",
+                f"- **Counterevidence that would change the conclusion:** {_text(finding.flip_condition) if finding.flip_condition else 'не указано'}",
                 f"- **Evidence refs:** {_refs(finding.evidence_refs, context)}",
             )
         )
@@ -127,7 +129,65 @@ def render_final_report(
                 f"{final_link} — {_text(decision.rationale)} "
                 f"(refs: {_refs(decision.evidence_refs, context)})"
             )
+            if decision.refutation is not None:
+                lines.append(
+                    f"  - Refutation: **{_text(decision.refutation.status)}** — "
+                    f"{_text(decision.refutation.rationale)} "
+                    f"(refs: {_refs(decision.refutation.evidence_refs, context)})"
+                )
         lines.append("")
+
+    unconfirmed = [
+        decision
+        for decision in report.candidate_decisions
+        if decision.verdict in {"rejected", "unverified"}
+    ]
+    if unconfirmed:
+        lines.extend(("## Possible bugs not confirmed", ""))
+        for decision in unconfirmed:
+            candidate = decision.candidate_snapshot
+            title = candidate.title if candidate is not None else decision.source.candidate_id
+            lines.extend(
+                (
+                    (f"### {_text(decision.source.candidate_id)} · "
+                     f"{_text(decision.verdict)} · {_text(title)}"),
+                    "",
+                )
+            )
+            if candidate is not None:
+                lines.extend(
+                    (
+                        f"- **Original description:** {_text(candidate.description)}",
+                        f"- **Failure condition:** {_text(candidate.failure_condition) if candidate.failure_condition else 'не указано'}",
+                        f"- **Counterevidence that would change the conclusion:** {_text(candidate.flip_condition) if candidate.flip_condition else 'не указано'}",
+                        f"- **Original evidence refs:** {_refs(candidate.evidence_refs, context)}",
+                    )
+                )
+                if candidate.source_locations:
+                    locations = ", ".join(
+                        _code(
+                            f"{location.path}:{location.start_line}"
+                            + (f"-{location.end_line}" if location.end_line else "")
+                        )
+                        for location in candidate.source_locations
+                    )
+                    lines.append(f"- **Original source locations:** {locations}")
+                if candidate.verification_gap:
+                    lines.append(f"- **Verification gap:** {_text(candidate.verification_gap)}")
+            else:
+                lines.append("- **Original description:** не сохранено в legacy report")
+            lines.append(f"- **Host assessment:** {_text(decision.rationale)}")
+            if decision.refutation is not None:
+                lines.extend(
+                    (
+                        f"- **Refutation status:** {_text(decision.refutation.status)}",
+                        f"- **Refutation rationale:** {_text(decision.refutation.rationale)}",
+                        f"- **Refutation evidence:** {_refs(decision.refutation.evidence_refs, context)}",
+                    )
+                )
+            else:
+                lines.append("- **Refutation status:** проверка не сохранена")
+            lines.append("")
 
     for heading, notes in (
         ("Coverage gaps", report.coverage_gaps),
@@ -156,9 +216,29 @@ def validate_final_report_context(report: FinalReviewReport, context: ReviewCont
     report_refs.update(
         ref for decision in report.candidate_decisions for ref in decision.evidence_refs
     )
+    report_refs.update(
+        ref
+        for decision in report.candidate_decisions
+        if decision.candidate_snapshot is not None
+        for ref in decision.candidate_snapshot.evidence_refs
+    )
+    report_refs.update(
+        ref
+        for decision in report.candidate_decisions
+        if decision.refutation is not None
+        for ref in decision.refutation.evidence_refs
+    )
     if report_refs - set(context.evidence_refs):
         raise ValueError("report cites refs outside the bound context")
     validate_registered_locations(context, report.finding_candidates)
+    validate_registered_locations(
+        context,
+        tuple(
+            decision.candidate_snapshot
+            for decision in report.candidate_decisions
+            if decision.candidate_snapshot is not None
+        ),
+    )
 
 
 def report_main(argv: list[str]) -> int:

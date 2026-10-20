@@ -53,6 +53,8 @@ def review_finding_candidate():
         source_locations=(ReviewFindingLocation(path="src/service.py", start_line=42),),
         affected_area="service response",
         impact="The caller can receive an incorrect result.",
+        failure_condition="A repeated request reaches the write operation twice.",
+        flip_condition="A source-backed idempotency guard prevents the second write.",
     )
 
 
@@ -81,7 +83,9 @@ def make_profile_review_report():
 
 
 @pytest.fixture
-def make_final_review_report():
+def make_final_review_report(bound_review_context):
+    from qa_orchestrator.refutation import make_refutation_check
+
     def make_finding(finding, sources):
         profile_sources = tuple(sources)
         return FinalReviewFinding(
@@ -94,21 +98,40 @@ def make_final_review_report():
             ),
         )
 
-    def make(profiles, *, findings=(), coverage_gaps=(), unverified=()):
+    def make(profiles, *, findings=(), coverage_gaps=(), unverified=(), context=None):
         final_findings = tuple(make_finding(finding, sources) for finding, sources in findings)
+        review_context = context or bound_review_context
+        decisions = []
+        for finding, sources in findings:
+            for profile in sources:
+                source = ReviewFindingSource(
+                    profile=profile, candidate_id=finding.candidate_id
+                )
+                decisions.append(
+                    ReviewCandidateDecision(
+                        source=source,
+                        verdict="confirmed",
+                        rationale="Validated against source.",
+                        evidence_refs=finding.evidence_refs,
+                        final_finding_id=finding.candidate_id,
+                        refutation=make_refutation_check(
+                            review_context,
+                            finding,
+                            status="not_refuted",
+                            rationale=(
+                                "The relevant counterevidence was checked against the bound source."
+                            ),
+                            evidence_refs=finding.evidence_refs,
+                        ),
+                    )
+                )
         return FinalReviewReport(
             summary="Completed synthesis for the selected review profiles.",
             profiles_reviewed=tuple(profiles),
             finding_candidates=final_findings,
             coverage_gaps=tuple(coverage_gaps),
             unverified=tuple(unverified),
-            candidate_decisions=tuple(
-                ReviewCandidateDecision(
-                    source=source, verdict="confirmed", rationale="Validated against source.",
-                    evidence_refs=finding.evidence_refs, final_finding_id=finding.candidate_id,
-                )
-                for finding in final_findings for source in finding.source_candidates
-            ),
+            candidate_decisions=tuple(decisions),
         )
 
     return make

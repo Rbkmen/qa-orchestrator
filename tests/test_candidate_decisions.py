@@ -61,13 +61,14 @@ def test_finalization_requires_and_checks_pinned_refutation(reviewed_candidate):
     from qa_orchestrator.refutation import make_refutation_check
 
     orchestrator, run_id, report = reviewed_candidate
+    payload = report.model_dump()
+    payload["candidate_decisions"][0]["refutation"] = None
     with pytest.raises(OrchestrationError, match="refutation check"):
-        orchestrator.finish(run_id=run_id, outcome="completed", final_review_report=report)
+        orchestrator.finish(run_id=run_id, outcome="completed", final_review_report=payload)
     session = orchestrator.get(run_id)
     candidate = session.profile_reports[0].finding_candidates[0]
     check = make_refutation_check(session.review_context, candidate, status="not_refuted",
                                  rationale="No preceding guard found", evidence_refs=("E1",))
-    payload = report.model_dump()
     payload["candidate_decisions"][0]["refutation"] = check.model_dump()
     stale = report.model_dump()
     stale["candidate_decisions"][0]["refutation"] = {
@@ -76,6 +77,75 @@ def test_finalization_requires_and_checks_pinned_refutation(reviewed_candidate):
         orchestrator.finish(run_id=run_id, outcome="completed", final_review_report=stale)
     finished = orchestrator.finish(run_id=run_id, outcome="completed", final_review_report=payload)
     assert finished.final_review_report.candidate_decisions[0].refutation == check
+
+
+def test_profile_candidates_require_failure_and_flip_conditions(
+    bound_review_context, review_finding_candidate, make_profile_review_report
+):
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review", bound_review_context)
+    orchestrator.advance(
+        run_id=session.run_id,
+        completed_step="triage",
+        status="completed",
+        selected_profile=ReviewAgent.CODE_REVIEWER,
+    )
+    incomplete = review_finding_candidate.model_copy(
+        update={"failure_condition": None, "flip_condition": None}
+    )
+
+    with pytest.raises(OrchestrationError, match="failure_condition and flip_condition"):
+        orchestrator.advance(
+            run_id=session.run_id,
+            completed_step="primary_review",
+            status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+            profile_reports=[
+                make_profile_review_report(
+                    ReviewAgent.CODE_REVIEWER, findings=(incomplete,)
+                )
+            ],
+            risk_signals=DeepReviewSignals(),
+        )
+
+
+def test_legacy_candidate_without_conditions_can_finish_as_unverified(reviewed_candidate):
+    orchestrator, run_id, report = reviewed_candidate
+    session = orchestrator.get(run_id)
+    legacy_candidate = session.profile_reports[0].finding_candidates[0].model_copy(
+        update={"failure_condition": None, "flip_condition": None}
+    )
+    legacy_profile = session.profile_reports[0].model_copy(
+        update={"finding_candidates": (legacy_candidate,)}
+    )
+    stored_session = orchestrator._sessions[run_id]
+    orchestrator._sessions[run_id] = stored_session.model_copy(
+        update={"profile_reports": [legacy_profile]}
+    )
+    payload = report.model_dump()
+    payload["finding_candidates"] = []
+    decision = payload["candidate_decisions"][0]
+    decision.update(
+        verdict="unverified",
+        final_finding_id=None,
+        rationale="This persisted candidate predates explicit failure and flip conditions.",
+        candidate_snapshot=legacy_candidate.model_dump(mode="json"),
+    )
+    payload["candidate_decisions"][0]["refutation"] = make_refutation_check(
+        session.review_context,
+        legacy_candidate,
+        status="unverified",
+        rationale="The legacy candidate lacks conditions needed for a reliable refutation check.",
+        evidence_refs=("E1",),
+    ).model_dump(mode="json")
+
+    finished = orchestrator.finish(
+        run_id=run_id, outcome="completed", final_review_report=payload
+    )
+
+    assert finished.final_review_report is not None
+    assert finished.final_review_report.finding_candidates == ()
+    assert finished.final_review_report.candidate_decisions[0].verdict == "unverified"
 
 
 def test_new_final_reports_cannot_silently_drop_candidate_decisions(reviewed_candidate):
@@ -87,11 +157,24 @@ def test_new_final_reports_cannot_silently_drop_candidate_decisions(reviewed_can
     assert orchestrator.get(run_id).final_review_report is None
 
 
-@pytest.mark.parametrize("field", ("impact", "affected_area", "severity", "source_locations"))
+@pytest.mark.parametrize(
+    "field",
+    (
+        "impact",
+        "affected_area",
+        "severity",
+        "source_locations",
+        "failure_condition",
+        "flip_condition",
+    ),
+)
 def test_confirmed_findings_require_a_usable_host_verdict(reviewed_candidate, field):
     orchestrator, run_id, report = reviewed_candidate
     payload = report.model_dump()
     payload["finding_candidates"][0][field] = [] if field == "source_locations" else None
+    if field in {"failure_condition", "flip_condition"}:
+        payload["finding_candidates"][0]["failure_condition"] = None
+        payload["finding_candidates"][0]["flip_condition"] = None
     with pytest.raises(OrchestrationError, match="confirmed findings require"):
         orchestrator.finish(run_id=run_id, outcome="completed", final_review_report=payload)
 
@@ -106,9 +189,36 @@ def test_rejected_candidate_is_retained_without_a_final_finding(reviewed_candida
         final_finding_id=None,
         rationale="The supported path already validates this branch.",
     )
+    candidate = orchestrator.get(run_id).profile_reports[0].finding_candidates[0]
+    decision["candidate_snapshot"] = candidate.model_dump(mode="json")
+    decision["refutation"] = make_refutation_check(
+        orchestrator.get(run_id).review_context,
+        candidate,
+        status="refuted",
+        rationale="The existing validation rejects this input before the side effect.",
+        evidence_refs=("E1",),
+    ).model_dump(mode="json")
+    refutation = decision.pop("refutation")
+    with pytest.raises(OrchestrationError, match="every candidate decision requires a refutation check"):
+        orchestrator.finish(run_id=run_id, outcome="completed", final_review_report=payload)
+    decision["refutation"] = make_refutation_check(
+        orchestrator.get(run_id).review_context,
+        candidate,
+        status="not_refuted",
+        rationale="The candidate still has no source-backed counterexample.",
+        evidence_refs=("E1",),
+    ).model_dump(mode="json")
+    with pytest.raises(OrchestrationError, match="rejected decisions require a refuted check"):
+        orchestrator.finish(run_id=run_id, outcome="completed", final_review_report=payload)
+    decision["refutation"] = refutation
+    decision.pop("candidate_snapshot")
+    with pytest.raises(OrchestrationError, match="original candidate snapshot"):
+        orchestrator.finish(run_id=run_id, outcome="completed", final_review_report=payload)
+    decision["candidate_snapshot"] = candidate.model_dump(mode="json")
     result = orchestrator.finish(run_id=run_id, outcome="completed", final_review_report=payload)
     assert result.final_review_report.finding_candidates == ()
     assert result.final_review_report.candidate_decisions[0].verdict == "rejected"
+    assert result.final_review_report.candidate_decisions[0].candidate_snapshot == candidate
 
 
 @pytest.mark.parametrize(
@@ -186,6 +296,7 @@ def test_rejected_finding_regressions_keep_counterevidence_and_no_final_finding(
                 rationale=example["rejection_rationale"],
                 evidence_refs=("E1",),
                 refutation=refutation,
+                candidate_snapshot=candidate,
             ),
         ),
     )
@@ -206,7 +317,9 @@ def test_candidate_refutation_conditions_require_a_complete_nonblank_pair(review
 
     payload = review_finding_candidate.model_dump()
     with pytest.raises(ValidationError, match="both failure_condition and flip_condition"):
-        ReviewFindingCandidate.model_validate({**payload, "flip_condition": "Prove deduplication"})
+        ReviewFindingCandidate.model_validate(
+            {**payload, "failure_condition": None, "flip_condition": "Prove deduplication"}
+        )
     with pytest.raises(ValidationError, match="blank"):
         ReviewFindingCandidate.model_validate({
             **payload, "failure_condition": "Repeat request", "flip_condition": "   "})

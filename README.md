@@ -169,12 +169,12 @@ Reads do not extend TTL. Deletion neither finalizes a review nor cancels host ex
 |---|---|
 | `qa-orch setup` / `setup --host-default` | Configure per-stage models or return to host settings |
 | `qa-orch config show` / `reload` | Inspect/validate the saved policy |
-| `qa-orch evidence discover` | Suggest pinned declarations, imported modules, callers, contracts, tests and test dependency manifests |
+| `qa-orch evidence discover` | Suggest pinned declarations, direct importers, callers, contracts, tests, dependency manifests, and bounded test-audit signals |
 | `qa-orch evidence build` / `verify` | Register/verify source and diff |
 | `qa-orch evidence pack` / `chunks` | Exact context packets/source chunks |
 | `qa-orch repo profile` / `audit-tests` | Profile tracked project/test/CI metadata and report source-anchored test-suite review candidates |
 | `qa-orch rules` | Bind explicit review rules |
-| `qa-orch benchmark import-reviewbench` / `import-reviewbench-set` / `diff-budget` / `score` / `reliability` / `compare` | Import references, preflight raw diff budgets, score repetitions and compare same-model speed runs |
+| `qa-orch benchmark import-reviewbench` / `import-reviewbench-set` / `diff-budget` / `score` / `reliability` / `compare` / `quality-gate` | Import references, score explicit adjudications, compare speed, and enforce declared quality thresholds |
 | `qa-orchestrator-doctor --json` | Read-only local diagnostics |
 
 `qa-orchestrator` aliases `qa-orch`. Running either without a subcommand starts the MCP server. These tools do not provide a one-command MR review and publication flow.

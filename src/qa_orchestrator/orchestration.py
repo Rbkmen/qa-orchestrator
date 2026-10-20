@@ -1091,6 +1091,18 @@ class QaOrchestrator:
                     for decision in validated_report.candidate_decisions
                     for reference in decision.evidence_refs
                 )
+                report_refs.update(
+                    reference
+                    for decision in validated_report.candidate_decisions
+                    if decision.candidate_snapshot is not None
+                    for reference in decision.candidate_snapshot.evidence_refs
+                )
+                report_refs.update(
+                    reference
+                    for decision in validated_report.candidate_decisions
+                    if decision.refutation is not None
+                    for reference in decision.refutation.evidence_refs
+                )
                 unknown_refs = report_refs - context_refs
                 if unknown_refs:
                     raise OrchestrationError("final review report cites unknown evidence refs")
@@ -1159,8 +1171,27 @@ class QaOrchestrator:
                         )
                     for source, decision in decisions.items():
                         candidate = reported_candidates[source]
-                        if candidate.flip_condition is not None and decision.refutation is None:
-                            raise OrchestrationError("candidate conditions require a refutation check")
+                        if decision.refutation is None:
+                            raise OrchestrationError(
+                                "every candidate decision requires a refutation check"
+                            )
+                        expected_refutation_status = {
+                            "confirmed": "not_refuted",
+                            "duplicate": "not_refuted",
+                            "rejected": "refuted",
+                            "unverified": "unverified",
+                        }[decision.verdict]
+                        if decision.refutation.status != expected_refutation_status:
+                            raise OrchestrationError(
+                                f"{decision.verdict} decisions require a "
+                                f"{expected_refutation_status} check"
+                            )
+                        if decision.verdict in {"rejected", "unverified"} and (
+                            decision.candidate_snapshot != candidate
+                        ):
+                            raise OrchestrationError(
+                                "rejected and unverified decisions require the original candidate snapshot"
+                            )
                         if decision.refutation is not None:
                             try:
                                 validate_refutation_check(
@@ -1182,9 +1213,10 @@ class QaOrchestrator:
                             )
                         if (finding.severity is None or not finding.source_locations
                             or not finding.affected_area or not finding.affected_area.strip()
-                            or not finding.impact or not finding.impact.strip()):
+                            or not finding.impact or not finding.impact.strip()
+                            or not finding.failure_condition or not finding.flip_condition):
                             raise OrchestrationError(
-                                "confirmed findings require severity, source locations, affected area, and impact"
+                                "confirmed findings require severity, failure/flip conditions, source locations, affected area, and impact"
                             )
 
             finish_sha256 = _stable_json_sha256(
@@ -1364,6 +1396,13 @@ class QaOrchestrator:
                                       if session.review_context.review_rules else None)
                     if report.review_rules_sha256 != expected_rules:
                         raise OrchestrationError("profile report rules digest mismatch")
+                    if any(
+                        not candidate.failure_condition or not candidate.flip_condition
+                        for candidate in report.finding_candidates
+                    ):
+                        raise OrchestrationError(
+                            "defect candidates require failure_condition and flip_condition"
+                        )
                     report_refs = {
                         reference
                         for finding in report.finding_candidates
