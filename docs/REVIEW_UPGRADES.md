@@ -150,7 +150,7 @@ It also requires `reviewed_changed_paths`: list every bound path whose supplied
 diff/source evidence was inspected, including paths with no finding. The host
 adds a `coverage_gap` for every unlisted path and rejects paths outside the bound
 change. This is an executor attestation, not independent proof of review.
-Other profiles retain their existing finding limit. Executor identity v10
+Other profiles retain their existing finding limit. Executor identity v11
 invalidates checkpoints produced under the previous report schema and prompt.
 
 Each call checks the packet hash, accounts for the complete prompt envelope, and
@@ -197,6 +197,13 @@ caller cancellation still raises `asyncio.CancelledError`; after draining worker
 its `execution_attempts` attribute exposes observations already available. A
 profile cancelled while waiting for a semaphore made no executor call and has no
 attempt record. Timing/usage from injected callbacks remains host-reported evidence.
+
+Fresh adapter attempt records bind each callback to the exact review head and diff.
+The Codex executor records a SHA-256 of the prompt bytes, source and selected packet
+hashes, included refs/source paths, and whether `stdin.drain()` completed. This
+distinguishes prompt preparation, local CLI handoff, callback outcome, and the
+executor's `reviewed_changed_paths` attestation. None of these values prove that a
+provider received the prompt or that a model reasoned over every listed path.
 
 ## 7. Exact context packing
 
@@ -268,10 +275,14 @@ qa-orch evidence discover --context registered-context.json \
   --output neighbor-candidates.json
 ```
 
-`--codegraph` adds caller edges only when the local CodeGraph index is initialized,
-complete, clean, and bound to the same repository checkout as the review head.
+`--codegraph` adds caller and callee edges only when the local CodeGraph index is
+initialized, complete, clean, and bound to the same repository checkout as the review head.
 If the binary or a current index is unavailable, discovery reports that status and
 continues with the pinned Git scan. It never syncs or rebuilds the index.
+`codegraph.status="ready"` means the current index was queried without query
+errors; it does not mean the relation scan was exhaustive. Check `truncated`,
+the caller/callee query-failure counts, omitted symbols, and the `omissions` and
+`relationship_coverage` sections to understand its limits.
 
 The bounded scan reads only the pinned Git head, reports symbol matches and line
 numbers, and includes source records with content hashes that can be reviewed for
@@ -281,11 +292,23 @@ module-name search uses at most 48 names from changed modules and symbols and ca
 the path-list output at 32 MB; matching files are suggestions until their import
 edges are checked from pinned source. Candidate symbol reads remain capped at 32
 paths and 16 MB (with a per-file size limit), and final candidate source reads are
-capped at twice the requested result count, up to 200. The manifest reports these
-limits, omissions, and scanned-file counts; `changed_source_symbol_collection_truncated` and
+capped at twice the requested result count, up to 200. The manifest's
+`relationship_coverage` separates bounded relations it traced from links it does
+not resolve systematically. API and serialized contract registration, database
+model/schema/migration/query semantics, string-based event subscribers, runtime
+flag and authorization evaluation, background queue registration, and dynamic,
+generated, runtime, or cross-repository links remain host investigation. Path
+labels for API, database, event, job, config, authorization, and contract files
+are heuristics, not verified integration edges. The `omissions` array gives a
+reason, count, limit, and up to 20 example paths or symbols for each active bound;
+CodeGraph query truncation is also reported separately.
+
+The manifest reports these limits and scanned-file counts; `changed_source_symbol_collection_truncated` and
 `changed_sources_skipped_symbol_scan` distinguish symbol-budget truncation from the
 continued changed-test and direct-import scans. A missing match does not prove that a
-caller is absent; reconcile likely callers with CodeGraph. For changed Python and
+caller is absent. CodeGraph suggestions include incoming callers and outgoing
+callees for changed declarations, but remain bounded by a query/time budget and the
+current local index; check its status, truncation flag, and omitted symbols. For changed Python and
 JavaScript/TypeScript files, it follows local Python imports, relative or common
 root-alias JS/TS imports, and common Python mock targets to matching references
 and declarations. It also finds direct Python/JS/TS importers that use changed
@@ -357,3 +380,27 @@ not perform the counterevidence inspection, vote or automatically change verdict
 These mechanisms were implemented independently; no code from the researched
 third-party orchestrators was copied. Comparative latency/quality measurements
 are deferred; unit tests and protocol checks are not evidence of faster reviews.
+
+## 11. Adversarial repository content and pinned quality gates
+
+Repository files, diffs, comments, test output, task/PR text, and prior reports
+are evidence, not instructions to the reviewer. The fixed profile constraints
+and Codex prompt tell workers to ignore embedded requests that override review
+rules, disclose secrets, or trigger tool/network/write actions. Local executor
+tests place such text inside the Evidence Packet and verify the fixed policy
+and envelope; these fake-CLI tests do not measure live-model resistance. Keep
+the read-only sandbox and forbidden-tool-event checks enabled, and use OS or
+container isolation when an enforced filesystem boundary is required.
+
+Benchmark scores now include a canonical SHA-256 over the validated dataset,
+including source snapshots and adjudicated gold labels. Promotion gates can
+require an approved `curated` or `reviewbench_reference` dataset kind and exact
+dataset digest. Keep the approved digest in trusted CI configuration; do not
+accept a self-declared dataset label or a synthetic fixture as representative
+quality evidence. There is no approved representative dataset digest in this
+repository, so no production quality gate can yet pass on a pinned curated set.
+
+Speed comparisons require exact attempt numbers per case and configuration and
+report attempt-paired latency. The host must interleave or randomize baseline
+and candidate order to limit drift and provider-load bias; comparison artifacts
+cannot prove the schedule that produced their timestamps.

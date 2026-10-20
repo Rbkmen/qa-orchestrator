@@ -15,9 +15,11 @@ from qa_orchestrator.contracts import (
     ReviewCandidateDecision,
     ReviewContext,
     ReviewCoverageLedger,
+    ReviewCriterionCoverage,
     ReviewFindingLocation,
     ReviewFindingSource,
     ReviewNote,
+    ReviewVerificationRecord,
     review_changed_paths_sha256,
 )
 from qa_orchestrator.refutation import make_refutation_check
@@ -147,6 +149,148 @@ def test_report_cli_rejects_source_locations_outside_bound_evidence(
     assert "finding location is not supported" in error
 
 
+def test_renderer_maps_requirements_and_mr_claims_to_code_tests_and_outcomes(
+    bound_review_context,
+):
+    context = ReviewContext.model_validate(
+        {
+            **bound_review_context.model_dump(),
+            "evidence_refs": ("E1", "D1", "R1", "C1", "T1"),
+            "evidence_registry": (
+                EvidenceRecord(
+                    evidence_ref="E1",
+                    kind="source",
+                    revision=bound_review_context.head_sha,
+                    path="src/api.py",
+                    start_line=10,
+                    end_line=20,
+                    sha256="4" * 64,
+                ),
+                EvidenceRecord(
+                    evidence_ref="D1",
+                    kind="diff",
+                    revision=bound_review_context.head_sha,
+                    sha256=bound_review_context.diff_sha256,
+                ),
+                EvidenceRecord(
+                    evidence_ref="R1",
+                    kind="requirement",
+                    locator="TASK-123#acceptance-1",
+                    sha256="5" * 64,
+                ),
+                EvidenceRecord(
+                    evidence_ref="C1",
+                    kind="claim",
+                    locator="MR!17:description#2",
+                    sha256="6" * 64,
+                ),
+                EvidenceRecord(
+                    evidence_ref="T1",
+                    kind="source",
+                    revision=bound_review_context.head_sha,
+                    path="tests/test_api.py",
+                    start_line=30,
+                    end_line=45,
+                    sha256="7" * 64,
+                ),
+            ),
+        }
+    )
+    report = FinalReviewReport(
+        summary="Reviewed the API change.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        criterion_coverage=(
+            ReviewCriterionCoverage(
+                criterion_ref="R1",
+                criterion_kind="requirement",
+                expected_behavior="A missing account returns an empty result.",
+                outcome="confirmed",
+                implementation_refs=("E1",),
+                test_refs=("T1",),
+                rationale="The implementation and focused test agree with the criterion.",
+            ),
+        ),
+    )
+
+    validate_final_report_context(report, context)
+    rendered = render_final_report(report, context=context)
+
+    assert "## Requirements and MR claims" in rendered
+    assert "A missing account returns an empty result" in rendered
+    assert "Implementation evidence:** E1" in rendered
+    assert "Test/CI evidence:** T1" in rendered
+    assert "MR claim" in rendered
+    assert "C1" in rendered
+    assert "не проверено" in rendered
+    assert "No explicit assessment was submitted" in rendered
+
+
+def test_criterion_coverage_rejects_unknown_refs_and_wrong_evidence_kinds(
+    bound_review_context,
+):
+    context = ReviewContext.model_validate(
+        {
+            **bound_review_context.model_dump(),
+            "evidence_refs": ("E1", "R1", "T1"),
+            "evidence_registry": (
+                EvidenceRecord(
+                    evidence_ref="E1",
+                    kind="source",
+                    revision=bound_review_context.head_sha,
+                    path="src/api.py",
+                    sha256="4" * 64,
+                ),
+                EvidenceRecord(
+                    evidence_ref="R1",
+                    kind="requirement",
+                    locator="TASK-123#acceptance-1",
+                    sha256="5" * 64,
+                ),
+                EvidenceRecord(
+                    evidence_ref="T1",
+                    kind="requirement",
+                    locator="TASK-123#acceptance-2",
+                    sha256="6" * 64,
+                ),
+            ),
+        }
+    )
+
+    unknown_criterion = FinalReviewReport(
+        summary="Reviewed the API change.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        criterion_coverage=(
+            ReviewCriterionCoverage(
+                criterion_ref="R2",
+                criterion_kind="requirement",
+                expected_behavior="An account must be returned.",
+                outcome="confirmed",
+                implementation_refs=("E1",),
+                rationale="The source implements the expected result.",
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="unregistered requirement or MR claim"):
+        validate_final_report_context(unknown_criterion, context)
+
+    wrong_support_kind = FinalReviewReport(
+        summary="Reviewed the API change.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        criterion_coverage=(
+            ReviewCriterionCoverage(
+                criterion_ref="R1",
+                criterion_kind="requirement",
+                expected_behavior="An account must be returned.",
+                outcome="confirmed",
+                implementation_refs=("T1",),
+                rationale="The linked evidence is registered as another requirement.",
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="implementation evidence must reference source or diff"):
+        validate_final_report_context(wrong_support_kind, context)
+
+
 def test_renderer_resolves_refs_from_bound_context(bound_review_context):
     context = ReviewContext.model_validate(
         {
@@ -232,6 +376,8 @@ def test_renderer_maps_host_coverage_ledger_to_bound_changed_paths(bound_review_
                                 profile=ReviewAgent.CODE_REVIEWER,
                                 attempt=1,
                                 outcome="completed",
+                                review_head_sha=context.head_sha,
+                                review_diff_sha256=context.diff_sha256,
                                 started_at=datetime(2026, 10, 19, 12, tzinfo=UTC),
                                 completed_at=datetime(2026, 10, 19, 12, 0, 3, tzinfo=UTC),
                                 queue_seconds=0.2,
@@ -241,6 +387,12 @@ def test_renderer_maps_host_coverage_ledger_to_bound_changed_paths(bound_review_
                                 validation_seconds=0.3,
                                 input_tokens=1200,
                                 output_tokens=240,
+                                submitted_prompt_sha256="8" * 64,
+                                prompt_write_status="written",
+                                source_packet_sha256=context.evidence_packet_sha256,
+                                selected_packet_sha256="9" * 64,
+                                included_evidence_refs=("E1",),
+                                included_source_paths=("src/service.py",),
                             ),
                         ),
                     ),
@@ -256,13 +408,115 @@ def test_renderer_maps_host_coverage_ledger_to_bound_changed_paths(bound_review_
     assert 'No registered head-source record: `"docs/README.md"`' in rendered
     assert 'Source text explicitly marked unavailable: `"src/binary.dat"`' in rendered
     assert 'Not explicitly attested as reviewed: `"src/binary.dat"`' in rendered
+    assert 'Executor-attested as reviewed: `"src/service.py"`' in rendered
+    assert 'Paths with included text excerpts: `"src/service.py"`' in rendered
     assert "## Profile execution" in rendered
     assert "elapsed 3.00s; attempts 1; input tokens 1200; output tokens 240" in rendered
-    assert "queue 0.20s; executor 2.80s; preparation 0.40s; model 2.00s; validation 0.30s" in rendered
-    assert "Timing and token values are host-reported and are not independently verified." in rendered
+    assert "head 111111111111" in rendered
+    assert "CLI stdin delivery write completed (host observed)" in rendered
+    assert "prompt sha256 888888888888" in rendered
+    assert "selected packet sha256 999999999999" in rendered
+    assert "included refs E1" in rendered
+    assert 'source paths `"src/service.py"`' in rendered
+    assert "queue 0.20s; executor 2.80s; head" in rendered
+    assert "does not prove provider receipt or model reasoning" in rendered
     validate_final_report_context(report, context)
     with pytest.raises(ValueError, match="coverage ledger does not match"):
         validate_final_report_context(report, bound_review_context)
+
+
+def test_verification_records_are_bound_to_exact_head_and_rendered(bound_review_context):
+    context = ReviewContext.model_validate(
+        {
+            **bound_review_context.model_dump(),
+            "evidence_refs": ("R1",),
+            "evidence_registry": (
+                EvidenceRecord(
+                    evidence_ref="R1",
+                    kind="runtime",
+                    locator="ci://workflow/123",
+                    revision=bound_review_context.head_sha,
+                    sha256="4" * 64,
+                ),
+            ),
+        }
+    )
+    record = ReviewVerificationRecord(
+        verification_id="V-01",
+        check_type="ci",
+        scenario="unit and integration test suites",
+        status="passed",
+        head_sha=context.head_sha,
+        environment="Linux, Python 3.13",
+        source="ci_provider",
+        source_ref="workflow 123 / job 456",
+        run_url="https://github.com/example/repo/actions/runs/123",
+        evidence_refs=("R1",),
+    )
+    report = FinalReviewReport(
+        summary="Reviewed and checked the change.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        verification_records=(record,),
+    )
+
+    validate_final_report_context(report, context)
+    rendered = render_final_report(report, context=context)
+
+    assert "## Tests and CI verification" in rendered
+    assert "host-supplied records bound to a head SHA" in rendered
+    assert "unit and integration test suites" in rendered
+    assert "workflow 123 / job 456" in rendered
+    assert "<https://github.com/example/repo/actions/runs/123>" in rendered
+    assert "passed" in rendered
+
+    wrong_head = report.model_copy(
+        update={
+            "verification_records": (
+                record.model_copy(update={"head_sha": "0" * 40}),
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="bound head revision"):
+        validate_final_report_context(wrong_head, context)
+
+
+def test_verification_evidence_requires_head_bound_runtime_record(bound_review_context):
+    context = ReviewContext.model_validate(
+        {
+            **bound_review_context.model_dump(),
+            "evidence_refs": ("E1",),
+            "evidence_registry": (
+                EvidenceRecord(
+                    evidence_ref="E1",
+                    kind="source",
+                    revision=bound_review_context.head_sha,
+                    path="src/service.py",
+                    sha256="4" * 64,
+                ),
+            ),
+        }
+    )
+    report = FinalReviewReport(
+        summary="Checked the change.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        verification_records=(
+            ReviewVerificationRecord(
+                verification_id="V-01",
+                check_type="test",
+                scenario="focused unit test",
+                status="skipped",
+                head_sha=context.head_sha,
+                environment="local",
+                source="local_runner",
+                source_ref="pytest tests/test_service.py",
+                reason="The test dependency was unavailable.",
+                evidence_refs=("E1",),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="runtime record bound to the reviewed head"):
+        validate_final_report_context(report, context)
 
 
 def test_renderer_shows_original_unconfirmed_candidate_and_refutation_evidence(

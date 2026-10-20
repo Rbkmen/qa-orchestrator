@@ -15,6 +15,7 @@ from qa_orchestrator.contracts import (
     ReviewCoverageLedger,
     ReviewFindingCandidate,
     ReviewNote,
+    ReviewVerificationRecord,
     review_changed_paths_sha256,
 )
 from qa_orchestrator.orchestration import (
@@ -518,6 +519,55 @@ def test_finish_replaces_coverage_ledger_with_host_observed_path_coverage(
             outcome="completed",
             final_review_report=final_report,
         )
+
+    wrong_head_sha = "0" * 40 if context.head_sha != "0" * 40 else "1" * 40
+    wrong_head_report = final_report.model_copy(
+        update={
+            "verification_records": (
+                ReviewVerificationRecord(
+                    verification_id="V-01",
+                    check_type="test",
+                    scenario="Focused unit suite",
+                    status="passed",
+                    head_sha=wrong_head_sha,
+                    environment="local",
+                    source="local_runner",
+                    source_ref="pytest",
+                ),
+            ),
+        }
+    )
+    with pytest.raises(OrchestrationError, match="verification record does not match"):
+        orchestrator.finish(
+            run_id=session.run_id,
+            outcome="partial",
+            final_review_report=wrong_head_report,
+        )
+
+    wrong_evidence_report = final_report.model_copy(
+        update={
+            "verification_records": (
+                ReviewVerificationRecord(
+                    verification_id="V-02",
+                    check_type="runtime",
+                    scenario="Service startup",
+                    status="passed",
+                    head_sha=context.head_sha,
+                    environment="local",
+                    source="runtime_system",
+                    source_ref="local-startup",
+                    evidence_refs=("E2",),
+                ),
+            ),
+        }
+    )
+    with pytest.raises(OrchestrationError, match="must be a runtime record bound"):
+        orchestrator.finish(
+            run_id=session.run_id,
+            outcome="partial",
+            final_review_report=wrong_evidence_report,
+        )
+
     finished = orchestrator.finish(
         run_id=session.run_id,
         outcome="partial",
@@ -534,6 +584,12 @@ def test_finish_replaces_coverage_ledger_with_host_observed_path_coverage(
     assert ledger.profiles[0].source_excerpt_included_path_indexes == (0,)
     assert ledger.profiles[0].reviewer_attested_path_indexes == (0,)
     assert ledger.profiles[0].reviewer_attested_path_indexes != (1,)
+    assert len(finished.final_review_report.criterion_coverage) == 1
+    criterion = finished.final_review_report.criterion_coverage[0]
+    assert criterion.criterion_ref == "E2"
+    assert criterion.criterion_kind == "requirement"
+    assert criterion.outcome == "unverified"
+    assert criterion.expected_behavior is None
     replayed = orchestrator.finish(
         run_id=session.run_id,
         outcome="partial",

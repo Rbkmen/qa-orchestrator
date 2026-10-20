@@ -486,7 +486,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
                     "bound refutation assessment: not_refuted for confirmed/duplicate, refuted for "
                     "rejected, unverified for unverified. Rejected/unverified outcomes preserve the original "
                     "candidate snapshot. Confirmed findings "
-                    "require host severity, impact, affected area, and source locations. The report "
+                    "require host severity, impact, affected area, and source locations. Optional "
+                    "verification_records capture test/CI/runtime scenarios, results, environment, run "
+                    "reference, reason, and exact reviewed head SHA; these remain host-supplied and "
+                    "are not independently authenticated by the orchestrator. The report "
                     "is limited to 72 KiB; profile plus final reports are limited to 288 KiB per session."
                 )
             ),

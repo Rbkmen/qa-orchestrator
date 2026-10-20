@@ -4,8 +4,13 @@ import json
 import pytest
 from test_evidence import pinned_evidence as pinned_evidence  # noqa: PLC0414
 
-from qa_orchestrator.contracts import EvidenceRecord, ReviewAgent
-from qa_orchestrator.evidence import register_evidence
+from qa_orchestrator.contracts import (
+    EvidenceRecord,
+    ProfileContextSelection,
+    ProfileReviewReport,
+    ReviewAgent,
+)
+from qa_orchestrator.evidence import register_evidence, validate_context_selection
 
 
 def fragment(ref, text, *, required=True, profiles=(), priority=0):
@@ -185,6 +190,68 @@ def test_changed_source_can_be_omitted_by_profile_or_budget(pinned_evidence):
     selected = select_context(packet, ReviewAgent.CODE_REVIEWER, max_bytes=budget)
     assert "D1" in selected.included_refs
     assert "S1" in selected.budget_omitted_refs
+
+
+def test_mr_claim_evidence_cannot_be_made_optional(pinned_evidence):
+    from qa_orchestrator.context_pack import (
+        ContextPacket,
+        build_context_packet,
+        validate_packet_context,
+    )
+
+    repo, _, context, definitions = pinned_evidence
+    claim_text = "The MR says the endpoint preserves the account identifier."
+    context = context.model_copy(update={"evidence_refs": (*context.evidence_refs, "C1")})
+    bound = register_evidence(
+        context,
+        [
+            *definitions,
+            {
+                "evidence_ref": "C1",
+                "kind": "claim",
+                "locator": "MR!17:description#2",
+                "sha256": hashlib.sha256(claim_text.encode()).hexdigest(),
+            },
+        ],
+        repo,
+    )
+
+    with pytest.raises(ValueError, match="MR claims must remain mandatory"):
+        build_context_packet(
+            bound,
+            repo,
+            optional_profiles={"C1": (ReviewAgent.CODE_REVIEWER,)},
+            external_content={"C1": claim_text},
+        )
+
+    packet = build_context_packet(bound, repo, external_content={"C1": claim_text})
+    forged = ContextPacket(
+        fragments=tuple(
+            fragment.model_copy(update={"required": False})
+            if fragment.record.evidence_ref == "C1"
+            else fragment
+            for fragment in packet.fragments
+        ),
+        deleted_paths=packet.deleted_paths,
+    )
+    with pytest.raises(ValueError, match="mandatory diff/requirements/MR claims"):
+        validate_packet_context(forged, bound)
+
+    omitted_claim = ProfileReviewReport(
+        profile=ReviewAgent.CODE_REVIEWER,
+        context_selection=ProfileContextSelection(
+            source_packet_sha256=bound.evidence_packet_sha256,
+            selected_packet_sha256="8" * 64,
+            included_refs=tuple(ref for ref in bound.evidence_refs if ref != "C1"),
+            omitted_refs=("C1",),
+            changed_files_count=len(bound.changed_files),
+            max_bytes=2000,
+            selected_bytes=1000,
+        ),
+        scope="Reviewed without the MR claim.",
+    )
+    with pytest.raises(ValueError, match="context selection omits mandatory evidence"):
+        validate_context_selection(bound, omitted_claim)
 
 
 def test_packet_marks_binary_source_as_omitted_and_keeps_raw_hash(pinned_evidence):

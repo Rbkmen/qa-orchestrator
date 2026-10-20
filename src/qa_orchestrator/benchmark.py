@@ -365,6 +365,17 @@ def check_diff_budget(dataset: BenchmarkDataset, *, max_context_bytes: int) -> d
     }
 
 
+def _benchmark_dataset_sha256(dataset: BenchmarkDataset) -> str:
+    """Fingerprint the validated dataset, including its snapshots and gold labels."""
+    canonical = json.dumps(
+        dataset.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dict:
     cases = {case.case_id: case for case in dataset.cases}
     summaries = []
@@ -533,6 +544,7 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
         "schema_version": 2 if results.failures else 1,
         "scoring": "local_explicit_adjudication",
         "dataset_kind": dataset.kind,
+        "dataset_sha256": _benchmark_dataset_sha256(dataset),
         "dataset_cases": sorted(cases),
         "runs": summaries,
         "configurations": aggregates,
@@ -556,6 +568,8 @@ def evaluate_quality_gate(
     max_p95_elapsed_ms: float | None = None,
     min_stratum_recall: float | None = None,
     min_stratum_gold_count: int = 5,
+    required_dataset_kind: str | None = None,
+    required_dataset_sha256: str | None = None,
 ) -> dict:
     """Evaluate explicit quality and optional speed thresholds on a scored run."""
     if not isinstance(score, dict):
@@ -568,6 +582,20 @@ def evaluate_quality_gate(
         raise ValueError("min_cases must be a positive integer")
     if type(max_missed_high_impact) is not int or max_missed_high_impact < 0:
         raise ValueError("max_missed_high_impact must be a non-negative integer")
+    if required_dataset_kind not in {None, "reviewbench_reference", "curated"}:
+        raise ValueError("required_dataset_kind must be curated or reviewbench_reference")
+    if required_dataset_sha256 is not None:
+        if not isinstance(required_dataset_sha256, str) or len(required_dataset_sha256) != 64:
+            raise ValueError("required_dataset_sha256 must be a 64-character SHA-256 digest")
+        try:
+            required_digest_bytes = bytes.fromhex(required_dataset_sha256)
+        except ValueError as exc:
+            raise ValueError(
+                "required_dataset_sha256 must be a 64-character SHA-256 digest"
+            ) from exc
+        if required_digest_bytes.hex() != required_dataset_sha256.lower():
+            raise ValueError("required_dataset_sha256 must be a 64-character SHA-256 digest")
+        required_dataset_sha256 = required_digest_bytes.hex()
 
     def validate_rate(name: str, value: float | None, *, optional: bool) -> None:
         if value is None and optional:
@@ -603,6 +631,18 @@ def evaluate_quality_gate(
     if not isinstance(configurations, dict) or configuration_id not in configurations:
         raise ValueError("quality gate configuration is absent from the score")
     aggregate = configurations[configuration_id]
+    dataset_kind = score.get("dataset_kind")
+    dataset_sha256 = score.get("dataset_sha256")
+    if dataset_sha256 is not None:
+        if not isinstance(dataset_sha256, str) or len(dataset_sha256) != 64:
+            raise ValueError("score dataset_sha256 must be a 64-character SHA-256 digest")
+        try:
+            dataset_digest_bytes = bytes.fromhex(dataset_sha256)
+        except ValueError as exc:
+            raise ValueError("score dataset_sha256 must be a 64-character SHA-256 digest") from exc
+        if dataset_digest_bytes.hex() != dataset_sha256.lower():
+            raise ValueError("score dataset_sha256 must be a 64-character SHA-256 digest")
+        dataset_sha256 = dataset_digest_bytes.hex()
     if not isinstance(aggregate, dict):
         raise TypeError("configuration aggregate must be an object")
     cases = aggregate.get("cases")
@@ -671,6 +711,10 @@ def evaluate_quality_gate(
         "stratum_checks": [],
     }
     reasons = []
+    if required_dataset_kind is not None and dataset_kind != required_dataset_kind:
+        reasons.append(f"dataset kind {dataset_kind or 'unavailable'} does not match required kind")
+    if required_dataset_sha256 is not None and dataset_sha256 != required_dataset_sha256:
+        reasons.append("score dataset SHA-256 does not match the required pinned dataset")
     if not observed["coverage_complete"]:
         reasons.append("case coverage is incomplete")
     if case_count < min_cases:
@@ -786,7 +830,8 @@ def evaluate_quality_gate(
     return {
         "schema_version": 1,
         "configuration_id": configuration_id,
-        "dataset_kind": score.get("dataset_kind"),
+        "dataset_kind": dataset_kind,
+        "dataset_sha256": dataset_sha256,
         "passed": not reasons,
         "thresholds": {
             "min_cases": min_cases,
@@ -799,6 +844,8 @@ def evaluate_quality_gate(
             "max_p95_elapsed_ms": max_p95_elapsed_ms,
             "min_stratum_recall": min_stratum_recall,
             "min_stratum_gold_count": min_stratum_gold_count,
+            "required_dataset_kind": required_dataset_kind,
+            "required_dataset_sha256": required_dataset_sha256,
         },
         "observed": observed,
         "reasons": reasons,
@@ -948,6 +995,11 @@ def compare_speed(
             raise ValueError("speed comparison requires complete coverage of the same dataset cases")
         if any(len(runs) != repetitions for runs in cases.values()):
             raise ValueError("each configuration and case must have exactly the declared repetitions")
+        for runs in cases.values():
+            if any(run.attempt is None for run in runs):
+                raise ValueError("speed comparison requires explicit attempt numbers")
+            if {run.attempt for run in runs} != set(range(1, repetitions + 1)):
+                raise ValueError("each configuration and case must have attempts 1 through repetitions")
 
     def run_identity(run: BenchmarkRun) -> tuple:
         return (
@@ -987,6 +1039,24 @@ def compare_speed(
             raise ValueError("speed comparison requires the same task context per case")
         baseline_median = statistics.median(run.elapsed_ms for run in baseline)
         candidate_median = statistics.median(run.elapsed_ms for run in candidate)
+        baseline_by_attempt = {run.attempt: run for run in baseline}
+        candidate_by_attempt = {run.attempt: run for run in candidate}
+        paired = [
+            (baseline_by_attempt[attempt], candidate_by_attempt[attempt])
+            for attempt in range(1, repetitions + 1)
+        ]
+        paired_speedups = [
+            baseline_run.elapsed_ms / candidate_run.elapsed_ms
+            for baseline_run, candidate_run in paired
+            if candidate_run.elapsed_ms > 0
+        ]
+        paired_improvements = [
+            (baseline_run.elapsed_ms - candidate_run.elapsed_ms)
+            / baseline_run.elapsed_ms
+            * 100
+            for baseline_run, candidate_run in paired
+            if baseline_run.elapsed_ms > 0
+        ]
         baseline_input_tokens = median_usage(baseline, "input_tokens")
         candidate_input_tokens = median_usage(candidate, "input_tokens")
         input_token_savings_percent = (
@@ -1004,6 +1074,13 @@ def compare_speed(
                 "task_context_sha256": next(iter(baseline_tasks)),
                 "baseline_median_ms": baseline_median,
                 "candidate_median_ms": candidate_median,
+                "paired_repetitions": repetitions,
+                "paired_median_speedup_ratio": (
+                    statistics.median(paired_speedups) if paired_speedups else None
+                ),
+                "paired_median_improvement_percent": (
+                    statistics.median(paired_improvements) if paired_improvements else None
+                ),
                 "baseline_median_input_tokens": baseline_input_tokens,
                 "candidate_median_input_tokens": candidate_input_tokens,
                 "input_token_savings_percent": input_token_savings_percent,
@@ -1035,6 +1112,16 @@ def compare_speed(
         for configuration in (baseline_configuration, candidate_configuration)
     }
     ratios = [case["speedup_ratio"] for case in per_case if case["speedup_ratio"] is not None]
+    paired_ratios = [
+        case["paired_median_speedup_ratio"]
+        for case in per_case
+        if case["paired_median_speedup_ratio"] is not None
+    ]
+    paired_improvements = [
+        case["paired_median_improvement_percent"]
+        for case in per_case
+        if case["paired_median_improvement_percent"] is not None
+    ]
     improvements = [
         case["improvement_percent"]
         for case in per_case
@@ -1062,7 +1149,9 @@ def compare_speed(
     )
     return {
         "schema_version": 1,
-        "comparison": "same_model_same_pinned_input_host_elapsed_time",
+        "comparison": "same_model_same_pinned_input_attempt_paired_host_elapsed_time",
+        "dataset_kind": dataset.kind,
+        "dataset_sha256": _benchmark_dataset_sha256(dataset),
         "baseline_configuration": baseline_configuration,
         "candidate_configuration": candidate_configuration,
         "model": baseline_runs[0].model,
@@ -1071,6 +1160,12 @@ def compare_speed(
         "cases": per_case,
         "aggregate": {
             "median_speedup_ratio": statistics.median(ratios) if ratios else None,
+            "median_paired_speedup_ratio": (
+                statistics.median(paired_ratios) if paired_ratios else None
+            ),
+            "median_paired_improvement_percent": (
+                statistics.median(paired_improvements) if paired_improvements else None
+            ),
             "median_improvement_percent": statistics.median(improvements) if improvements else None,
             "baseline_median_ms": statistics.median(
                 case["baseline_median_ms"] for case in per_case
@@ -1096,7 +1191,11 @@ def compare_speed(
             "candidate_total_output_tokens": candidate_output_total,
         },
         "quality_by_configuration": quality,
-        "timing_scope": "host-reported elapsed_ms; callback must measure the same end-to-end scope",
+        "timing_scope": (
+            "host-reported elapsed_ms; callback must measure the same end-to-end scope. "
+            "Attempts are paired by case and attempt number; callers must interleave or randomize "
+            "configuration order to reduce time/order bias."
+        ),
         "usage_scope": "host-reported token counters; missing values are not treated as zero",
     }
 
@@ -1414,6 +1513,10 @@ def benchmark_main(argv: list[str]) -> int:
     quality_gate.add_argument("--max-p95-elapsed-ms", type=float)
     quality_gate.add_argument("--min-stratum-recall", type=float)
     quality_gate.add_argument("--min-stratum-gold-count", default=5, type=int)
+    quality_gate.add_argument(
+        "--require-dataset-kind", choices=("reviewbench_reference", "curated")
+    )
+    quality_gate.add_argument("--require-dataset-sha256")
     quality_gate.add_argument("--output", type=Path)
     reliability = subparsers.add_parser("reliability", help="Score fresh repeated review runs")
     reliability.add_argument("--dataset", required=True, type=Path)
@@ -1468,6 +1571,8 @@ def benchmark_main(argv: list[str]) -> int:
             max_p95_elapsed_ms=args.max_p95_elapsed_ms,
             min_stratum_recall=args.min_stratum_recall,
             min_stratum_gold_count=args.min_stratum_gold_count,
+            required_dataset_kind=args.require_dataset_kind,
+            required_dataset_sha256=args.require_dataset_sha256,
         )
     elif args.command == "import-reviewbench":
         payload = import_reviewbench(args.golden, args.repository).model_dump(mode="json")

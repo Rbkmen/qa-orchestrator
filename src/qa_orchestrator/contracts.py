@@ -81,7 +81,7 @@ class EvidenceRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     evidence_ref: EvidenceRefId
-    kind: Literal["source", "diff", "requirement", "runtime", "other"]
+    kind: Literal["source", "diff", "requirement", "claim", "runtime", "other"]
     sha256: Sha256Digest
     revision: GitObjectId | None = None
     path: ChangedFilePath | None = None
@@ -236,6 +236,13 @@ class ProfileAttemptObservation(BaseModel):
     preparation_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     model_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     validation_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    submitted_prompt_sha256: Sha256Digest | None = None
+    prompt_write_status: Literal["prepared", "written"] | None = None
+    source_packet_sha256: Sha256Digest | None = None
+    selected_packet_sha256: Sha256Digest | None = None
+    included_evidence_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=1000)
+    omitted_evidence_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=1000)
+    included_source_paths: tuple[ChangedFilePath, ...] = Field(default=(), max_length=500)
     cli_failure_detail: str | None = Field(default=None, max_length=512)
     cli_exit_code: int | None = Field(default=None, ge=-255, le=255)
     cli_event_type: Literal["error", "turn.failed"] | None = None
@@ -256,10 +263,23 @@ class ProfileAttemptMetrics(ProfileAttemptObservation):
     profile: ReviewAgent
     attempt: int = Field(ge=1, le=4)
     outcome: Literal["completed", "retryable_error", "timeout", "failed", "cancelled"]
+    review_head_sha: GitObjectId | None = None
+    review_diff_sha256: Sha256Digest | None = None
     started_at: AwareDatetime
     completed_at: AwareDatetime
     queue_seconds: float = Field(ge=0, allow_inf_nan=False)
     executor_seconds: float = Field(ge=0, allow_inf_nan=False)
+
+    @model_serializer(mode="wrap")
+    def serialize_optional_input_receipt(self, handler):
+        payload = handler(self)
+        for field in ("review_head_sha", "review_diff_sha256", "submitted_prompt_sha256", "prompt_write_status", "source_packet_sha256", "selected_packet_sha256"):
+            if getattr(self, field) is None:
+                payload.pop(field, None)
+        for field in ("included_evidence_refs", "omitted_evidence_refs", "included_source_paths"):
+            if not getattr(self, field):
+                payload.pop(field, None)
+        return payload
 
     @model_validator(mode="after")
     def validate_interval(self) -> "ProfileAttemptMetrics":
@@ -270,6 +290,26 @@ class ProfileAttemptMetrics(ProfileAttemptObservation):
             and self.cached_input_tokens > self.input_tokens
         ):
             raise ValueError("cached input cannot exceed total input tokens")
+        if self.prompt_write_status is not None and (
+            self.submitted_prompt_sha256 is None or self.source_packet_sha256 is None
+        ):
+            raise ValueError("prompt delivery status requires prompt and source packet hashes")
+        if self.submitted_prompt_sha256 is not None and self.prompt_write_status is None:
+            raise ValueError("prompt hash requires a delivery status")
+        if self.selected_packet_sha256 is None and (
+            self.included_evidence_refs or self.omitted_evidence_refs or self.included_source_paths
+        ):
+            raise ValueError("packet selection metadata requires a selected packet hash")
+        if len(set(self.included_evidence_refs)) != len(self.included_evidence_refs):
+            raise ValueError("included evidence refs must be unique")
+        if len(set(self.omitted_evidence_refs)) != len(self.omitted_evidence_refs):
+            raise ValueError("omitted evidence refs must be unique")
+        if set(self.included_evidence_refs) & set(self.omitted_evidence_refs):
+            raise ValueError("included and omitted evidence refs must be disjoint")
+        if len(set(self.included_source_paths)) != len(self.included_source_paths):
+            raise ValueError("included source paths must be unique")
+        if (self.review_head_sha is None) != (self.review_diff_sha256 is None):
+            raise ValueError("review head and diff hashes must be supplied together")
         return self
 
 
@@ -289,6 +329,74 @@ class ProfileExecutionMetrics(BaseModel):
     def validate_execution_interval(self) -> "ProfileExecutionMetrics":
         if self.completed_at < self.started_at:
             raise ValueError("completed_at must be at or after started_at")
+        if self.attempts and self.attempt_count != len(self.attempts):
+            raise ValueError("attempt_count must match the recorded attempt ledger")
+        if len({attempt.attempt for attempt in self.attempts}) != len(self.attempts):
+            raise ValueError("attempt numbers must be unique")
+        if any(
+            attempt.completed_at < self.started_at or attempt.started_at > self.completed_at
+            for attempt in self.attempts
+        ):
+            raise ValueError("attempt interval must be within the profile execution interval")
+        return self
+
+
+class ReviewVerificationRecord(BaseModel):
+    """Host-supplied test/CI/runtime result bound to the reviewed head revision."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    verification_id: str = Field(pattern=r"^V-[0-9]{2,}$")
+    check_type: Literal["test", "ci", "runtime"]
+    scenario: str = Field(min_length=1, max_length=1000)
+    status: Literal["passed", "failed", "skipped", "not_run", "cancelled", "unknown"]
+    head_sha: GitObjectId
+    environment: str = Field(min_length=1, max_length=256)
+    source: Literal["host", "local_runner", "ci_provider", "runtime_system"]
+    source_ref: str = Field(min_length=1, max_length=2048)
+    run_url: str | None = Field(default=None, max_length=2048)
+    reason: str | None = Field(default=None, max_length=2000)
+    evidence_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=100)
+    started_at: AwareDatetime | None = None
+    completed_at: AwareDatetime | None = None
+
+    @field_validator("scenario", "environment", "source_ref", "reason")
+    @classmethod
+    def nonblank_verification_text(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("verification record text must not be blank")
+        return value.strip() if value is not None else None
+
+    @field_validator("run_url")
+    @classmethod
+    def validate_run_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            parsed = urlsplit(value)
+            hostname = parsed.hostname
+        except ValueError as exc:
+            raise ValueError("run_url must be an absolute HTTP(S) URL") from exc
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or any(char.isspace() or char in "<>" for char in value)
+        ):
+            raise ValueError("run_url must be an absolute HTTP(S) URL without credentials")
+        return value
+
+    @model_validator(mode="after")
+    def validate_result(self) -> "ReviewVerificationRecord":
+        if len(set(self.evidence_refs)) != len(self.evidence_refs):
+            raise ValueError("verification evidence refs must be unique")
+        if self.status in {"failed", "skipped", "not_run", "cancelled", "unknown"} and not self.reason:
+            raise ValueError("non-passing verification records require a reason")
+        if (self.started_at is None) != (self.completed_at is None):
+            raise ValueError("verification start and completion times must be supplied together")
+        if self.started_at is not None and self.completed_at < self.started_at:
+            raise ValueError("verification completed_at must be at or after started_at")
         return self
 
 
@@ -586,6 +694,40 @@ class ProfileReviewReport(BaseModel):
         return self
 
 
+class ReviewCriterionCoverage(BaseModel):
+    """Host-authored trace from one requirement or MR claim to reviewed evidence."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    criterion_ref: EvidenceRefId
+    criterion_kind: Literal["requirement", "mr_claim"]
+    expected_behavior: str | None = Field(default=None, max_length=2000)
+    outcome: Literal["confirmed", "contradicted", "unverified", "not_applicable_to_diff"]
+    implementation_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=32)
+    test_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=32)
+    rationale: str = Field(min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_coverage(self) -> "ReviewCriterionCoverage":
+        if not self.rationale.strip():
+            raise ValueError("criterion coverage rationale must not be blank")
+        if self.expected_behavior is not None and not self.expected_behavior.strip():
+            raise ValueError("expected_behavior must not be blank")
+        if self.outcome != "unverified" and self.expected_behavior is None:
+            raise ValueError("a verified criterion outcome requires expected_behavior")
+        if self.outcome in {"confirmed", "contradicted"} and not self.implementation_refs:
+            raise ValueError("a confirmed or contradicted criterion requires implementation evidence")
+        for name, refs in (
+            ("implementation_refs", self.implementation_refs),
+            ("test_refs", self.test_refs),
+        ):
+            if len(set(refs)) != len(refs):
+                raise ValueError(f"{name} must contain unique evidence refs")
+        if set(self.implementation_refs) & set(self.test_refs):
+            raise ValueError("implementation and test evidence refs must be distinct")
+        return self
+
+
 class RefutationCheck(BaseModel):
     """Host's evidence-backed assessment, not a vote or proof of another agent's execution."""
 
@@ -654,6 +796,11 @@ class FinalReviewReport(BaseModel):
     finding_candidates: tuple[FinalReviewFinding, ...] = Field(default=(), max_length=100)
     coverage_gaps: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
     unverified: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
+    criterion_coverage: tuple[ReviewCriterionCoverage, ...] = Field(default=(), max_length=100)
+    verification_records: tuple[ReviewVerificationRecord, ...] = Field(
+        default=(), max_length=250,
+        description="Host-supplied test, CI and runtime checks bound to the reviewed head SHA.",
+    )
     coverage_ledger: ReviewCoverageLedger | None = Field(
         default=None,
         description=(
@@ -685,6 +832,14 @@ class FinalReviewReport(BaseModel):
             self.finding_candidates
         ):
             raise ValueError("finding candidate IDs must be unique within the final report")
+        if len({item.criterion_ref for item in self.criterion_coverage}) != len(
+            self.criterion_coverage
+        ):
+            raise ValueError("criterion coverage refs must be unique")
+        if len({item.verification_id for item in self.verification_records}) != len(
+            self.verification_records
+        ):
+            raise ValueError("verification IDs must be unique")
         decision_sources = {
             (decision.source.profile, decision.source.candidate_id)
             for decision in self.candidate_decisions

@@ -14,6 +14,7 @@ from qa_orchestrator.contracts import (
     ReviewFindingCandidate,
 )
 from qa_orchestrator.evidence import (
+    _neighbor_categories,
     _path_tokens,
     discover_neighbor_evidence,
     evidence_main,
@@ -434,7 +435,8 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
 
     git("init", "--quiet")
     files = {
-        "src/service.py": "def calculate(value):\n    return value + 1\n",
+        "src/service.py": "def calculate(value):\n    return helper() + value + 1\n",
+        "src/helper.py": "def helper():\n    return 1\n",
         "src/caller.py": "from src.service import calculate\nresult = calculate(2)\n",
         "src/irrelevant.py": "unrelated = True\n",
         "contracts/service_contract.py": "from src.service import calculate\n\nassert calculate(1) == 2\n",
@@ -449,7 +451,7 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
     base = git("rev-parse", "HEAD").decode().strip()
 
     changed = repository / "src/service.py"
-    changed.write_text("def calculate(value):\n    return value + 2\n", encoding="utf-8")
+    changed.write_text("def calculate(value):\n    return helper() + value + 2\n", encoding="utf-8")
     git("add", "src/service.py")
     git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "head")
     head = git("rev-parse", "HEAD").decode().strip()
@@ -497,6 +499,26 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
                 ),
                 stderr="",
             )
+        related_nodes = (
+            [
+                {
+                    "name": "calculate",
+                    "kind": "function",
+                    "filePath": "src/caller.py",
+                    "startLine": 2,
+                }
+            ]
+            if command[1] == "callers"
+            else [
+                {
+                    "name": "helper",
+                    "kind": "function",
+                    "filePath": "src/helper.py",
+                    "startLine": 1,
+                }
+            ]
+        )
+        relation_data = {"callers" if command[1] == "callers" else "callees": related_nodes}
         return subprocess.CompletedProcess(
             command,
             0,
@@ -505,15 +527,11 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
                     "truncated": False,
                     "definitions": [
                         {
-                            "definition": {"filePath": "src/service.py"},
-                            "callers": [
-                                {
-                                    "name": "calculate",
-                                    "kind": "function",
-                                    "filePath": "src/caller.py",
-                                    "startLine": 2,
-                                }
-                            ],
+                            "definition": {
+                                "filePath": "src/service.py",
+                            },
+                            "truncated": command[1] == "callees",
+                            **relation_data,
                         }
                     ],
                 }
@@ -525,7 +543,11 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
     manifest = discover_neighbor_evidence(context, repository, use_codegraph=True)
     assert manifest["codegraph"]["status"] == "ready"
     assert manifest["codegraph"]["symbols_checked"] == 1
+    assert manifest["codegraph"]["caller_queries_checked"] == 1
+    assert manifest["codegraph"]["callee_queries_checked"] == 1
+    assert manifest["codegraph"]["truncated"] is True
     assert manifest["codegraph"]["caller_candidates"][0]["path"] == "src/caller.py"
+    assert manifest["codegraph"]["callee_candidates"][0]["path"] == "src/helper.py"
     # Dirty worktree edits must not affect candidate hashes or line matches.
     caller = repository / "src/caller.py"
     caller.write_text("unrelated dirty worktree contents\n", encoding="utf-8")
@@ -533,6 +555,7 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
 
     assert set(by_path) == {
         "contracts/service_contract.py",
+        "src/helper.py",
         "src/caller.py",
         "tests/test_service.py",
     }
@@ -544,6 +567,8 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
     ]
     assert "codegraph_caller_edge" in caller_entry["reasons"]
     assert caller_entry["codegraph_callers"][0]["start_line"] == 2
+    assert "codegraph_callee_edge" in by_path["src/helper.py"]["reasons"]
+    assert by_path["src/helper.py"]["codegraph_callees"][0]["start_line"] == 1
     pinned_caller = git("show", f"{head}:src/caller.py")
     assert caller_entry["sha256"] == hashlib.sha256(pinned_caller).hexdigest()
     assert caller_entry["record"]["revision"] == head
@@ -553,6 +578,16 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
     assert manifest["symbol_search_paths_omitted_by_limit"] >= 1
     assert manifest["symbol_search_exhaustive"] is False
     assert manifest["candidate_scan_limit"] == 100
+    coverage = manifest["relationship_coverage"]
+    assert coverage["exhaustive"] is False
+    assert coverage["traced"][-1]["kind"] == "codegraph_callers_and_callees"
+    assert coverage["traced"][-1]["truncated"] is True
+    assert "event_names_subscribers_and_topics" in {
+        item["kind"] for item in coverage["not_systematically_traced"]
+    }
+    omissions_by_kind = {item["kind"]: item for item in manifest["omissions"]}
+    assert omissions_by_kind["symbol_search_path_limit"]["count"] >= 1
+    assert omissions_by_kind["symbol_search_path_limit"]["examples"]
 
     previous_graph_calls = len(codegraph_calls)
     stale_index = True
@@ -600,6 +635,22 @@ def test_path_tokens_ignore_file_extensions():
     assert "layer" in tokens
     assert "atom" in tokens
     assert "tsx" not in tokens
+
+
+@pytest.mark.parametrize(
+    ("path", "category"),
+    [
+        ("src/api/checkout.py", "api"),
+        ("db/migrations/001_add_status.sql", "database"),
+        ("schemas/payment.proto", "contract"),
+        ("events/deposit_published.py", "event"),
+        ("workers/reconcile_orders.py", "job"),
+        ("config/feature_flags.yml", "config"),
+        ("authorization/policies/refunds.py", "authorization"),
+    ],
+)
+def test_neighbor_categories_cover_system_boundaries(path, category):
+    assert category in _neighbor_categories(path)
 
 
 def test_discovery_follows_test_imports_and_suggests_dependency_manifest(tmp_path):

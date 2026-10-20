@@ -16,6 +16,7 @@ from qa_orchestrator.contracts import (
     FinalReviewReport,
     ProfileReviewReport,
     ReviewContext,
+    ReviewCriterionCoverage,
     ReviewFindingCandidate,
 )
 
@@ -30,8 +31,9 @@ _DISCOVERY_MAX_SYMBOL_SEARCH_BYTES = 16_000_000
 _DISCOVERY_MAX_MODULE_SEARCH_TERMS = 48
 _DISCOVERY_MAX_MODULE_SEARCH_BYTES = 32_000_000
 _DISCOVERY_SYMBOL_SEARCH_BATCH_SIZE = 32
+_DISCOVERY_MAX_OMISSION_EXAMPLES = 20
 _CODEGRAPH_MAX_SYMBOL_QUERIES = 24
-_CODEGRAPH_MAX_CALLER_CANDIDATES = 100
+_CODEGRAPH_MAX_RELATION_CANDIDATES = 100
 _IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]{2,127}$")
 _IGNORED_IDENTIFIERS = {
     "call", "get", "init", "main", "run", "set", "test", "toString", "valueOf",
@@ -53,6 +55,29 @@ _TEST_PATH = re.compile(
 _CONTRACT_PATH = re.compile(
     r"(^|/)(contracts?|schemas?|protocols?|types?|interfaces?|openapi|graphql|proto)(/|$)",
     re.IGNORECASE,
+)
+_API_PATH = re.compile(
+    r"(^|/)(api|routes?|controllers?|endpoints?|graphql|openapi|proto)(/|$)", re.IGNORECASE
+)
+_DATABASE_PATH = re.compile(
+    r"(^|/)(models?|migrations?|database|db|sql|prisma)(/|$)|(^|/)(schema\.(?:rb|sql))$",
+    re.IGNORECASE,
+)
+_EVENT_PATH = re.compile(
+    r"(^|/)(events?|pubsub|topics?|streams?|messages?)(/|$)", re.IGNORECASE
+)
+_BACKGROUND_PATH = re.compile(
+    r"(^|/)(jobs?|workers?|queues?|cron|schedulers?|background)(/|$)", re.IGNORECASE
+)
+_CONFIG_PATH = re.compile(
+    r"(^|/)(configs?|configuration|settings?|feature.?flags?|flags?)(/|$)|(^|/)\.env(?:\.|$)",
+    re.IGNORECASE,
+)
+_AUTHORIZATION_PATH = re.compile(
+    r"(^|/)(auth|authorization|permissions?|policies|rbac|roles?)(/|$)", re.IGNORECASE
+)
+_SYSTEM_BOUNDARY_CATEGORIES = frozenset(
+    {"api", "authorization", "config", "contract", "database", "event", "job"}
 )
 _TS_IMPORT = re.compile(
     r"\bimport\s+(?P<bindings>[^;]*?)\s+from\s*['\"](?P<module>[^'\"]+)['\"]",
@@ -237,7 +262,7 @@ def validate_context_selection(context: ReviewContext, report: ProfileReviewRepo
         raise ValueError("context selection must account for all bound refs")
     mandatory = {
         entry.evidence_ref for entry in context.evidence_registry
-        if entry.kind in {"diff", "requirement"}
+        if entry.kind in {"diff", "requirement", "claim"}
     }
     if mandatory - set(selection.included_refs):
         raise ValueError("context selection omits mandatory evidence")
@@ -246,6 +271,67 @@ def validate_context_selection(context: ReviewContext, report: ProfileReviewRepo
     cited.update(item.evidence_ref for item in report.evidence_map)
     if cited - set(selection.included_refs):
         raise ValueError("profile report cites evidence omitted from its context")
+
+
+def complete_criterion_coverage(
+    context: ReviewContext,
+    report: FinalReviewReport,
+) -> FinalReviewReport:
+    """Keep every registered requirement or MR claim visible in the final report."""
+    criteria = {
+        entry.evidence_ref: entry.kind
+        for entry in context.evidence_registry
+        if entry.kind in {"requirement", "claim"}
+    }
+    if set(criteria) - set(context.evidence_refs):
+        raise ValueError("registered criteria must belong to the bound evidence packet")
+    if len(criteria) > 100:
+        raise ValueError("bound review has more criteria than the final report can represent")
+
+    supplied = {item.criterion_ref: item for item in report.criterion_coverage}
+    unknown = set(supplied) - set(criteria)
+    if unknown:
+        raise ValueError("criterion coverage cites an unregistered requirement or MR claim")
+
+    registry = {entry.evidence_ref: entry for entry in context.evidence_registry}
+    packet_refs = set(context.evidence_refs)
+    for item in report.criterion_coverage:
+        expected_kind = "requirement" if item.criterion_kind == "requirement" else "claim"
+        if criteria[item.criterion_ref] != expected_kind:
+            raise ValueError("criterion coverage kind does not match its bound evidence")
+        supporting_refs = set(item.implementation_refs) | set(item.test_refs)
+        if supporting_refs - packet_refs:
+            raise ValueError("criterion coverage cites evidence outside the bound packet")
+        if supporting_refs - set(registry):
+            raise ValueError("criterion coverage evidence must have registered locators")
+        for ref in item.implementation_refs:
+            evidence = registry.get(ref)
+            if evidence is not None and evidence.kind not in {"source", "diff"}:
+                raise ValueError("implementation evidence must reference source or diff evidence")
+        for ref in item.test_refs:
+            evidence = registry.get(ref)
+            if evidence is not None and evidence.kind not in {"source", "runtime"}:
+                raise ValueError("test evidence must reference source or runtime evidence")
+
+    missing = set(criteria) - set(supplied)
+    if not missing:
+        return report
+
+    generated = [
+        ReviewCriterionCoverage(
+            criterion_ref=ref,
+            criterion_kind="requirement" if criteria[ref] == "requirement" else "mr_claim",
+            outcome="unverified",
+            rationale="No explicit assessment was submitted; this criterion remains unverified.",
+        )
+        for ref in sorted(missing)
+    ]
+    return FinalReviewReport.model_validate(
+        {
+            **report.model_dump(),
+            "criterion_coverage": (*report.criterion_coverage, *generated),
+        }
+    )
 
 
 def verify_evidence(
@@ -592,6 +678,18 @@ def _neighbor_categories(path: str) -> tuple[str, ...]:
         tags.append("test")
     if _CONTRACT_PATH.search(path):
         tags.append("contract")
+    if _API_PATH.search(path):
+        tags.append("api")
+    if _DATABASE_PATH.search(path):
+        tags.append("database")
+    if _EVENT_PATH.search(path):
+        tags.append("event")
+    if _BACKGROUND_PATH.search(path):
+        tags.append("job")
+    if _CONFIG_PATH.search(path):
+        tags.append("config")
+    if _AUTHORIZATION_PATH.search(path):
+        tags.append("authorization")
     return tuple(tags or ("caller",))
 
 
@@ -605,7 +703,7 @@ def _path_tokens(path: str) -> set[str]:
     }
 
 
-def _codegraph_caller_suggestions(
+def _codegraph_relationship_suggestions(
     repository: Path,
     context: ReviewContext,
     changed_symbols_by_path: dict[str, set[str]],
@@ -614,15 +712,23 @@ def _codegraph_caller_suggestions(
     enabled: bool,
     max_candidates: int,
 ) -> dict:
-    """Read caller edges only from a complete index matching the bound checkout."""
+    """Read bounded caller and callee edges from a current index for this checkout."""
     summary = {
         "status": "not_requested",
         "repository_head_sha": None,
         "symbols_considered": 0,
         "symbols_checked": 0,
+        "query_budget": min(_CODEGRAPH_MAX_SYMBOL_QUERIES, max_candidates * 2),
+        "caller_queries_checked": 0,
+        "callee_queries_checked": 0,
+        "caller_query_failures": 0,
+        "callee_query_failures": 0,
         "caller_candidates": [],
+        "callee_candidates": [],
         "query_failures": 0,
         "truncated": False,
+        "symbols_omitted_by_limit": 0,
+        "omitted_symbol_examples": [],
         "exhaustive": False,
     }
     if not enabled:
@@ -686,92 +792,123 @@ def _codegraph_caller_suggestions(
         for symbol in sorted(changed_symbols_by_path.get(path, ()))
     ]
     summary["symbols_considered"] = len(symbols)
-    query_budget = min(_CODEGRAPH_MAX_SYMBOL_QUERIES, max_candidates * 2)
-    candidates: dict[tuple[str, str, int], dict] = {}
+    query_budget = summary["query_budget"]
+    caller_candidates: dict[tuple[str, str, int], dict] = {}
+    callee_candidates: dict[tuple[str, str, int], dict] = {}
     query_deadline = time.monotonic() + 10
+    stop = False
     for path, symbol in symbols[:query_budget]:
         remaining_seconds = query_deadline - time.monotonic()
         if remaining_seconds <= 0:
             summary["truncated"] = True
             break
         summary["symbols_checked"] += 1
-        try:
-            query = subprocess.run(
-                [
-                    executable,
-                    "callers",
-                    symbol,
-                    "--path",
-                    str(repository),
-                    "--file",
-                    path,
-                    "--limit",
-                    "20",
-                    "--json",
-                ],
-                capture_output=True,
-                check=False,
-                text=True,
-                timeout=min(2, max(0.1, remaining_seconds)),
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            summary["query_failures"] += 1
-            continue
-        if query.returncode:
-            summary["query_failures"] += 1
-            continue
-        try:
-            payload = json.loads(query.stdout)
-        except (TypeError, json.JSONDecodeError):
-            summary["query_failures"] += 1
-            continue
-        if not isinstance(payload, dict):
-            summary["query_failures"] += 1
-            continue
-        summary["truncated"] = summary["truncated"] or payload.get("truncated") is True
-        definitions = payload.get("definitions")
-        if not isinstance(definitions, list):
-            summary["query_failures"] += 1
-            continue
-        for item in definitions:
-            if not isinstance(item, dict):
-                continue
-            definition = item.get("definition")
-            callers = item.get("callers")
-            if not isinstance(definition, dict) or definition.get("filePath") != path:
-                continue
-            if not isinstance(callers, list):
-                continue
-            for caller in callers:
-                if not isinstance(caller, dict):
-                    continue
-                caller_path = caller.get("filePath")
-                line = caller.get("startLine")
-                if (
-                    not isinstance(caller_path, str)
-                    or caller_path not in tracked_paths
-                    or caller_path in context.changed_files
-                    or type(line) is not int
-                    or line < 1
-                ):
-                    continue
-                key = (caller_path, symbol, line)
-                candidates[key] = {
-                    "path": caller_path,
-                    "symbol": symbol,
-                    "changed_path": path,
-                    "start_line": line,
-                    "kind": caller.get("kind") if isinstance(caller.get("kind"), str) else None,
-                }
-                if len(candidates) >= _CODEGRAPH_MAX_CALLER_CANDIDATES:
-                    summary["truncated"] = True
-                    break
-            if len(candidates) >= _CODEGRAPH_MAX_CALLER_CANDIDATES:
+        for relation, candidates in (
+            ("callers", caller_candidates),
+            ("callees", callee_candidates),
+        ):
+            remaining_seconds = query_deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                summary["truncated"] = True
                 break
-        if len(candidates) >= _CODEGRAPH_MAX_CALLER_CANDIDATES:
+            summary[f"{relation[:-1]}_queries_checked"] += 1
+            try:
+                query = subprocess.run(
+                    [
+                        executable,
+                        relation,
+                        symbol,
+                        "--path",
+                        str(repository),
+                        "--file",
+                        path,
+                        "--limit",
+                        "20",
+                        "--json",
+                    ],
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                    timeout=min(2, max(0.1, remaining_seconds)),
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                summary["query_failures"] += 1
+                summary[f"{relation[:-1]}_query_failures"] += 1
+                continue
+            if query.returncode:
+                summary["query_failures"] += 1
+                summary[f"{relation[:-1]}_query_failures"] += 1
+                continue
+            try:
+                payload = json.loads(query.stdout)
+            except (TypeError, json.JSONDecodeError):
+                summary["query_failures"] += 1
+                summary[f"{relation[:-1]}_query_failures"] += 1
+                continue
+            if not isinstance(payload, dict):
+                summary["query_failures"] += 1
+                summary[f"{relation[:-1]}_query_failures"] += 1
+                continue
+            summary["truncated"] = summary["truncated"] or payload.get("truncated") is True
+            definitions = payload.get("definitions")
+            if not isinstance(definitions, list):
+                summary["query_failures"] += 1
+                summary[f"{relation[:-1]}_query_failures"] += 1
+                continue
+            for item in definitions:
+                if not isinstance(item, dict):
+                    continue
+                summary["truncated"] = summary["truncated"] or item.get("truncated") is True
+                definition = item.get("definition")
+                related_nodes = item.get(relation)
+                if not isinstance(definition, dict) or definition.get("filePath") != path:
+                    continue
+                if not isinstance(related_nodes, list):
+                    continue
+                for node in related_nodes:
+                    if not isinstance(node, dict):
+                        continue
+                    related_path = node.get("filePath")
+                    line = node.get("startLine")
+                    if (
+                        not isinstance(related_path, str)
+                        or related_path not in tracked_paths
+                        or related_path in context.changed_files
+                        or type(line) is not int
+                        or line < 1
+                    ):
+                        continue
+                    key = (related_path, symbol, line)
+                    candidates[key] = {
+                        "path": related_path,
+                        "symbol": symbol,
+                        "changed_path": path,
+                        "start_line": line,
+                        "kind": node.get("kind") if isinstance(node.get("kind"), str) else None,
+                    }
+                    if len(caller_candidates) + len(callee_candidates) >= _CODEGRAPH_MAX_RELATION_CANDIDATES:
+                        summary["truncated"] = True
+                        stop = True
+                        break
+                if stop:
+                    break
+            if stop:
+                break
+        if stop:
             break
 
-    summary["caller_candidates"] = [candidates[key] for key in sorted(candidates)]
+    summary["caller_candidates"] = [
+        caller_candidates[key] for key in sorted(caller_candidates)
+    ]
+    summary["callee_candidates"] = [
+        callee_candidates[key] for key in sorted(callee_candidates)
+    ]
+    omitted_symbols = symbols[query_budget:]
+    summary["symbols_omitted_by_limit"] = len(omitted_symbols)
+    summary["omitted_symbol_examples"] = [
+        {"path": path, "symbol": symbol}
+        for path, symbol in omitted_symbols[:20]
+    ]
     summary["status"] = "partial" if summary["query_failures"] else "ready"
     if len(symbols) > query_budget:
         summary["truncated"] = True
@@ -817,10 +954,14 @@ def discover_neighbor_evidence(
     skipped_by_limits = 0
     collect_changed_symbols = True
     changed_sources_skipped_symbol_scan = 0
+    changed_sources_skipped_symbol_scan_paths = []
+    changed_symbol_budget_reached_path = None
+    changed_source_paths_skipped_by_size = []
     for path in sorted(changed & tracked_set):
         size = int(_git(repository, "cat-file", "-s", f"{context.head_sha}:{path}"))
         if size > _DISCOVERY_MAX_SOURCE_BYTES or total_bytes + size > _DISCOVERY_MAX_TOTAL_BYTES:
             skipped_by_limits += 1
+            changed_source_paths_skipped_by_size.append(path)
             continue
         source = _git(repository, "show", f"{context.head_sha}:{path}")
         total_bytes += len(source)
@@ -832,8 +973,10 @@ def discover_neighbor_evidence(
             referenced_symbols.update(_referenced_symbols(path, source, tracked_set))
             if len(defined_symbols | referenced_symbols) >= _DISCOVERY_MAX_SYMBOLS:
                 collect_changed_symbols = False
+                changed_symbol_budget_reached_path = path
         else:
             changed_sources_skipped_symbol_scan += 1
+            changed_sources_skipped_symbol_scan_paths.append(path)
         referenced_module_paths.update(_referenced_module_paths(path, source, tracked_set))
         if _TEST_PATH.search(path):
             test_audit_by_path[path] = audit_test_source(path, source)
@@ -857,7 +1000,7 @@ def discover_neighbor_evidence(
             module_names.append(name)
     all_module_search_terms = tuple(dict.fromkeys((*module_names, *ordered_symbols)))
     module_search_terms = all_module_search_terms[:_DISCOVERY_MAX_MODULE_SEARCH_TERMS]
-    codegraph = _codegraph_caller_suggestions(
+    codegraph = _codegraph_relationship_suggestions(
         repository,
         context,
         defined_symbols_by_path,
@@ -868,6 +1011,9 @@ def discover_neighbor_evidence(
     codegraph_by_path: dict[str, list[dict]] = {}
     for item in codegraph["caller_candidates"]:
         codegraph_by_path.setdefault(item["path"], []).append(item)
+    codegraph_callees_by_path: dict[str, list[dict]] = {}
+    for item in codegraph["callee_candidates"]:
+        codegraph_callees_by_path.setdefault(item["path"], []).append(item)
 
     changed_path_tokens = set().union(*(_path_tokens(path) for path in changed)) if changed else set()
     symbol_path_tokens = (
@@ -894,10 +1040,12 @@ def discover_neighbor_evidence(
         categories = _neighbor_categories(path)
         priority = (
             0 if path in referenced_module_paths else
-            1 if "test" in categories and changed_matches else
-            2 if "contract" in categories and (changed_matches or symbol_matches) else
-            3 if symbol_matches else
-            4 if same_directory else 5
+            1 if path in codegraph_by_path or path in codegraph_callees_by_path else
+            2 if "test" in categories and changed_matches else
+            3 if set(categories) & _SYSTEM_BOUNDARY_CATEGORIES
+            and (changed_matches or symbol_matches) else
+            4 if symbol_matches else
+            5 if same_directory else 6
         )
         ranked_symbol_paths.append(
             (priority, -len(symbol_matches), -len(changed_matches), path)
@@ -908,6 +1056,7 @@ def discover_neighbor_evidence(
     symbol_search_paths = []
     symbol_search_bytes = 0
     symbol_search_paths_skipped_by_size = 0
+    symbol_search_paths_skipped_by_size_examples = []
     for path in ranked_search_paths:
         size = int(_git(repository, "cat-file", "-s", f"{context.head_sha}:{path}"))
         if (
@@ -917,6 +1066,7 @@ def discover_neighbor_evidence(
         ):
             skipped_by_limits += 1
             symbol_search_paths_skipped_by_size += 1
+            symbol_search_paths_skipped_by_size_examples.append(path)
             continue
         symbol_search_paths.append(path)
         symbol_search_bytes += size
@@ -980,22 +1130,24 @@ def discover_neighbor_evidence(
             | test_paths
             | dependency_manifest_paths
             | set(codegraph_by_path)
+            | set(codegraph_callees_by_path)
         )
         - changed,
         key=lambda path: (
             0 if path in dependency_manifest_paths else
             1 if path in referenced_module_paths else
-            2 if path in codegraph_by_path else
+            2 if path in codegraph_by_path or path in codegraph_callees_by_path else
             3 if path in module_name_search_paths else
             4 if path in test_paths else
             5 if path in grep_paths and "test" in _neighbor_categories(path) else
-            6 if path in grep_paths and "contract" in _neighbor_categories(path) else
+            6 if path in grep_paths and set(_neighbor_categories(path)) & _SYSTEM_BOUNDARY_CATEGORIES else
             7 if path in grep_paths else 8,
             path,
         ),
     )
     candidate_scan_limit = min(_DISCOVERY_MAX_CANDIDATE_SCAN_PATHS, max_candidates * 2)
     candidate_paths = all_candidate_paths[:candidate_scan_limit]
+    candidate_paths_skipped_by_size = []
     for path in candidate_paths:
         if path not in tracked_set:
             continue
@@ -1005,6 +1157,7 @@ def discover_neighbor_evidence(
             or total_bytes + symbol_search_bytes + size > _DISCOVERY_MAX_TOTAL_BYTES
         ):
             skipped_by_limits += 1
+            candidate_paths_skipped_by_size.append(path)
             continue
         source = _git(repository, "show", f"{context.head_sha}:{path}")
         total_bytes += len(source)
@@ -1036,8 +1189,13 @@ def discover_neighbor_evidence(
         ]
         categories = list(_neighbor_categories(path))
         codegraph_matches = codegraph_by_path.get(path, [])
+        codegraph_callee_matches = codegraph_callees_by_path.get(path, [])
         if codegraph_matches and "caller" not in categories:
             categories.append("caller")
+        if codegraph_callee_matches and not codegraph_matches and categories == ["caller"]:
+            categories = ["callee"]
+        elif codegraph_callee_matches and "callee" not in categories:
+            categories.append("callee")
         imported_changed_paths = sorted(
             _referenced_module_paths(path, source, tracked_set) & changed
         )
@@ -1056,12 +1214,16 @@ def discover_neighbor_evidence(
             reasons.append("symbol_reference")
         if codegraph_matches:
             reasons.append("codegraph_caller_edge")
+        if codegraph_callee_matches:
+            reasons.append("codegraph_callee_edge")
         if declarations:
             reasons.append("symbol_declaration")
         if "test" in categories and path in test_paths:
             reasons.append("test_path_convention")
         if "contract" in categories and matches:
             reasons.append("contract_path_and_symbol_reference")
+        if set(categories) & (_SYSTEM_BOUNDARY_CATEGORIES - {"contract"}) and matches:
+            reasons.append("system_boundary_path_and_symbol_reference")
         if path in dependency_manifest_paths:
             reasons.append("test_dependency_manifest")
         if path in referenced_module_paths:
@@ -1082,6 +1244,7 @@ def discover_neighbor_evidence(
                 "categories": list(categories),
                 "matched_symbols": matches,
                 "codegraph_callers": codegraph_matches,
+                "codegraph_callees": codegraph_callee_matches,
                 "reasons": reasons,
                 "imported_changed_paths": imported_changed_paths,
                 "test_audit_candidates": test_audit["candidates"] if test_audit else [],
@@ -1093,9 +1256,9 @@ def discover_neighbor_evidence(
     candidates.sort(
         key=lambda item: (
             0 if "dependency" in item["categories"] else
-            1 if "declaration" in item["categories"] else
-            2 if "test" in item["categories"] else
-            3 if "contract" in item["categories"] else 4,
+            1 if set(item["categories"]) & _SYSTEM_BOUNDARY_CATEGORIES else
+            2 if "declaration" in item["categories"] else
+            3 if "test" in item["categories"] else 4,
             item["path"],
         )
     )
@@ -1128,6 +1291,130 @@ def discover_neighbor_evidence(
         ]
         records.append({**candidate, "record": record.model_dump(mode="json")})
 
+    omissions = []
+    omission_reasons = {
+        "changed_source_size_limit": "Changed source exceeded a per-file or total-source byte cap.",
+        "changed_symbol_budget": "Changed-source symbol extraction reached its configured symbol budget.",
+        "symbol_search_path_limit": "Only the highest-ranked path-related files are searched for symbol matches.",
+        "symbol_search_source_size_limit": "A selected symbol-search source exceeded a byte cap.",
+        "candidate_path_limit": "Only the highest-ranked candidate paths are opened and read.",
+        "candidate_source_size_limit": "A candidate source exceeded a per-file or total-source byte cap.",
+        "module_search_term_limit": "Only the configured number of module-name and symbol terms are searched.",
+        "codegraph_symbol_query_limit": "Only the configured number of changed symbols receive CodeGraph queries.",
+    }
+
+    def add_omission(kind: str, count: int, examples: list, limit: int | None = None) -> None:
+        if count:
+            omission = {
+                "kind": kind,
+                "reason": omission_reasons[kind],
+                "count": count,
+                "examples": examples[:_DISCOVERY_MAX_OMISSION_EXAMPLES],
+            }
+            if limit is not None:
+                omission["limit"] = limit
+            omissions.append(omission)
+
+    add_omission(
+        "changed_source_size_limit",
+        len(changed_source_paths_skipped_by_size),
+        changed_source_paths_skipped_by_size,
+        _DISCOVERY_MAX_SOURCE_BYTES,
+    )
+    add_omission(
+        "changed_symbol_budget",
+        changed_sources_skipped_symbol_scan + int(changed_symbol_budget_reached_path is not None),
+        ([changed_symbol_budget_reached_path] if changed_symbol_budget_reached_path else [])
+        + changed_sources_skipped_symbol_scan_paths,
+        _DISCOVERY_MAX_SYMBOLS,
+    )
+    add_omission(
+        "symbol_search_path_limit",
+        len(symbol_search_candidate_paths) - len(ranked_search_paths),
+        list(symbol_search_candidate_paths[len(ranked_search_paths) :]),
+        _DISCOVERY_MAX_SYMBOL_SEARCH_PATHS,
+    )
+    add_omission(
+        "symbol_search_source_size_limit",
+        symbol_search_paths_skipped_by_size,
+        symbol_search_paths_skipped_by_size_examples,
+        _DISCOVERY_MAX_SYMBOL_SEARCH_BYTES,
+    )
+    add_omission(
+        "candidate_path_limit",
+        len(all_candidate_paths) - len(candidate_paths),
+        list(all_candidate_paths[len(candidate_paths) :]),
+        candidate_scan_limit,
+    )
+    add_omission(
+        "candidate_source_size_limit",
+        len(candidate_paths_skipped_by_size),
+        candidate_paths_skipped_by_size,
+        _DISCOVERY_MAX_SOURCE_BYTES,
+    )
+    add_omission(
+        "module_search_term_limit",
+        len(all_module_search_terms) - len(module_search_terms),
+        list(all_module_search_terms[len(module_search_terms) :]),
+        _DISCOVERY_MAX_MODULE_SEARCH_TERMS,
+    )
+    add_omission(
+        "codegraph_symbol_query_limit",
+        codegraph["symbols_omitted_by_limit"],
+        codegraph["omitted_symbol_examples"],
+        codegraph["query_budget"],
+    )
+
+    traced_relations = [
+        {
+            "kind": "changed_symbols_and_text_references",
+            "method": "bounded pinned-source extraction and path-ranked literal search",
+            "exhaustive": False,
+        },
+        {
+            "kind": "local_imports_and_reverse_importers",
+            "languages": ["Python", "JavaScript", "TypeScript"],
+            "method": "bounded pinned-source import parsing",
+            "exhaustive": False,
+        },
+        {
+            "kind": "tests_and_test_dependencies",
+            "method": "path conventions, selected test audits, and ancestor manifests",
+            "exhaustive": False,
+        },
+        {
+            "kind": "system_boundary_path_candidates",
+            "categories": sorted(_SYSTEM_BOUNDARY_CATEGORIES),
+            "method": "path classification plus bounded symbol/reference matches",
+            "semantic_links_verified": False,
+        },
+        {
+            "kind": "codegraph_callers_and_callees",
+            "status": codegraph["status"],
+            "symbols_checked": codegraph["symbols_checked"],
+            "caller_queries_checked": codegraph["caller_queries_checked"],
+            "callee_queries_checked": codegraph["callee_queries_checked"],
+            "truncated": codegraph["truncated"],
+            "exhaustive": False,
+        },
+    ]
+    not_systematically_traced = [
+        {"kind": "api_and_serialized_contract_registration", "reason": "Framework route registries and serialized contracts may not have direct imports or matching identifiers."},
+        {"kind": "database_model_schema_migration_query_relations", "reason": "Path labels and text matches do not establish ORM, migration, or query semantics."},
+        {"kind": "event_names_subscribers_and_topics", "reason": "String-based event wiring and subscribers are not resolved as semantic edges."},
+        {"kind": "configuration_flags_and_authorization_policies", "reason": "Path classification is heuristic and does not resolve runtime flag or policy evaluation."},
+        {"kind": "background_job_queue_and_scheduler_registration", "reason": "Queue and scheduler links are not resolved as semantic edges."},
+        {"kind": "dynamic_generated_runtime_and_cross_repository_links", "reason": "These require host investigation and may be absent from the local index or checkout."},
+    ]
+    system_boundary_candidates = sorted(
+        {
+            category
+            for candidate in records
+            for category in candidate["categories"]
+            if category in _SYSTEM_BOUNDARY_CATEGORIES
+        }
+    )
+
     return {
         "schema_version": 1,
         "method": "pinned_git_symbol_scan",
@@ -1150,6 +1437,7 @@ def discover_neighbor_evidence(
         "module_name_search_exhaustive": False,
         "changed_source_symbol_collection_truncated": not collect_changed_symbols,
         "changed_sources_skipped_symbol_scan": changed_sources_skipped_symbol_scan,
+        "changed_sources_skipped_symbol_scan_examples": changed_sources_skipped_symbol_scan_paths[:_DISCOVERY_MAX_OMISSION_EXAMPLES],
         "candidate_records": records,
         "candidate_limit": max_candidates,
         "candidate_paths_considered": len(candidate_paths),
@@ -1163,9 +1451,17 @@ def discover_neighbor_evidence(
         "symbol_search_paths_considered": len(symbol_search_paths),
         "symbol_search_paths_skipped_by_size": symbol_search_paths_skipped_by_size,
         "symbol_search_paths_omitted_by_limit": (
-            len(symbol_search_candidate_paths) - len(symbol_search_paths)
+            len(symbol_search_candidate_paths) - len(ranked_search_paths)
         ),
+        "symbol_search_paths_skipped_by_size_examples": symbol_search_paths_skipped_by_size_examples[:_DISCOVERY_MAX_OMISSION_EXAMPLES],
         "symbol_search_exhaustive": False,
+        "relationship_coverage": {
+            "exhaustive": False,
+            "traced": traced_relations,
+            "system_boundary_candidate_categories": system_boundary_candidates,
+            "not_systematically_traced": not_systematically_traced,
+        },
+        "omissions": omissions,
         "test_audit": {
             "scope": "changed paths and selected neighbor test files",
             "test_files_scanned": test_audit_files_scanned,
@@ -1205,7 +1501,8 @@ def discover_neighbor_evidence(
             "Module-name search and direct-import verification are bounded; omitted paths and terms remain possible.",
             "Changed source symbol extraction stops at its symbol budget, while direct import and changed-test scans continue within byte limits.",
             "Test-audit signals cover changed and selected neighbor test files only; use repo audit-tests for wider coverage.",
-            "Use --codegraph to add caller edges from a complete local index; stale, missing, or unbound indexes are reported and skipped.",
+            "Use --codegraph to add caller and callee edges from a complete local index; stale, missing, or unbound indexes are reported and skipped.",
+            "Review relationship_coverage.not_systematically_traced and omissions before treating the neighbor list as complete.",
             "Add accepted record objects and refs to the full registry before building the Evidence Packet.",
         ],
     }
@@ -1228,13 +1525,13 @@ def evidence_main(argv: list[str]) -> int:
     chunks.add_argument("--output", type=Path)
     discover = subparsers.add_parser(
         "discover",
-        help="Suggest pinned declarations, callers, contracts, tests and test dependency manifests",
+        help="Suggest pinned relations, contracts, tests and test dependency manifests",
     )
     discover.add_argument("--max-candidates", default=50, type=int)
     discover.add_argument(
         "--codegraph",
         action="store_true",
-        help="Add callers from a complete CodeGraph index matching the bound checkout",
+        help="Add callers and callees from a complete CodeGraph index matching the bound checkout",
     )
     pack = subparsers.add_parser("pack", help="Build exact profile-selectable context from pinned refs")
     pack.add_argument("--plan", type=Path, help="Explicit host plan: optional_profiles, priorities, external_content")

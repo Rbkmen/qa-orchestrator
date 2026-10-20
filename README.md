@@ -170,7 +170,7 @@ Reads do not extend TTL. Deletion neither finalizes a review nor cancels host ex
 |---|---|
 | `qa-orch setup` / `setup --host-default` | Configure per-stage models or return to host settings |
 | `qa-orch config show` / `reload` | Inspect/validate the saved policy |
-| `qa-orch evidence discover` | Suggest pinned declarations, direct importers, contracts, tests, and bounded test-audit signals; `--codegraph` adds callers from a current local index |
+| `qa-orch evidence discover` | Suggest pinned declarations, callers/callees, direct importers, contracts, tests, and bounded test-audit signals; reports traced relations and bounded omissions |
 | `qa-orch evidence build` / `verify` | Register/verify source and diff |
 | `qa-orch evidence pack` / `chunks` | Exact context packets/source chunks |
 | `qa-orch repo profile` / `audit-tests` | Profile tracked project/test/CI metadata and report source-anchored test-suite review candidates |

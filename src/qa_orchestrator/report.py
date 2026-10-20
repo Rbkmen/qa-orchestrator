@@ -10,7 +10,10 @@ from qa_orchestrator.contracts import (
     ReviewContext,
     review_changed_paths_sha256,
 )
-from qa_orchestrator.evidence import validate_registered_locations
+from qa_orchestrator.evidence import (
+    complete_criterion_coverage,
+    validate_registered_locations,
+)
 
 _SEVERITY_ORDER = {"blocker": 0, "high": 1, "medium": 2, "low": 3, None: 4}
 _SEVERITY_LABELS = {
@@ -24,6 +27,12 @@ _ORIGIN_LABELS = {
     "introduced": "внесён этим изменением",
     "pre_existing": "существовал до изменения",
     "unknown": "не установлено",
+}
+_CRITERION_OUTCOME_LABELS = {
+    "confirmed": "подтверждено",
+    "contradicted": "противоречит реализации",
+    "unverified": "не проверено",
+    "not_applicable_to_diff": "не относится к diff",
 }
 _MARKDOWN_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+.!|>~-])")
 
@@ -168,6 +177,17 @@ def _render_coverage_ledger(
             f"{'recorded' if profile.context_selection_recorded else 'not recorded'}; "
             f"reviewer-attested {len(attested)}/{ledger.changed_path_count} paths."
         )
+        if attested:
+            labels = ", ".join(
+                _coverage_path_label(
+                    index,
+                    ledger_path_count=ledger.changed_path_count,
+                    context=context if mapping_valid else None,
+                )
+                for index in sorted(attested)[:20]
+            )
+            suffix = f" (+{len(attested) - 20} more)" if len(attested) > 20 else ""
+            lines.append(f"  - Executor-attested as reviewed: {labels}{suffix}")
         if not profile.context_selection_recorded:
             if available:
                 lines.append(
@@ -178,6 +198,17 @@ def _render_coverage_ledger(
                 f"  - Paths with at least one verified excerpt in the selection: "
                 f"{len(included)}/{len(available)}."
             )
+            if included:
+                labels = ", ".join(
+                    _coverage_path_label(
+                        index,
+                        ledger_path_count=ledger.changed_path_count,
+                        context=context if mapping_valid else None,
+                    )
+                    for index in sorted(included)[:20]
+                )
+                suffix = f" (+{len(included) - 20} more)" if len(included) > 20 else ""
+                lines.append(f"  - Paths with included text excerpts: {labels}{suffix}")
             omitted_source = sorted(available - included)
             if omitted_source:
                 labels = ", ".join(
@@ -218,7 +249,7 @@ def _render_profile_execution(report: FinalReviewReport) -> list[str]:
     lines = [
         "## Profile execution",
         "",
-        "Timing and token values are host-reported and are not independently verified.",
+        "The adapter records callback outcomes. Prompt hashes and input selections are executor observations; a completed stdin write does not prove provider receipt or model reasoning. Reviewed paths remain executor attestations.",
         "",
     ]
     for profile in profiles:
@@ -239,7 +270,33 @@ def _render_profile_execution(report: FinalReviewReport) -> list[str]:
             attempt_details = [
                 f"queue {attempt.queue_seconds:.2f}s",
                 f"executor {attempt.executor_seconds:.2f}s",
+                f"head {attempt.review_head_sha or 'not recorded'}",
             ]
+            if attempt.review_diff_sha256 is not None:
+                attempt_details.append(f"diff {attempt.review_diff_sha256}")
+            stdin_delivery = {
+                "prepared": "prepared; write not observed",
+                "written": "write completed (host observed)",
+            }.get(attempt.prompt_write_status, "not recorded")
+            attempt_details.append(f"CLI stdin delivery {stdin_delivery}")
+            if attempt.submitted_prompt_sha256 is not None:
+                attempt_details.append(f"prompt sha256 {attempt.submitted_prompt_sha256}")
+            if attempt.source_packet_sha256 is not None:
+                attempt_details.append(f"source packet sha256 {attempt.source_packet_sha256}")
+            if attempt.selected_packet_sha256 is not None:
+                attempt_details.append(f"selected packet sha256 {attempt.selected_packet_sha256}")
+            if attempt.included_evidence_refs:
+                refs = ", ".join(attempt.included_evidence_refs[:20])
+                suffix = f" (+{len(attempt.included_evidence_refs) - 20} more)" if len(attempt.included_evidence_refs) > 20 else ""
+                attempt_details.append(f"included refs {refs}{suffix}")
+            if attempt.omitted_evidence_refs:
+                refs = ", ".join(attempt.omitted_evidence_refs[:20])
+                suffix = f" (+{len(attempt.omitted_evidence_refs) - 20} more)" if len(attempt.omitted_evidence_refs) > 20 else ""
+                attempt_details.append(f"omitted refs {refs}{suffix}")
+            if attempt.included_source_paths:
+                paths = ", ".join(_code(path) for path in attempt.included_source_paths[:20])
+                suffix = f" (+{len(attempt.included_source_paths) - 20} more)" if len(attempt.included_source_paths) > 20 else ""
+                attempt_details.append(f"source paths {paths}{suffix}")
             for label, value in (
                 ("preparation", attempt.preparation_seconds),
                 ("model", attempt.model_seconds),
@@ -259,10 +316,41 @@ def _render_profile_execution(report: FinalReviewReport) -> list[str]:
     return lines
 
 
+def _render_verification_records(report: FinalReviewReport) -> list[str]:
+    lines = [
+        "## Tests and CI verification",
+        "",
+        "These are host-supplied records bound to a head SHA; the orchestrator does not independently authenticate external run results.",
+        "",
+    ]
+    if not report.verification_records:
+        lines.extend(("No test, CI, or runtime verification records were supplied.", ""))
+        return lines
+    for record in report.verification_records:
+        details = [
+            f"**{_text(record.status)}**",
+            f"scenario: {_text(record.scenario)}",
+            f"head: {_code(record.head_sha)}",
+            f"environment: {_text(record.environment)}",
+            f"source: {_text(record.source)} / {_code(record.source_ref)}",
+        ]
+        if record.run_url:
+            details.append(f"run: <{record.run_url}>")
+        if record.reason:
+            details.append(f"reason: {_text(record.reason)}")
+        if record.evidence_refs:
+            details.append(f"evidence: {_refs(record.evidence_refs)}")
+        lines.append(f"- **{_text(record.verification_id)} · {_text(record.check_type)}:** " + "; ".join(details))
+    lines.append("")
+    return lines
+
+
 def render_final_report(
     report: FinalReviewReport, *, context: ReviewContext | None = None
 ) -> str:
     """Render findings and non-finding outcomes without inventing evidence."""
+    if context is not None:
+        report = complete_criterion_coverage(context, report)
     lines = ["# QA review", "", _text(report.summary), ""]
     lines.extend(("## Findings", ""))
     findings = sorted(
@@ -305,6 +393,30 @@ def render_final_report(
                 "",
             )
         )
+
+    if report.criterion_coverage:
+        lines.extend(("## Requirements and MR claims", ""))
+        for item in sorted(report.criterion_coverage, key=lambda entry: entry.criterion_ref):
+            criterion_type = (
+                "Requirement" if item.criterion_kind == "requirement" else "MR claim"
+            )
+            expected = (
+                _text(item.expected_behavior)
+                if item.expected_behavior is not None
+                else "не сформулировано"
+            )
+            lines.extend(
+                (
+                    f"### {criterion_type} · {_refs((item.criterion_ref,), context)}",
+                    "",
+                    f"- **Expected behavior:** {expected}",
+                    f"- **Outcome:** {_CRITERION_OUTCOME_LABELS[item.outcome]}",
+                    f"- **Implementation evidence:** {_refs(item.implementation_refs, context)}",
+                    f"- **Test/CI evidence:** {_refs(item.test_refs, context)}",
+                    f"- **Assessment:** {_text(item.rationale)}",
+                    "",
+                )
+            )
 
     if report.candidate_decisions:
         lines.extend(("## Candidate decisions", ""))
@@ -382,6 +494,7 @@ def render_final_report(
 
     lines.extend(_render_coverage_ledger(report, context))
     lines.extend(_render_profile_execution(report))
+    lines.extend(_render_verification_records(report))
 
     for heading, notes in (
         ("Coverage gaps", report.coverage_gaps),
@@ -399,6 +512,7 @@ def render_final_report(
 
 
 def validate_final_report_context(report: FinalReviewReport, context: ReviewContext) -> None:
+    report = complete_criterion_coverage(context, report)
     ledger = report.coverage_ledger
     if ledger is not None:
         if (
@@ -472,6 +586,30 @@ def validate_final_report_context(report: FinalReviewReport, context: ReviewCont
         if decision.refutation is not None
         for ref in decision.refutation.evidence_refs
     )
+    report_refs.update(
+        ref
+        for item in report.criterion_coverage
+        for ref in (
+            item.criterion_ref,
+            *item.implementation_refs,
+            *item.test_refs,
+        )
+    )
+    report_refs.update(
+        ref for item in report.verification_records for ref in item.evidence_refs
+    )
+    registry = {entry.evidence_ref: entry for entry in context.evidence_registry}
+    for item in report.verification_records:
+        if item.head_sha != context.head_sha:
+            raise ValueError("verification record does not match the bound head revision")
+        for ref in item.evidence_refs:
+            entry = registry.get(ref)
+            if entry is not None and (
+                entry.kind != "runtime" or entry.revision != context.head_sha
+            ):
+                raise ValueError(
+                    "verification evidence must be a runtime record bound to the reviewed head"
+                )
     if report_refs - set(context.evidence_refs):
         raise ValueError("report cites refs outside the bound context")
     validate_registered_locations(context, report.finding_candidates)

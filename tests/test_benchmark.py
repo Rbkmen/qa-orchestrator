@@ -216,6 +216,86 @@ def test_quality_gate_checks_complete_coverage_quality_and_latency():
     assert result["dataset_kind"] == "curated"
 
 
+def test_quality_gate_can_pin_an_approved_adjudicated_dataset(benchmark_inputs):
+    dataset_data, results_data = benchmark_inputs
+    dataset_data["kind"] = "curated"
+    dataset = BenchmarkDataset.model_validate(dataset_data)
+    results = BenchmarkResults.model_validate(results_data)
+    score = score_benchmark(dataset, results)
+    edited_gold = deepcopy(dataset.model_dump(mode="json"))
+    edited_gold["cases"][0]["gold"][0]["description"] = "A different adjudicated defect"
+    edited_score = score_benchmark(BenchmarkDataset.model_validate(edited_gold), results)
+
+    accepted = evaluate_quality_gate(
+        score,
+        configuration_id="baseline",
+        min_precision=0,
+        min_recall=0,
+        required_dataset_kind="curated",
+        required_dataset_sha256=score["dataset_sha256"],
+    )
+    rejected = evaluate_quality_gate(
+        score,
+        configuration_id="baseline",
+        min_precision=0,
+        min_recall=0,
+        required_dataset_kind="reviewbench_reference",
+        required_dataset_sha256="f" * 64,
+    )
+
+    assert accepted["passed"] is True
+    assert accepted["dataset_sha256"] == score["dataset_sha256"]
+    assert edited_score["dataset_sha256"] != score["dataset_sha256"]
+    assert rejected["passed"] is False
+    assert any("dataset kind curated" in reason for reason in rejected["reasons"])
+    assert any("does not match the required pinned dataset" in reason for reason in rejected["reasons"])
+
+
+def test_quality_gate_cli_accepts_required_dataset_identity(tmp_path):
+    score_path = tmp_path / "score.json"
+    score_path.write_text(
+        json.dumps(
+            {
+                "scoring": "local_explicit_adjudication",
+                "dataset_kind": "curated",
+                "dataset_sha256": "a" * 64,
+                "configurations": {
+                    "candidate": {
+                        "coverage_complete": True,
+                        "cases": ["case-a"],
+                        "missing_cases": [],
+                        "precision": 1.0,
+                        "recall": 1.0,
+                        "precision_is_lower_bound": False,
+                        "missed_high_impact": 0,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = benchmark_main(
+        [
+            "quality-gate",
+            "--score",
+            str(score_path),
+            "--configuration",
+            "candidate",
+            "--min-precision",
+            "1",
+            "--min-recall",
+            "1",
+            "--require-dataset-kind",
+            "curated",
+            "--require-dataset-sha256",
+            "a" * 64,
+        ]
+    )
+
+    assert result == 0
+
+
 def test_quality_gate_fails_incomplete_or_unresolved_runs():
     score = {
         "scoring": "local_explicit_adjudication",
@@ -938,13 +1018,14 @@ def test_speed_comparison_requires_same_model_packet_and_complete_repetitions(be
             run.update(
                 run_id=f"{configuration}-{attempt}",
                 configuration_id=configuration,
+                attempt=attempt,
                 elapsed_ms=elapsed_ms,
                 input_tokens=1000 if configuration == "baseline" else 800,
                 output_tokens=100 if configuration == "baseline" else 120,
             )
             runs.append(run)
     dataset = BenchmarkDataset.model_validate(dataset_data)
-    results = BenchmarkResults.model_validate({"runs": runs})
+    results = BenchmarkResults.model_validate({"schema_version": 2, "runs": runs})
     comparison = compare_speed(
         dataset,
         results,
@@ -958,6 +1039,11 @@ def test_speed_comparison_requires_same_model_packet_and_complete_repetitions(be
     assert comparison["cases"][0]["candidate_median_input_tokens"] == 800
     assert comparison["cases"][0]["input_token_savings_percent"] == 20
     assert comparison["aggregate"]["median_speedup_ratio"] == 1.2
+    assert comparison["cases"][0]["paired_median_speedup_ratio"] == pytest.approx(1.2)
+    assert comparison["aggregate"]["median_paired_speedup_ratio"] == pytest.approx(1.2)
+    assert comparison["aggregate"]["median_paired_improvement_percent"] == pytest.approx(
+        100 / 6
+    )
     assert comparison["aggregate"]["input_token_savings"] == 600
     assert comparison["aggregate"]["input_token_savings_percent"] == 20
     assert comparison["aggregate"]["baseline_total_output_tokens"] == 300
@@ -970,7 +1056,7 @@ def test_speed_comparison_requires_same_model_packet_and_complete_repetitions(be
     with pytest.raises(ValueError, match="same model"):
         compare_speed(
             dataset,
-            BenchmarkResults.model_validate({"runs": changed}),
+            BenchmarkResults.model_validate({"schema_version": 2, "runs": changed}),
             baseline_configuration="baseline",
             candidate_configuration="candidate",
             repetitions=3,
@@ -982,7 +1068,18 @@ def test_speed_comparison_requires_same_model_packet_and_complete_repetitions(be
     with pytest.raises(ValueError, match="same Evidence Packet across"):
         compare_speed(
             dataset,
-            BenchmarkResults.model_validate({"runs": changed_packets}),
+            BenchmarkResults.model_validate({"schema_version": 2, "runs": changed_packets}),
+            baseline_configuration="baseline",
+            candidate_configuration="candidate",
+            repetitions=3,
+        )
+
+    unpaired = deepcopy(runs)
+    unpaired[0]["attempt"] = None
+    with pytest.raises(ValueError, match="explicit attempt numbers"):
+        compare_speed(
+            dataset,
+            BenchmarkResults.model_validate({"schema_version": 2, "runs": unpaired}),
             baseline_configuration="baseline",
             candidate_configuration="candidate",
             repetitions=3,
@@ -1000,6 +1097,7 @@ def test_speed_comparison_cli_writes_artifact(tmp_path, benchmark_inputs):
             run.update(
                 run_id=f"{configuration}-{attempt}",
                 configuration_id=configuration,
+                attempt=attempt,
                 elapsed_ms=elapsed_ms,
             )
             runs.append(run)
@@ -1007,7 +1105,7 @@ def test_speed_comparison_cli_writes_artifact(tmp_path, benchmark_inputs):
     results_path = tmp_path / "results.json"
     output_path = tmp_path / "comparison.json"
     dataset_path.write_text(json.dumps(dataset_data), encoding="utf-8")
-    results_path.write_text(json.dumps({"runs": runs}), encoding="utf-8")
+    results_path.write_text(json.dumps({"schema_version": 2, "runs": runs}), encoding="utf-8")
 
     assert benchmark_main(
         [

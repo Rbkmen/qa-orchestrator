@@ -160,6 +160,12 @@ async def test_attempt_ledger_preserves_failed_usage_and_sums_known_retries(host
     assert metrics.input_tokens == 30
     assert metrics.output_tokens == 6
     assert metrics.attempts == result.execution_attempts
+    context = service.get_qa_orchestration(run_id).review_context
+    assert result.execution_attempts[0].review_head_sha == context.head_sha
+    assert result.execution_attempts[0].review_diff_sha256 == context.diff_sha256
+    assert result.execution_attempts[1].included_evidence_refs == context.evidence_refs
+    assert result.execution_attempts[1].selected_packet_sha256 == context.evidence_packet_sha256
+    assert result.execution_attempts[1].prompt_write_status is None
     assert "secret" not in str(result.execution_attempts)
 
 

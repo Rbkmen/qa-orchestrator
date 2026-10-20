@@ -116,6 +116,9 @@ class HostReviewAdapter:
         reused: list[ReviewAgent],
         ledger: list[ProfileAttemptMetrics],
     ) -> ProfileReviewReport | HostProfileFailure:
+        context = session.review_context
+        if context is None:
+            return HostProfileFailure(None, "missing_review_context")
         queued = perf_counter()
         async with semaphore:
             queue_seconds = perf_counter() - queued
@@ -156,6 +159,37 @@ class HostReviewAdapter:
                     async with asyncio.timeout(self.policy.profile_timeout_seconds):
                         raw_report = await executor(job)
                     report = ProfileReviewReport.model_validate(raw_report)
+                    selection = report.context_selection
+                    if selection is not None:
+                        selected_paths = tuple(
+                            sorted(
+                                {
+                                    entry.path
+                                    for entry in context.evidence_registry
+                                    if entry.kind == "source"
+                                    and entry.revision == context.head_sha
+                                    and entry.source_text_available is True
+                                    and entry.path in context.changed_files
+                                    and entry.evidence_ref in selection.included_refs
+                                }
+                            )
+                        )
+                        if observation.selected_packet_sha256 is not None and (
+                            observation.source_packet_sha256 != selection.source_packet_sha256
+                            or observation.selected_packet_sha256
+                            != selection.selected_packet_sha256
+                            or observation.included_evidence_refs != selection.included_refs
+                            or observation.omitted_evidence_refs != selection.omitted_refs
+                            or observation.included_source_paths != selected_paths
+                        ):
+                            raise ValueError(
+                                "executor input receipt does not match report context selection"
+                            )
+                        observation.source_packet_sha256 = selection.source_packet_sha256
+                        observation.selected_packet_sha256 = selection.selected_packet_sha256
+                        observation.included_evidence_refs = selection.included_refs
+                        observation.omitted_evidence_refs = selection.omitted_refs
+                        observation.included_source_paths = selected_paths
                     usage = report.execution_metrics
                     if usage:
                         for name in ("input_tokens", "output_tokens"):
@@ -183,6 +217,8 @@ class HostReviewAdapter:
                     record = ProfileAttemptMetrics(
                         **observation.model_dump(), profile=profile, attempt=attempt,
                         outcome=outcome, started_at=attempt_started, completed_at=datetime.now(UTC),
+                        review_head_sha=context.head_sha,
+                        review_diff_sha256=context.diff_sha256,
                         queue_seconds=queue_seconds if attempt == 1 else 0,
                         executor_seconds=perf_counter() - clock,
                     )

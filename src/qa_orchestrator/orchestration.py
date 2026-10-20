@@ -32,7 +32,11 @@ from qa_orchestrator.contracts import (
     ReviewCoverageLedger,
     review_changed_paths_sha256,
 )
-from qa_orchestrator.evidence import validate_context_selection, validate_registered_locations
+from qa_orchestrator.evidence import (
+    complete_criterion_coverage,
+    validate_context_selection,
+    validate_registered_locations,
+)
 from qa_orchestrator.model_policy import (
     DEFAULT_MODEL_SELECTION,
     HostDefaultModelSelection,
@@ -1170,6 +1174,23 @@ class QaOrchestrator:
                     )
                 )
 
+            if validated_report is not None and not is_idempotent_legacy_replay:
+                try:
+                    validated_report = complete_criterion_coverage(
+                        session.review_context,
+                        validated_report,
+                    )
+                except ValueError as exc:
+                    raise OrchestrationError("invalid requirement and MR-claim coverage") from exc
+                is_idempotent_legacy_replay = (
+                    is_idempotent_legacy_replay
+                    or (
+                        session.status in _TERMINAL_SESSION_STATUSES
+                        and session.status is final_status
+                        and validated_report == session.final_review_report
+                    )
+                )
+
             if (expected_revision is not None and expected_revision != session.revision
                 and not is_idempotent_legacy_replay):
                 raise OrchestrationError("stale session revision")
@@ -1245,6 +1266,24 @@ class QaOrchestrator:
                             f"changed path; uncovered path indexes: {examples}"
                         )
                 context_refs = set(session.review_context.evidence_refs)
+                registry = {
+                    entry.evidence_ref: entry
+                    for entry in session.review_context.evidence_registry
+                }
+                for verification in validated_report.verification_records:
+                    if verification.head_sha != session.review_context.head_sha:
+                        raise OrchestrationError(
+                            "verification record does not match the bound head revision"
+                        )
+                    for reference in verification.evidence_refs:
+                        entry = registry.get(reference)
+                        if entry is not None and (
+                            entry.kind != "runtime"
+                            or entry.revision != session.review_context.head_sha
+                        ):
+                            raise OrchestrationError(
+                                "verification evidence must be a runtime record bound to the reviewed head"
+                            )
                 report_refs = {
                     reference
                     for finding in validated_report.finding_candidates
@@ -1271,6 +1310,20 @@ class QaOrchestrator:
                     for decision in validated_report.candidate_decisions
                     if decision.refutation is not None
                     for reference in decision.refutation.evidence_refs
+                )
+                report_refs.update(
+                    reference
+                    for item in validated_report.criterion_coverage
+                    for reference in (
+                        item.criterion_ref,
+                        *item.implementation_refs,
+                        *item.test_refs,
+                    )
+                )
+                report_refs.update(
+                    reference
+                    for item in validated_report.verification_records
+                    for reference in item.evidence_refs
                 )
                 unknown_refs = report_refs - context_refs
                 if unknown_refs:

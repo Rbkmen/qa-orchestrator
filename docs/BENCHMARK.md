@@ -88,6 +88,27 @@ qa-orch benchmark score --dataset /path/to/run/dataset.json \
 
 The output reports precision, recall against complete reference sets, missed high-impact findings, correctness by confidence tier, validated evidence/locations, time, and token counts. It also breaks gold recall down by severity, category, PR scope, difficulty, and required context so misses can guide the next prompt or evidence change. Missing token usage stays unknown. Aggregates stay separate by configuration and explicitly list unreviewed cases; overall and stratified recall are unavailable for incomplete case coverage or incomplete gold.
 
+Every score includes `dataset_sha256`, a canonical SHA-256 fingerprint of the
+validated dataset, including its case snapshots and adjudicated gold labels.
+For a release or prompt-change gate, pin the approved dataset kind and digest in
+trusted CI configuration:
+
+```sh
+qa-orch benchmark quality-gate --score /path/to/run/score.json \
+  --configuration candidate --min-cases 25 \
+  --min-precision <approved-threshold> --min-recall <approved-threshold> \
+  --max-missed-high-impact 0 \
+  --require-dataset-kind curated \
+  --require-dataset-sha256 "$QA_REVIEW_DATASET_SHA256"
+```
+
+The dataset digest must be reviewed and approved outside the run being gated;
+the score carries the digest but does not establish who adjudicated the gold or
+whether those adjudications are correct. Keep private datasets, gold labels,
+per-run candidates, and adjudication details outside the repository. Synthetic
+datasets remain useful for CI contract tests, but should not be accepted as the
+representative quality gate.
+
 Apply a deterministic gate to a scored aggregate before accepting a prompt, model,
 or scheduling change:
 
@@ -135,10 +156,14 @@ qa-orch benchmark compare --dataset dataset.json --results results.json \
 ```
 
 The comparison requires every dataset case and exactly the declared number of
-fresh runs per configuration. It rejects differences in model/prompt identity or
-task context or Evidence Packet hashes, and reports per-case median milliseconds
-and input/output tokens, paired input-token savings, median speedup, and separately
-scored precision/recall. Token deltas stay unknown when usage is missing; packet
+fresh runs per configuration, with attempt numbers `1..N` for every
+configuration/case. It pairs elapsed times by case and attempt number, rejects
+differences in model/prompt identity, task context, or Evidence Packet hashes,
+and reports per-case median milliseconds, paired speedup, input/output tokens,
+paired input-token savings, and separately scored precision/recall. Interleave
+or randomize baseline/candidate order across attempts; the scorer cannot observe
+or enforce run order and attempt-index pairing alone does not remove time/order
+bias. Token deltas stay unknown when usage is missing; packet
 bytes are not presented as token counts. `elapsed_ms` is host-reported: measure
 the same end-to-end interval (including the same preparation and finalization
 work) in both callbacks. The command does not launch a model or verify that the

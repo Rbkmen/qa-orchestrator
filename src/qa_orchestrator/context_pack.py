@@ -235,8 +235,8 @@ def build_context_packet(
     diff = _diff(context, repository)
     fragments = []
     for entry in context.evidence_registry:
-        if entry.evidence_ref in optional_profiles and entry.kind in {"diff", "requirement"}:
-            raise ValueError("diff and requirements must remain mandatory")
+        if entry.evidence_ref in optional_profiles and entry.kind in {"diff", "requirement", "claim"}:
+            raise ValueError("diff, requirements, and MR claims must remain mandatory")
         if entry.kind == "source":
             source = cache.read(repository, entry)
             if hashlib.sha256(source).hexdigest() != entry.sha256:
@@ -289,8 +289,8 @@ def validate_packet_context(packet: ContextPacket, context: ReviewContext) -> No
     for fragment in packet.fragments:
         if fragment.record != registry.get(fragment.record.evidence_ref):
             raise ValueError("context packet metadata differs from the bound registry")
-        if not fragment.required and fragment.record.kind in {"diff", "requirement"}:
-            raise ValueError("mandatory diff/requirements cannot be excluded")
+        if not fragment.required and fragment.record.kind in {"diff", "requirement", "claim"}:
+            raise ValueError("mandatory diff/requirements/MR claims cannot be excluded")
 
 
 def _validate_mandatory_presence(context: ReviewContext, deleted_paths: tuple[str, ...]) -> None:
