@@ -99,14 +99,21 @@ qa-orch benchmark quality-gate --score /path/to/run/score.json \
   --min-evidence-validation-rate <approved-threshold> \
   --min-location-validation-rate <approved-threshold> \
   --max-mean-elapsed-ms <approved-budget> \
+  --max-p95-elapsed-ms <approved-budget> \
+  --min-stratum-recall <approved-threshold> \
+  --min-stratum-gold-count 5 \
   --output /path/to/run/quality-gate.json
 ```
 
 Precision and recall thresholds are required. Case coverage must be complete,
 recall must be available, and unresolved adjudications fail the gate because they
-leave precision as a lower bound. Evidence/location and mean-latency thresholds
-are optional. The command returns exit code 1 when a threshold fails, so CI can
-consume an approved aggregate without launching model calls. Keep datasets,
+leave precision as a lower bound. Evidence/location, mean-latency, p95-latency,
+and minimum stratified-recall thresholds are optional. The stratified threshold
+applies to every severity, category, scope, difficulty, or context bucket that
+meets `min_stratum_gold_count`; smaller buckets are reported as insufficient
+sample, and the gate fails if no bucket meets the minimum. The command returns
+exit code 1 when a threshold fails, so CI can consume an approved aggregate
+without launching model calls. Keep datasets,
 per-run outputs and raw model text outside the repository. A passing gate still
 depends on correct human/host adjudications; the scorer cannot validate them.
 

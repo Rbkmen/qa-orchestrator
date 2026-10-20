@@ -329,10 +329,12 @@ async def test_prepare_qa_orchestration_bundle_returns_routes_and_execution_grou
         "code_explorer",
         "ruby_reviewer",
         "pr_test_analyzer",
+        "omission_auditor",
     ]
     assert result.structured_content["execution_groups"] == [
         ["code_explorer"],
         ["ruby_reviewer", "pr_test_analyzer"],
+        ["omission_auditor"],
     ]
     assert sessions.structured_content["sessions"] == []
 
@@ -356,21 +358,25 @@ async def test_catalog_discovers_profiles_and_ordered_bundles_without_a_session(
     assert profiles["python_reviewer"]["focus"] == prepared.structured_content["focus"]
     assert all(entry["display_name"] and entry["focus"] for entry in profiles.values())
     assert bundles["python_backend"]["profiles"] == [
-        "code_explorer", "python_reviewer", "pr_test_analyzer"
+        "code_explorer", "python_reviewer", "pr_test_analyzer", "omission_auditor"
     ]
     assert bundles["widget_js"]["profiles"] == [
-        "code_explorer", "code_reviewer", "react_reviewer", "pr_test_analyzer"
+        "code_explorer", "code_reviewer", "react_reviewer", "pr_test_analyzer",
+        "omission_auditor",
     ]
     assert bundles["ordinary_mr"]["execution_groups"] == [
         ["code_explorer"],
         ["code_reviewer", "pr_test_analyzer"],
+        ["omission_auditor"],
     ]
     assert bundles["python_backend"]["execution_groups"] == [
         ["code_explorer", "python_reviewer", "pr_test_analyzer"],
+        ["omission_auditor"],
     ]
     assert bundles["requirements"]["execution_groups"] == [
         ["code_explorer"],
         ["code_reviewer"],
+        ["omission_auditor"],
     ]
     for entry in bundles.values():
         assert [profile for group in entry["execution_groups"] for profile in group] == (
@@ -665,6 +671,7 @@ async def test_orchestration_tools_advance_with_bundle_order(tmp_path):
         "code_explorer",
         "code_reviewer",
         "pr_test_analyzer",
+        "omission_auditor",
     ]
     assert advanced.structured_content["current_profile"] == "code_explorer"
     assert advanced.structured_content["completed_profiles"] == []
@@ -673,6 +680,7 @@ async def test_orchestration_tools_advance_with_bundle_order(tmp_path):
         "code_explorer",
         "code_reviewer",
         "pr_test_analyzer",
+        "omission_auditor",
     ]
     assert selected_routes["execution_groups"] == [
         [profile.value for profile in group]
@@ -748,11 +756,12 @@ async def test_orchestration_tools_complete_each_bundle(tmp_path, bundle: Review
     assert "outcome_recorded" not in outcome.structured_content
     assert final.structured_content["status"] == "completed"
     if bundle is ReviewBundle.ORDINARY_MR:
-        assert primary_advance_calls == 2
+        assert primary_advance_calls == 3
         assert current.structured_content["completed_profiles"] == [
             "code_explorer",
             "code_reviewer",
             "pr_test_analyzer",
+            "omission_auditor",
         ]
 
 

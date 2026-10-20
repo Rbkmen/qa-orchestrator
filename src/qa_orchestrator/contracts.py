@@ -1,3 +1,5 @@
+import hashlib
+import json
 from enum import StrEnum
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -38,6 +40,7 @@ class ReviewAgent(StrEnum):
     RUBY_REVIEWER = "ruby_reviewer"
     PYTHON_REVIEWER = "python_reviewer"
     MOBILE_REVIEWER = "mobile_reviewer"
+    OMISSION_AUDITOR = "omission_auditor"
 
 
 class ReviewBundle(StrEnum):
@@ -59,6 +62,13 @@ type EvidenceRefId = Annotated[
     Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$"),
 ]
 type ChangedFilePath = Annotated[str, Field(min_length=1, max_length=1024)]
+type ChangedPathIndex = Annotated[int, Field(strict=True, ge=0, le=499)]
+
+
+def review_changed_paths_sha256(paths: tuple[str, ...]) -> str:
+    """Hash the ordered path list so coverage indexes cannot be detached from their diff."""
+    canonical = json.dumps(list(paths), separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 # Added defaulted fields expand legacy persisted reports when they are loaded.
 _MAX_PROFILE_REVIEW_REPORT_BYTES = 72 * 1024
@@ -437,6 +447,93 @@ class ProfileContextSelection(BaseModel):
         return self
 
 
+class ProfileChangedPathCoverage(BaseModel):
+    """Host-recorded profile coverage plus optional executor-reported execution metrics."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    profile: ReviewAgent
+    context_selection_recorded: bool
+    source_excerpt_included_path_indexes: tuple[ChangedPathIndex, ...] = Field(
+        default=(), max_length=500
+    )
+    reviewer_attested_path_indexes: tuple[ChangedPathIndex, ...] = Field(
+        default=(), max_length=500
+    )
+    execution_metrics: ProfileExecutionMetrics | None = Field(
+        default=None,
+        description="Host-reported profile execution data; not independently verified by the orchestrator.",
+    )
+
+    @model_validator(mode="after")
+    def validate_indexes(self) -> "ProfileChangedPathCoverage":
+        for name, indexes in (
+            ("source_excerpt_included_path_indexes", self.source_excerpt_included_path_indexes),
+            ("reviewer_attested_path_indexes", self.reviewer_attested_path_indexes),
+        ):
+            if tuple(sorted(set(indexes))) != indexes:
+                raise ValueError(f"{name} must be unique and sorted")
+        if not self.context_selection_recorded and self.source_excerpt_included_path_indexes:
+            raise ValueError("source excerpts cannot be included without a context selection")
+        return self
+
+
+class ReviewCoverageLedger(BaseModel):
+    """Compact host-generated coverage facts bound to the ordered changed paths."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    changed_paths_sha256: Sha256Digest
+    changed_path_count: int = Field(ge=1, le=500)
+    registered_head_source_path_indexes: tuple[ChangedPathIndex, ...] = Field(
+        default=(), max_length=500
+    )
+    head_source_excerpt_path_indexes: tuple[ChangedPathIndex, ...] = Field(
+        default=(), max_length=500
+    )
+    head_source_text_unavailable_path_indexes: tuple[ChangedPathIndex, ...] = Field(
+        default=(), max_length=500
+    )
+    profiles: tuple[ProfileChangedPathCoverage, ...] = Field(default=(), max_length=11)
+
+    @field_validator("changed_paths_sha256")
+    @classmethod
+    def normalize_changed_paths_digest(cls, value: str) -> str:
+        return value.lower()
+
+    @model_validator(mode="after")
+    def validate_coverage_indexes(self) -> "ReviewCoverageLedger":
+        available = self.head_source_excerpt_path_indexes
+        if tuple(sorted(set(available))) != available:
+            raise ValueError("head source excerpt indexes must be unique and sorted")
+        registered = self.registered_head_source_path_indexes
+        unavailable = self.head_source_text_unavailable_path_indexes
+        if tuple(sorted(set(registered))) != registered:
+            raise ValueError("registered head source indexes must be unique and sorted")
+        if tuple(sorted(set(unavailable))) != unavailable:
+            raise ValueError("unavailable head source indexes must be unique and sorted")
+        if any(
+            index >= self.changed_path_count for index in (*registered, *available, *unavailable)
+        ):
+            raise ValueError("head source excerpt index is outside changed paths")
+        if not set(available).issubset(registered) or not set(unavailable).issubset(registered):
+            raise ValueError("head source text status requires a registered source record")
+        if set(available) & set(unavailable):
+            raise ValueError("head source text cannot be both available and unavailable")
+        if len({profile.profile for profile in self.profiles}) != len(self.profiles):
+            raise ValueError("coverage ledger profiles must be unique")
+        for profile in self.profiles:
+            indexes = (
+                *profile.source_excerpt_included_path_indexes,
+                *profile.reviewer_attested_path_indexes,
+            )
+            if any(index >= self.changed_path_count for index in indexes):
+                raise ValueError("profile coverage index is outside changed paths")
+            if not set(profile.source_excerpt_included_path_indexes).issubset(available):
+                raise ValueError("included source excerpt indexes must have verified text")
+        return self
+
+
 class ProfileReviewReport(BaseModel):
     """Structured host-reported result for one completed specialist profile."""
 
@@ -557,6 +654,13 @@ class FinalReviewReport(BaseModel):
     finding_candidates: tuple[FinalReviewFinding, ...] = Field(default=(), max_length=100)
     coverage_gaps: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
     unverified: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
+    coverage_ledger: ReviewCoverageLedger | None = Field(
+        default=None,
+        description=(
+            "Host-generated changed-path delivery facts plus executor inspection attestations. "
+            "The host replaces this field when finalizing a bound review."
+        ),
+    )
     candidate_decisions: tuple[ReviewCandidateDecision, ...] = Field(
         default=(), max_length=1000,
         description="One host decision per submitted candidate; absent on legacy saved reports."
@@ -571,6 +675,12 @@ class FinalReviewReport(BaseModel):
     def validate_profiles_reviewed(self) -> "FinalReviewReport":
         if len(set(self.profiles_reviewed)) != len(self.profiles_reviewed):
             raise ValueError("profiles_reviewed must be unique")
+        if (
+            self.coverage_ledger is not None
+            and tuple(profile.profile for profile in self.coverage_ledger.profiles)
+            != self.profiles_reviewed
+        ):
+            raise ValueError("coverage ledger profiles must match profiles_reviewed")
         if len({finding.candidate_id for finding in self.finding_candidates}) != len(
             self.finding_candidates
         ):

@@ -124,6 +124,59 @@ def test_scoring_uses_explicit_verdicts_and_counts_duplicate_noise(benchmark_inp
     assert strata["scope"]["exacerbated-by-pr"]["recall"] == 0.0
     assert strata["difficulty"]["easy"]["recall"] == 1.0
     assert strata["context_required"]["broader-project-context"]["recall"] == 0.0
+    assert score["configurations"]["baseline"]["p95_elapsed_ms"] == 500
+
+
+def test_quality_gate_checks_low_recall_strata_and_p95_latency(benchmark_inputs):
+    dataset, results = benchmark_inputs
+    score = score_benchmark(
+        BenchmarkDataset.model_validate(dataset), BenchmarkResults.model_validate(results)
+    )
+
+    result = evaluate_quality_gate(
+        score,
+        configuration_id="baseline",
+        min_cases=1,
+        min_precision=0,
+        min_recall=0,
+        max_p95_elapsed_ms=400,
+        min_stratum_recall=0.5,
+        min_stratum_gold_count=1,
+    )
+
+    assert result["passed"] is False
+    assert any("p95 elapsed time 500 ms" in reason for reason in result["reasons"])
+    assert any("category=security recall 0.0000" in reason for reason in result["reasons"])
+    assert any(
+        check["dimension"] == "category"
+        and check["value"] == "security"
+        and check["status"] == "below_threshold"
+        for check in result["observed"]["stratum_checks"]
+    )
+
+
+def test_quality_gate_does_not_claim_stratum_quality_without_enough_gold(benchmark_inputs):
+    dataset, results = benchmark_inputs
+    score = score_benchmark(
+        BenchmarkDataset.model_validate(dataset), BenchmarkResults.model_validate(results)
+    )
+
+    result = evaluate_quality_gate(
+        score,
+        configuration_id="baseline",
+        min_cases=1,
+        min_precision=0,
+        min_recall=0,
+        min_stratum_recall=0,
+        min_stratum_gold_count=3,
+    )
+
+    assert result["passed"] is False
+    assert any("no gold-recall stratum meets" in reason for reason in result["reasons"])
+    assert all(
+        check["status"] == "insufficient_sample"
+        for check in result["observed"]["stratum_checks"]
+    )
 
 
 def test_quality_gate_checks_complete_coverage_quality_and_latency():

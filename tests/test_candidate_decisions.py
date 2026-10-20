@@ -258,7 +258,9 @@ def test_rejected_finding_regressions_keep_counterevidence_and_no_final_finding(
         }
     )
     profile_report = make_profile_review_report(
-        ReviewAgent.CODE_REVIEWER, findings=(candidate,)
+        ReviewAgent.CODE_REVIEWER,
+        findings=(candidate,),
+        reviewed_changed_paths=(example["path"],),
     ).model_copy(update={"review_rules_sha256": rules.digest})
     orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
     session = orchestrator.start("ordinary_review", context)
@@ -418,7 +420,8 @@ def test_early_stop_can_attach_its_first_final_report(
         final_review_report=final,
         expected_revision=stopped.revision,
     )
-    assert finished.final_review_report == final
+    assert finished.final_review_report is not None
+    assert finished.final_review_report.model_copy(update={"coverage_ledger": None}) == final
     assert (
         orchestrator.finish(run_id=session.run_id, outcome=outcome, final_review_report=final)
         == finished

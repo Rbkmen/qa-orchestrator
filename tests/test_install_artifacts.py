@@ -421,6 +421,7 @@ async def test_launcher_exposes_ten_tools(monkeypatch, tmp_path):
         "code_explorer",
         "ruby_reviewer",
         "pr_test_analyzer",
+        "omission_auditor",
     ]
     assert deleted.structured_content == {
         "run_id": started.structured_content["run_id"], "deleted": True

@@ -60,6 +60,12 @@ def test_every_review_profile_returns_read_only_route(tmp_path):
             "Coverage Gaps",
             "Unverified",
         ],
+        ReviewAgent.OMISSION_AUDITOR: [
+            "Scope",
+            "Finding Candidates",
+            "Coverage Gaps",
+            "Unverified",
+        ],
     }
 
     for profile in ReviewAgent:
@@ -161,6 +167,17 @@ def test_unknown_review_profile_is_rejected(tmp_path):
         service.prepare_review_route("unknown_profile")
 
 
+def test_omission_auditor_challenges_prior_reports_without_repeating_them(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    focus = service.prepare_review_route(ReviewAgent.OMISSION_AUDITOR).focus.lower()
+
+    assert "prior profile reports" in focus
+    assert "failure modes" in focus
+    assert "may have missed" in focus
+    assert "do not repeat existing candidates" in focus
+    assert "evidence-backed findings" in focus
+
+
 def test_review_profiles_expose_the_approved_display_names(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
     expected_names = {
@@ -174,6 +191,7 @@ def test_review_profiles_expose_the_approved_display_names(tmp_path):
         ReviewAgent.RUBY_REVIEWER: "Ruby Reviewer",
         ReviewAgent.PYTHON_REVIEWER: "Python Reviewer",
         ReviewAgent.MOBILE_REVIEWER: "Mobile Reviewer",
+        ReviewAgent.OMISSION_AUDITOR: "Omission Auditor",
     }
 
     for profile, expected_name in expected_names.items():
@@ -190,47 +208,56 @@ def test_review_bundle_catalog_has_the_approved_immutable_order():
             ReviewAgent.CODE_EXPLORER,
             ReviewAgent.CODE_REVIEWER,
             ReviewAgent.PR_TEST_ANALYZER,
+            ReviewAgent.OMISSION_AUDITOR,
         ),
         bundle_type.WIDGET: (
             ReviewAgent.CODE_EXPLORER,
             ReviewAgent.REACT_REVIEWER,
             ReviewAgent.TYPESCRIPT_REVIEWER,
             ReviewAgent.PR_TEST_ANALYZER,
+            ReviewAgent.OMISSION_AUDITOR,
         ),
         bundle_type.WIDGET_JS: (
             ReviewAgent.CODE_EXPLORER,
             ReviewAgent.CODE_REVIEWER,
             ReviewAgent.REACT_REVIEWER,
             ReviewAgent.PR_TEST_ANALYZER,
+            ReviewAgent.OMISSION_AUDITOR,
         ),
         bundle_type.RUBY_BACKEND: (
             ReviewAgent.CODE_EXPLORER,
             ReviewAgent.RUBY_REVIEWER,
             ReviewAgent.PR_TEST_ANALYZER,
+            ReviewAgent.OMISSION_AUDITOR,
         ),
         bundle_type.PYTHON_BACKEND: (
             ReviewAgent.CODE_EXPLORER,
             ReviewAgent.PYTHON_REVIEWER,
             ReviewAgent.PR_TEST_ANALYZER,
+            ReviewAgent.OMISSION_AUDITOR,
         ),
         bundle_type.MOBILE: (
             ReviewAgent.CODE_EXPLORER,
             ReviewAgent.MOBILE_REVIEWER,
             ReviewAgent.PR_TEST_ANALYZER,
+            ReviewAgent.OMISSION_AUDITOR,
         ),
         bundle_type.SECURITY: (
             ReviewAgent.CODE_EXPLORER,
             ReviewAgent.SECURITY_REVIEWER,
             ReviewAgent.SILENT_FAILURE_HUNTER,
+            ReviewAgent.OMISSION_AUDITOR,
         ),
         bundle_type.AUTOTEST: (
             ReviewAgent.CODE_REVIEWER,
             ReviewAgent.TYPESCRIPT_REVIEWER,
             ReviewAgent.PR_TEST_ANALYZER,
+            ReviewAgent.OMISSION_AUDITOR,
         ),
         bundle_type.REQUIREMENTS: (
             ReviewAgent.CODE_EXPLORER,
             ReviewAgent.CODE_REVIEWER,
+            ReviewAgent.OMISSION_AUDITOR,
         ),
     }
 
@@ -322,7 +349,7 @@ def test_catalog_responses_do_not_share_mutable_routing_definitions(tmp_path):
     fresh = service.get_qa_orchestration_catalog()
 
     assert next(entry for entry in fresh.bundles if entry.bundle == "python_backend").profiles == [
-        "code_explorer", "python_reviewer", "pr_test_analyzer"
+        "code_explorer", "python_reviewer", "pr_test_analyzer", "omission_auditor"
     ]
     assert fresh.recommended_bundles_by_task_type["ordinary_review"] == ["ordinary_mr"]
     assert fresh.profiles[0].focus != "changed by caller"
@@ -335,6 +362,7 @@ def test_review_bundle_execution_groups_preserve_route_order_and_parallelize_ind
         ReviewBundle.ORDINARY_MR: (
             (ReviewAgent.CODE_EXPLORER,),
             (ReviewAgent.CODE_REVIEWER, ReviewAgent.PR_TEST_ANALYZER),
+            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.WIDGET: (
             (ReviewAgent.CODE_EXPLORER,),
@@ -343,6 +371,7 @@ def test_review_bundle_execution_groups_preserve_route_order_and_parallelize_ind
                 ReviewAgent.TYPESCRIPT_REVIEWER,
                 ReviewAgent.PR_TEST_ANALYZER,
             ),
+            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.WIDGET_JS: (
             (ReviewAgent.CODE_EXPLORER,),
@@ -351,10 +380,12 @@ def test_review_bundle_execution_groups_preserve_route_order_and_parallelize_ind
                 ReviewAgent.REACT_REVIEWER,
                 ReviewAgent.PR_TEST_ANALYZER,
             ),
+            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.RUBY_BACKEND: (
             (ReviewAgent.CODE_EXPLORER,),
             (ReviewAgent.RUBY_REVIEWER, ReviewAgent.PR_TEST_ANALYZER),
+            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.PYTHON_BACKEND: (
             (
@@ -362,14 +393,17 @@ def test_review_bundle_execution_groups_preserve_route_order_and_parallelize_ind
                 ReviewAgent.PYTHON_REVIEWER,
                 ReviewAgent.PR_TEST_ANALYZER,
             ),
+            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.MOBILE: (
             (ReviewAgent.CODE_EXPLORER,),
             (ReviewAgent.MOBILE_REVIEWER, ReviewAgent.PR_TEST_ANALYZER),
+            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.SECURITY: (
             (ReviewAgent.CODE_EXPLORER,),
             (ReviewAgent.SECURITY_REVIEWER, ReviewAgent.SILENT_FAILURE_HUNTER),
+            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.AUTOTEST: (
             (
@@ -377,10 +411,12 @@ def test_review_bundle_execution_groups_preserve_route_order_and_parallelize_ind
                 ReviewAgent.TYPESCRIPT_REVIEWER,
                 ReviewAgent.PR_TEST_ANALYZER,
             ),
+            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.REQUIREMENTS: (
             (ReviewAgent.CODE_EXPLORER,),
             (ReviewAgent.CODE_REVIEWER,),
+            (ReviewAgent.OMISSION_AUDITOR,),
         ),
     }
 

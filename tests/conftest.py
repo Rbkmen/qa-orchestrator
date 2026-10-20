@@ -5,6 +5,7 @@ import pytest
 from qa_orchestrator.contracts import (
     FinalReviewFinding,
     FinalReviewReport,
+    ProfileContextSelection,
     ProfileExecutionMetrics,
     ProfileReviewReport,
     ReviewAgent,
@@ -59,20 +60,38 @@ def review_finding_candidate():
 
 
 @pytest.fixture
-def make_profile_review_report():
+def make_profile_review_report(bound_review_context):
     def make(
         profile: ReviewAgent,
         *,
+        context_selection=None,
+        omit_context_selection=False,
+        reviewed_changed_paths=None,
         findings=(),
         coverage_gaps=(),
         unverified=(),
         evidence_map=(),
         execution_metrics: ProfileExecutionMetrics | None = None,
     ):
+        if context_selection is None and not omit_context_selection:
+            context_selection = ProfileContextSelection(
+                source_packet_sha256=bound_review_context.evidence_packet_sha256,
+                selected_packet_sha256="8" * 64,
+                included_refs=bound_review_context.evidence_refs,
+                changed_files_count=len(bound_review_context.changed_files),
+                max_bytes=1024,
+                selected_bytes=512,
+            )
         return ProfileReviewReport(
             profile=profile,
+            context_selection=context_selection,
             scope="Reviewed src/service.py and its changed behavior.",
             finding_candidates=tuple(findings),
+            reviewed_changed_paths=tuple(
+                bound_review_context.changed_files
+                if reviewed_changed_paths is None
+                else reviewed_changed_paths
+            ),
             coverage_gaps=tuple(coverage_gaps),
             unverified=tuple(unverified),
             evidence_map=tuple(evidence_map),

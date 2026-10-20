@@ -264,8 +264,14 @@ contract files and tests with:
 
 ```sh
 qa-orch evidence discover --context registered-context.json \
-  --repository /path/to/repo --max-candidates 50 --output neighbor-candidates.json
+  --repository /path/to/repo --max-candidates 50 --codegraph \
+  --output neighbor-candidates.json
 ```
+
+`--codegraph` adds caller edges only when the local CodeGraph index is initialized,
+complete, clean, and bound to the same repository checkout as the review head.
+If the binary or a current index is unavailable, discovery reports that status and
+continues with the pinned Git scan. It never syncs or rebuilds the index.
 
 The bounded scan reads only the pinned Git head, reports symbol matches and line
 numbers, and includes source records with content hashes that can be reviewed for

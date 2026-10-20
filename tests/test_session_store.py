@@ -128,6 +128,7 @@ def test_completed_review_artifacts_survive_restart_until_normal_expiry(
     legacy_payload = json.loads(finished.model_dump_json())
     for finding in legacy_payload["final_review_report"]["finding_candidates"]:
         finding.pop("source_candidates")
+    legacy_payload["final_review_report"].pop("coverage_ledger")
     connection = sqlite3.connect(store.path)
     try:
         connection.execute(
@@ -187,14 +188,24 @@ def test_python_backend_session_resumes_remaining_group_after_schedule_change(tm
             ReviewAgent.PYTHON_REVIEWER,
             ReviewAgent.PR_TEST_ANALYZER,
         ],
+    )
+
+    audited = restored.advance(
+        run_id=started.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profile=ReviewAgent.OMISSION_AUDITOR,
         risk_signals=DeepReviewSignals(),
     )
 
-    assert completed.current_step is OrchestrationStep.SYNTHESIS
-    assert completed.completed_profiles == [
+    assert completed.current_step is OrchestrationStep.PRIMARY_REVIEW
+    assert completed.current_profile is ReviewAgent.OMISSION_AUDITOR
+    assert audited.current_step is OrchestrationStep.SYNTHESIS
+    assert audited.completed_profiles == [
         ReviewAgent.CODE_EXPLORER,
         ReviewAgent.PYTHON_REVIEWER,
         ReviewAgent.PR_TEST_ANALYZER,
+        ReviewAgent.OMISSION_AUDITOR,
     ]
 
 

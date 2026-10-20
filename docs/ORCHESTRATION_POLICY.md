@@ -145,9 +145,9 @@ trace. Lease renewals do not advance the workflow revision and are omitted.
 This records what the host submitted; it does not prove that a model or review
 worker actually ran. Sessions persisted by older versions may have no trace.
 
-For every completed primary-review profile, pass one `profile_reports` item in the same order as `completed_profile` or `completed_profiles`. A report records the profile, reviewed scope, finding candidates, coverage gaps, unverified items, and evidence map. Each finding candidate must cite one or more IDs from `review_context.evidence_refs`; the server rejects unknown IDs and reports for the wrong profile. Optional `execution_metrics` may record host-observed start/completion timestamps and input/output token counts; these measurements are host-reported and are not verified by the server. `code_explorer` and `pr_test_analyzer` cannot submit implementation finding candidates.
+For every completed primary-review profile, pass one `profile_reports` item in the same order as `completed_profile` or `completed_profiles`. A report records the profile, reviewed scope, finding candidates, coverage gaps, unverified items, and evidence map. Set `reviewed_changed_paths` to every changed path the profile actually inspected, including paths with no finding; this is an executor attestation, not proof of model reasoning. Each finding candidate must cite one or more IDs from `review_context.evidence_refs`; the server rejects unknown IDs and reports for the wrong profile. Optional `execution_metrics` may record host-observed start/completion timestamps and input/output token counts; these measurements are host-reported and are not verified by the server. Final Markdown reports surface those measurements by profile and attempt. `code_explorer` and `pr_test_analyzer` cannot submit implementation finding candidates.
 
-For `outcome="completed"`, `finish_qa_orchestration` requires a `final_review_report` with the reviewed profiles, summary, synthesized candidates, coverage gaps, and unverified items. Final candidates must include their source profiles, each contributing profile-local candidate ID, and registered evidence IDs. The server verifies that every source pair exists in the submitted profile reports and that final finding evidence refs and source locations are supported by those linked candidates; it also checks overall Evidence Packet membership. The host remains responsible for the truth of the report and final QA decision. A clean single-profile path may still skip the synthesis stage, but it supplies the final report at finish.
+For `outcome="completed"`, `finish_qa_orchestration` requires a `final_review_report` with the reviewed profiles, summary, synthesized candidates, coverage gaps, and unverified items. At finalization, the server replaces `coverage_ledger` with host-derived facts bound to the ordered changed-path list: which paths have registered head-source records, which have verified text excerpts, which source excerpts were recorded in each profile's context selection, and which paths the executor attested it inspected. The report renderer resolves the indexes to paths and calls out missing source records, unavailable or unverified source text, missing selection receipts, and missing inspection attestations. Completion is rejected unless every profile has a host context-selection receipt, at least one non-explorer reviewer received a verified text excerpt for every text path, and non-explorer profiles attest inspection of every changed path; unresolved coverage must finish as `partial`. A missing source excerpt or selection receipt remains a visible coverage gap, not a claim that the path was checked; even a recorded attestation does not prove model reasoning. Final candidates must include their source profiles, each contributing profile-local candidate ID, and registered evidence IDs. The server verifies that every source pair exists in the submitted profile reports and that final finding evidence refs and source locations are supported by those linked candidates; it also checks overall Evidence Packet membership. The host remains responsible for the truth of the report and final QA decision. A clean single-profile path may still skip the synthesis stage, but it supplies the final report at finish.
 
 Each profile report and final report is limited to 72 KiB of serialized data; combined session review artifacts are limited to 288 KiB and at most ten profile reports are accepted. Keep the Evidence Packet and raw model responses outside these reports. These report-bound sessions and their structured reports are retained in the configured SQLite session store, if enabled, until the normal session TTL or capacity eviction. They are available through `get_qa_orchestration`; `list_qa_orchestrations` includes repository, head SHA, diff hash, and whether reports are present. Reports saved before source-candidate linkage was added remain recoverable with empty `source_candidates`; they can be replayed idempotently but cannot be used to finalize a new session. Without `review_context`, the legacy content-free workflow remains available and no structured reports are accepted.
 
@@ -217,15 +217,15 @@ flowchart LR
 
 | Bundle | Ordered profiles | Execution groups (each group is a barrier) |
 |---|---|---|
-| `ordinary_mr` | `code_explorer` → `code_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`code_reviewer`, `pr_test_analyzer`) |
-| `widget` | `code_explorer` → `react_reviewer` → `typescript_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`react_reviewer`, `typescript_reviewer`, `pr_test_analyzer`) |
-| `widget_js` | `code_explorer` → `code_reviewer` → `react_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`code_reviewer`, `react_reviewer`, `pr_test_analyzer`) |
-| `ruby_backend` | `code_explorer` → `ruby_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`ruby_reviewer`, `pr_test_analyzer`) |
-| `python_backend` | `code_explorer` → `python_reviewer` → `pr_test_analyzer` | (`code_explorer`, `python_reviewer`, `pr_test_analyzer`) |
-| `mobile` | `code_explorer` → `mobile_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`mobile_reviewer`, `pr_test_analyzer`) |
-| `security` | `code_explorer` → `security_reviewer` → `silent_failure_hunter` | (`code_explorer`) → (`security_reviewer`, `silent_failure_hunter`) |
-| `autotest` | `code_reviewer` → `typescript_reviewer` → `pr_test_analyzer` | (`code_reviewer`, `typescript_reviewer`, `pr_test_analyzer`) |
-| `requirements` | `code_explorer` → `code_reviewer` | (`code_explorer`) → (`code_reviewer`) |
+| `ordinary_mr` | `code_explorer` → `code_reviewer` → `pr_test_analyzer` → `omission_auditor` | (`code_explorer`) → (`code_reviewer`, `pr_test_analyzer`) → (`omission_auditor`) |
+| `widget` | `code_explorer` → `react_reviewer` → `typescript_reviewer` → `pr_test_analyzer` → `omission_auditor` | (`code_explorer`) → (`react_reviewer`, `typescript_reviewer`, `pr_test_analyzer`) → (`omission_auditor`) |
+| `widget_js` | `code_explorer` → `code_reviewer` → `react_reviewer` → `pr_test_analyzer` → `omission_auditor` | (`code_explorer`) → (`code_reviewer`, `react_reviewer`, `pr_test_analyzer`) → (`omission_auditor`) |
+| `ruby_backend` | `code_explorer` → `ruby_reviewer` → `pr_test_analyzer` → `omission_auditor` | (`code_explorer`) → (`ruby_reviewer`, `pr_test_analyzer`) → (`omission_auditor`) |
+| `python_backend` | `code_explorer` → `python_reviewer` → `pr_test_analyzer` → `omission_auditor` | (`code_explorer`, `python_reviewer`, `pr_test_analyzer`) → (`omission_auditor`) |
+| `mobile` | `code_explorer` → `mobile_reviewer` → `pr_test_analyzer` → `omission_auditor` | (`code_explorer`) → (`mobile_reviewer`, `pr_test_analyzer`) → (`omission_auditor`) |
+| `security` | `code_explorer` → `security_reviewer` → `silent_failure_hunter` → `omission_auditor` | (`code_explorer`) → (`security_reviewer`, `silent_failure_hunter`) → (`omission_auditor`) |
+| `autotest` | `code_reviewer` → `typescript_reviewer` → `pr_test_analyzer` → `omission_auditor` | (`code_reviewer`, `typescript_reviewer`, `pr_test_analyzer`) → (`omission_auditor`) |
+| `requirements` | `code_explorer` → `code_reviewer` → `omission_auditor` | (`code_explorer`) → (`code_reviewer`) → (`omission_auditor`) |
 
 | Technical profile | Display name |
 |---|---|
@@ -239,6 +239,7 @@ flowchart LR
 | `ruby_reviewer` | `Ruby Reviewer` |
 | `python_reviewer` | `Python Reviewer` |
 | `mobile_reviewer` | `Mobile Reviewer` |
+| `omission_auditor` | `Omission Auditor` |
 
 Faraday is the internal display name for `code_explorer`. It is not a separate external agent, service, package, or model. The orchestrator returns only the fixed identifier and order; the host runs the configured primary model for each role.
 
@@ -256,8 +257,9 @@ Use the narrowest profile that matches the task:
 - `ruby_reviewer` — Ruby semantics, ActiveRecord or Sequel behavior, and relevant Sidekiq retry/concurrency contracts when repository evidence confirms those libraries;
 - `python_reviewer` — Python async/error behavior, data validation, serialization, and relevant FastMCP tool contracts when present;
 - `mobile_reviewer` — React Native/native lifecycle, permissions, navigation, bridge, and platform-specific behavior on changed paths.
+- `omission_auditor` — an independent final pass over changed paths and earlier reports for distinct, missed failure modes.
 
-`code_explorer` owns evidence mapping; `code_reviewer` owns concrete review candidates. The latter may expand the map only when more context is needed to support a candidate.
+`code_explorer` owns evidence mapping; specialist profiles own their focused candidates; `omission_auditor` owns a final search for distinct omissions. It receives earlier profile reports and must not repeat their candidates. The role sequence is a host-execution claim, not proof that every possible defect was found.
 
 Every review must separate confirmed findings from hypotheses and unverified runtime or release facts. An empty or unknown profile is rejected before a route is built.
 

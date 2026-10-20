@@ -20,7 +20,7 @@ OpenAI recommends evaluating prompting guidance with the selected model and work
 | Broad React + TypeScript widget change | `widget` | Includes React and TypeScript review. |
 | Broad JavaScript React widget change | `widget_js` | Includes React and general code review, without TypeScript review. |
 | Broad Ruby backend change | `ruby_backend` | Includes evidence mapping, Ruby-specific review, and test analysis. |
-| Broad Python or MCP service change | `python_backend` | Includes Python-specific async, schema, error, and test review. |
+| Broad Python or MCP service change | `python_backend` | Runs Python-specific async, schema, error, and test review, followed by an omission audit over those reports. |
 | Broad React Native or native mobile change | `mobile` | Includes mobile platform review and test analysis without assuming web-only behavior. |
 | Narrow test-only change | `pr_test_analyzer` | Uses the compatibility profile instead of a full bundle. |
 | Narrow React-only change | `react_reviewer` | Uses the compatibility profile instead of a full bundle. |
@@ -54,7 +54,7 @@ These checks validate host scheduling semantics, not model quality or elapsed-ti
 4. Disable worker support and confirm the same groups use the sequential fallback without changing profile order or checklists.
 5. Make one worker fail; confirm it is retried or run in the parent before the group is recorded, and an unresolved failure ends as `partial` or `blocked` rather than a false completion.
 
-The MCP server only publishes the schedule and validates reported transition order; it does not launch workers or verify concurrency. Run these checks in a client adapter or host that can expose worker-start and completion events.
+Every broad bundle now ends with a sequential `omission_auditor` pass that receives prior profile reports and searches for distinct missed failure modes. The MCP server only publishes the schedule and validates reported transition order; it does not launch workers or verify concurrency. Run these checks in a client adapter or host that can expose worker-start and completion events.
 
 ## Representative quality and speed benchmark
 

@@ -13,7 +13,8 @@ orchestration/evidence/finding contract. Workspace and repository rules may add 
 - For implementation-aware QA, call `start_qa_orchestration`; select exactly one fixed bundle or compatibility profile, never both. The successful triage advance returns
   `selected_review_routes` with checklists and `execution_groups`; use them without a separate preparation call. Use `prepare_qa_orchestration` or `prepare_qa_orchestration_bundle`
   only for standalone lookup/recovery. Available profiles: `pr_test_analyzer`, `code_reviewer`, `security_reviewer`, `silent_failure_hunter`, `code_explorer`,
-  `typescript_reviewer`, `react_reviewer`, `ruby_reviewer`, `python_reviewer`, `mobile_reviewer`.
+  `typescript_reviewer`, `react_reviewer`, `ruby_reviewer`, `python_reviewer`, `mobile_reviewer`,
+  `omission_auditor`.
 - Treat `recommended_bundles` as a task-type shortlist, not a risk score or requirement; `allowed_bundles` is the complete set. Choose from changed paths and confirmed stack, not
   repository name. A narrow, low-risk single concern uses one profile: behavior/callers → `code_reviewer`; test-only → `pr_test_analyzer`; TypeScript-only → `typescript_reviewer`;
   React-only → `react_reviewer`; Ruby-only → `ruby_reviewer`; Python/MCP-only → `python_reviewer`; React Native/native-platform-only → `mobile_reviewer`. Several changed files
@@ -22,21 +23,21 @@ orchestration/evidence/finding contract. Workspace and repository rules may add 
 
 | Bundle | Route and execution groups |
 |---|---|
-| `ordinary_mr` | `code_explorer` → `code_reviewer` + `pr_test_analyzer` |
-| `widget` | `code_explorer` → `react_reviewer` + `typescript_reviewer` + `pr_test_analyzer` |
-| `widget_js` | `code_explorer` → `code_reviewer` + `react_reviewer` + `pr_test_analyzer` |
-| `ruby_backend` | `code_explorer` → `ruby_reviewer` + `pr_test_analyzer` |
-| `python_backend` | `code_explorer` + `python_reviewer` + `pr_test_analyzer` (one parallel-start group) |
-| `mobile` | `code_explorer` → `mobile_reviewer` + `pr_test_analyzer` |
-| `security` | `code_explorer` → `security_reviewer` + `silent_failure_hunter` |
-| `autotest` | `code_reviewer` + `typescript_reviewer` + `pr_test_analyzer` |
-| `requirements` | `code_explorer` → `code_reviewer` |
+| `ordinary_mr` | `code_explorer` → `code_reviewer` + `pr_test_analyzer` → `omission_auditor` |
+| `widget` | `code_explorer` → `react_reviewer` + `typescript_reviewer` + `pr_test_analyzer` → `omission_auditor` |
+| `widget_js` | `code_explorer` → `code_reviewer` + `react_reviewer` + `pr_test_analyzer` → `omission_auditor` |
+| `ruby_backend` | `code_explorer` → `ruby_reviewer` + `pr_test_analyzer` → `omission_auditor` |
+| `python_backend` | `code_explorer` + `python_reviewer` + `pr_test_analyzer` → `omission_auditor` |
+| `mobile` | `code_explorer` → `mobile_reviewer` + `pr_test_analyzer` → `omission_auditor` |
+| `security` | `code_explorer` → `security_reviewer` + `silent_failure_hunter` → `omission_auditor` |
+| `autotest` | `code_reviewer` + `typescript_reviewer` + `pr_test_analyzer` → `omission_auditor` |
+| `requirements` | `code_explorer` → `code_reviewer` → `omission_auditor` |
 
 - `autotest` is for broad TypeScript automation; use `ordinary_mr` for broad non-TypeScript automation. `widget` is TypeScript React; `widget_js` is broad JavaScript React;
   `ruby_backend`, `python_backend`, and `mobile` are for broad Ruby, Python/MCP, and React Native/native iOS/Android work. For mixed stacks choose the bundle for the
   broadest/highest-risk changed surface and state uncovered checks. Never invent, reorder, or submit a custom route. The returned catalog is authoritative.
 - Display names: `Faraday — Evidence Investigator` = `code_explorer`; Code Reviewer, Test Analyzer, Security Reviewer, Silent Failure Hunter, TypeScript Reviewer, React Reviewer,
-  Ruby Reviewer, Python Reviewer, and Mobile Reviewer. Faraday is an internal role name, not a service or model.
+  Ruby Reviewer, Python Reviewer, Mobile Reviewer, and Omission Auditor. Faraday is an internal role name, not a service or model.
 - Use returned `focus`, `required_sections`, `constraints`, and `escalation_signals` as the checklist; do not add boilerplate or empty positive observations. `code_explorer` maps
   evidence and unresolved links, not defects; `code_reviewer` uses that map for concrete candidates; other profiles stay within focus. The test analyzer reports test/coverage gaps,
   not implementation defects.
@@ -50,8 +51,9 @@ orchestration/evidence/finding contract. Workspace and repository rules may add 
   concurrently. Retry a failed role or run it in the parent; if it remains incomplete, stop as `partial` or `blocked`. The orchestrator validates the sequence the host reports; it
   cannot confirm that each review ran or ran concurrently. It cannot verify that host-reported `risk_signals` reflect evidence. Parallelism may increase concurrent requests/token
   use; do not change model/reasoning settings to enable it.
-- `python_backend` starts all three roles together. Before dispatch, the parent must include changed behavior, relevant source/test refs, and known contracts in the packet;
-  specialist reviewers cannot see the explorer result from the same group and must return evidence gaps to the parent. The parent uses the explorer map during validation/synthesis.
+- In each fixed bundle, the final `omission_auditor` group receives all earlier profile reports and the same bound diff/context. It independently checks changed paths for distinct missed failure modes and reports only evidence-backed additions; this host-executed pass is still an attestation, not proof of completeness.
+- `python_backend` starts its three primary roles together and runs `omission_auditor` after they finish. Before dispatch, the parent must include changed behavior, relevant source/test refs, and known contracts in the packet;
+  specialist reviewers cannot see the explorer result from the same group and must return evidence gaps to the parent. The omission auditor receives prior reports and searches for distinct missed failure modes; it must not repeat existing candidates.
   Compare quality and elapsed time on representative work before applying this schedule to other bundles.
 - Follow `model_policy.mode` at every stage. In `host_default`, use the host's configured model/reasoning and invent no provider/model/effort values; in `configured`, use returned
   per-stage settings. `reasoning_capabilities_verified=true` only means an exact locally curated model/provider pair; false requires host/provider verification and proves neither
@@ -83,6 +85,8 @@ orchestration/evidence/finding contract. Workspace and repository rules may add 
 - In `Scope`, state what evidence was checked and expected versus observed behavior. Use `Coverage Gaps` and `Unverified` for material cases or links that were not checked; distinguish source,
   test, and runtime evidence. Static inspection or a helper test does not prove that a real entry point, trigger, integration, or current value reaches the helper. Report only the dimensions actually
   exercised and name runtime/release checks not performed.
+- In each profile report, list every changed path actually inspected in `reviewed_changed_paths`, including paths with no finding. Treat this as an executor attestation, not proof that a model reasoned
+  over the path. Record the exact `context_selection` for every profile. At synthesis, preserve missing source excerpts, unrecorded context selections, and unattested changed paths as explicit coverage gaps. `outcome="completed"` requires a context-selection receipt for every profile, at least one non-`code_explorer` reviewer to receive each verified text excerpt, and non-explorer review profiles to attest every changed path; otherwise finalize as `partial`.
 - Resolve every concrete failure hypothesis as a supported candidate, refuted with counterevidence, or unverified with its trigger and missing check; carry material unresolved scenarios into synthesis.
   Compare base and head when available and state whether a relevant defect is introduced, pre-existing, or of unknown origin. Preserve relevant pre-existing defects, especially those contradicting the
   task or MR claim; exclude unrelated defects and do not treat pre-existence alone as release severity.

@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from qa_orchestrator.contracts import (
     EvidenceRecord,
+    ProfileContextSelection,
     ProfileReviewReport,
     ReviewAgent,
     ReviewContext,
@@ -202,8 +203,17 @@ def test_legacy_text_source_session_can_finish_with_its_existing_location(
         profile_reports=(
             ProfileReviewReport(
                 profile=ReviewAgent.CODE_REVIEWER,
+                context_selection=ProfileContextSelection(
+                    source_packet_sha256=legacy.evidence_packet_sha256,
+                    selected_packet_sha256="7" * 64,
+                    included_refs=legacy.evidence_refs,
+                    changed_files_count=1,
+                    max_bytes=1024,
+                    selected_bytes=256,
+                ),
                 scope="Pinned head source review",
                 finding_candidates=(legacy_candidate,),
+                reviewed_changed_paths=("src/api.py",),
             ),
         ),
         risk_signals=DeepReviewSignals(),
@@ -226,7 +236,8 @@ def test_legacy_text_source_session_can_finish_with_its_existing_location(
         final_review_report=final_report,
     )
 
-    assert finished.final_review_report == final_report
+    assert finished.final_review_report is not None
+    assert finished.final_review_report.model_copy(update={"coverage_ledger": None}) == final_report
 
 
 def test_binary_source_cannot_support_a_claimed_source_location(pinned_evidence):
@@ -453,10 +464,71 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
         evidence_refs=("S1", "D1"),
     )
 
+    original_run = evidence_module.subprocess.run
+    stale_index = False
+    codegraph_calls = []
+    monkeypatch.setattr(
+        evidence_module.shutil,
+        "which",
+        lambda command: "/fake/codegraph" if command == "codegraph" else None,
+    )
+
+    def fake_run(command, *args, **kwargs):
+        nonlocal stale_index
+        if command[0] != "/fake/codegraph":
+            return original_run(command, *args, **kwargs)
+        codegraph_calls.append(command)
+        if command[1] == "status":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(
+                    {
+                        "initialized": True,
+                        "projectPath": str(repository.resolve()),
+                        "pendingChanges": {
+                            "added": 0,
+                            "modified": 1 if stale_index else 0,
+                            "removed": 0,
+                        },
+                        "worktreeMismatch": None,
+                        "index": {"state": "complete"},
+                    }
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "truncated": False,
+                    "definitions": [
+                        {
+                            "definition": {"filePath": "src/service.py"},
+                            "callers": [
+                                {
+                                    "name": "calculate",
+                                    "kind": "function",
+                                    "filePath": "src/caller.py",
+                                    "startLine": 2,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(evidence_module.subprocess, "run", fake_run)
+    manifest = discover_neighbor_evidence(context, repository, use_codegraph=True)
+    assert manifest["codegraph"]["status"] == "ready"
+    assert manifest["codegraph"]["symbols_checked"] == 1
+    assert manifest["codegraph"]["caller_candidates"][0]["path"] == "src/caller.py"
     # Dirty worktree edits must not affect candidate hashes or line matches.
     caller = repository / "src/caller.py"
     caller.write_text("unrelated dirty worktree contents\n", encoding="utf-8")
-    manifest = discover_neighbor_evidence(context, repository)
     by_path = {entry["path"]: entry for entry in manifest["candidate_records"]}
 
     assert set(by_path) == {
@@ -470,6 +542,8 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
     assert caller_entry["matched_symbols"] == [
         {"symbol": "calculate", "lines": [1, 2], "more_lines": False}
     ]
+    assert "codegraph_caller_edge" in caller_entry["reasons"]
+    assert caller_entry["codegraph_callers"][0]["start_line"] == 2
     pinned_caller = git("show", f"{head}:src/caller.py")
     assert caller_entry["sha256"] == hashlib.sha256(pinned_caller).hexdigest()
     assert caller_entry["record"]["revision"] == head
@@ -479,6 +553,13 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
     assert manifest["symbol_search_paths_omitted_by_limit"] >= 1
     assert manifest["symbol_search_exhaustive"] is False
     assert manifest["candidate_scan_limit"] == 100
+
+    previous_graph_calls = len(codegraph_calls)
+    stale_index = True
+    stale_manifest = discover_neighbor_evidence(context, repository, use_codegraph=True)
+    assert stale_manifest["codegraph"]["status"] == "index_not_current"
+    assert stale_manifest["codegraph"]["caller_candidates"] == []
+    assert not any(command[1] == "callers" for command in codegraph_calls[previous_graph_calls:])
 
     context_path = tmp_path / "context.json"
     output_path = tmp_path / "neighbors.json"
@@ -490,11 +571,27 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
             str(context_path),
             "--repository",
             str(repository),
+            "--codegraph",
             "--output",
             str(output_path),
         ]
     ) == 0
-    assert len(json.loads(output_path.read_text(encoding="utf-8"))["candidate_records"]) == 3
+    cli_manifest = json.loads(output_path.read_text(encoding="utf-8"))
+    assert len(cli_manifest["candidate_records"]) == 3
+    assert cli_manifest["codegraph"]["status"] == "index_not_current"
+
+
+def test_discovery_reports_unavailable_optional_codegraph(pinned_evidence, monkeypatch):
+    import qa_orchestrator.evidence as evidence_module
+
+    repository, _, context, _ = pinned_evidence
+    monkeypatch.setattr(evidence_module.shutil, "which", lambda _: None)
+
+    manifest = discover_neighbor_evidence(context, repository, use_codegraph=True)
+
+    assert manifest["codegraph"]["status"] == "not_installed"
+    assert manifest["codegraph"]["caller_candidates"] == []
+    assert manifest["exhaustive"] is False
 
 
 def test_path_tokens_ignore_file_extensions():

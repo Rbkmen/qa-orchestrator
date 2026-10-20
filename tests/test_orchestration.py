@@ -4,7 +4,19 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
-from qa_orchestrator.contracts import ReviewAgent, ReviewBundle, ReviewFindingCandidate, ReviewNote
+from qa_orchestrator.contracts import (
+    EvidenceRecord,
+    ProfileChangedPathCoverage,
+    ProfileContextSelection,
+    ProfileExecutionMetrics,
+    ReviewAgent,
+    ReviewBundle,
+    ReviewContext,
+    ReviewCoverageLedger,
+    ReviewFindingCandidate,
+    ReviewNote,
+    review_changed_paths_sha256,
+)
 from qa_orchestrator.orchestration import (
     DeepReviewRule,
     DeepReviewSignals,
@@ -345,8 +357,12 @@ def test_review_bound_flow_validates_and_retains_structured_reports(
         final_review_report=final_report,
     )
 
-    assert finished.final_review_report == final_report
-    assert orchestrator.get(started.run_id).final_review_report == final_report
+    assert finished.final_review_report is not None
+    assert finished.final_review_report.coverage_ledger is not None
+    assert finished.final_review_report.coverage_ledger.profiles[0].context_selection_recorded
+    assert finished.final_review_report.coverage_ledger.profiles[0].reviewer_attested_path_indexes == (0,)
+    assert finished.final_review_report.model_copy(update={"coverage_ledger": None}) == final_report
+    assert orchestrator.get(started.run_id).final_review_report == finished.final_review_report
     assert orchestrator.list_sessions().sessions[0].has_review_artifacts
 
 
@@ -380,6 +396,321 @@ def test_review_bound_fast_path_cannot_skip_reported_coverage_gaps(
         )
 
 
+def test_finish_replaces_coverage_ledger_with_host_observed_path_coverage(
+    bound_review_context,
+    make_profile_review_report,
+    make_final_review_report,
+):
+    context = ReviewContext.model_validate(
+        {
+            **bound_review_context.model_dump(),
+            "changed_files": ("src/service.py", "src/binary.dat"),
+            "evidence_refs": ("E1", "E2", "E3"),
+            "evidence_registry": (
+                EvidenceRecord(
+                    evidence_ref="E1",
+                    kind="source",
+                    revision=bound_review_context.head_sha,
+                    path="src/service.py",
+                    sha256="4" * 64,
+                    source_text_available=True,
+                ),
+                EvidenceRecord(
+                    evidence_ref="E2",
+                    kind="requirement",
+                    locator="TASK-123",
+                    sha256="5" * 64,
+                ),
+                EvidenceRecord(
+                    evidence_ref="E3",
+                    kind="source",
+                    revision=bound_review_context.head_sha,
+                    path="src/binary.dat",
+                    sha256="6" * 64,
+                    source_text_available=False,
+                ),
+            ),
+        }
+    )
+    selection = ProfileContextSelection(
+        source_packet_sha256=context.evidence_packet_sha256,
+        selected_packet_sha256="7" * 64,
+        included_refs=("E1", "E2", "E3"),
+        changed_files_count=2,
+        source_excerpt_files_available=1,
+        source_excerpt_files_included=1,
+        max_bytes=1024,
+        selected_bytes=256,
+    )
+    profile_report = make_profile_review_report(
+        ReviewAgent.CODE_REVIEWER,
+        context_selection=selection,
+        reviewed_changed_paths=("src/service.py",),
+        execution_metrics=ProfileExecutionMetrics(
+            started_at=datetime(2026, 10, 19, 12, tzinfo=UTC),
+            completed_at=datetime(2026, 10, 19, 12, 0, 3, tzinfo=UTC),
+            input_tokens=1200,
+            output_tokens=240,
+        ),
+    )
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review", context)
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_profile=ReviewAgent.CODE_REVIEWER,
+    )
+
+    with pytest.raises(OrchestrationError, match="outside the bound context"):
+        orchestrator.advance(
+            run_id=session.run_id,
+            completed_step=OrchestrationStep.PRIMARY_REVIEW,
+            status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+            profile_reports=[
+                make_profile_review_report(
+                    ReviewAgent.CODE_REVIEWER,
+                    context_selection=selection,
+                    reviewed_changed_paths=("src/not-changed.py",),
+                )
+            ],
+            risk_signals=DeepReviewSignals(),
+        )
+
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profile=ReviewAgent.CODE_REVIEWER,
+        profile_reports=[profile_report],
+        risk_signals=DeepReviewSignals(),
+    )
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.SYNTHESIS,
+        status="completed",
+    )
+    final_report = make_final_review_report(
+        (ReviewAgent.CODE_REVIEWER,), context=context
+    ).model_copy(
+        update={
+            "coverage_ledger": ReviewCoverageLedger(
+                changed_paths_sha256="f" * 64,
+                changed_path_count=2,
+                registered_head_source_path_indexes=(0,),
+                head_source_excerpt_path_indexes=(0,),
+                profiles=(
+                    ProfileChangedPathCoverage(
+                        profile=ReviewAgent.PYTHON_REVIEWER,
+                        context_selection_recorded=True,
+                        source_excerpt_included_path_indexes=(0,),
+                        reviewer_attested_path_indexes=(1,),
+                    ),
+                ),
+            ),
+        }
+    )
+
+    with pytest.raises(OrchestrationError, match="uncovered path indexes: 1"):
+        orchestrator.finish(
+            run_id=session.run_id,
+            outcome="completed",
+            final_review_report=final_report,
+        )
+    finished = orchestrator.finish(
+        run_id=session.run_id,
+        outcome="partial",
+        final_review_report=final_report,
+    )
+
+    ledger = finished.final_review_report.coverage_ledger
+    assert ledger is not None
+    assert ledger.changed_paths_sha256 == review_changed_paths_sha256(context.changed_files)
+    assert ledger.registered_head_source_path_indexes == (0, 1)
+    assert ledger.head_source_excerpt_path_indexes == (0,)
+    assert ledger.head_source_text_unavailable_path_indexes == (1,)
+    assert ledger.profiles[0].execution_metrics == profile_report.execution_metrics
+    assert ledger.profiles[0].source_excerpt_included_path_indexes == (0,)
+    assert ledger.profiles[0].reviewer_attested_path_indexes == (0,)
+    assert ledger.profiles[0].reviewer_attested_path_indexes != (1,)
+    replayed = orchestrator.finish(
+        run_id=session.run_id,
+        outcome="partial",
+        final_review_report=final_report,
+    )
+    assert replayed == finished
+
+
+def test_mapping_only_profile_cannot_satisfy_completed_path_coverage(
+    bound_review_context,
+    make_profile_review_report,
+    make_final_review_report,
+):
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review", bound_review_context)
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_profile=ReviewAgent.CODE_EXPLORER,
+    )
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profile=ReviewAgent.CODE_EXPLORER,
+        profile_reports=[make_profile_review_report(ReviewAgent.CODE_EXPLORER)],
+        risk_signals=DeepReviewSignals(),
+    )
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.SYNTHESIS,
+        status="completed",
+    )
+    report = make_final_review_report((ReviewAgent.CODE_EXPLORER,))
+
+    with pytest.raises(OrchestrationError, match="non-explorer profile"):
+        orchestrator.finish(
+            run_id=session.run_id,
+            outcome="completed",
+            final_review_report=report,
+        )
+
+    partial = orchestrator.finish(
+        run_id=session.run_id,
+        outcome="partial",
+        final_review_report=report,
+    )
+    assert partial.status is OrchestrationStatus.PARTIAL
+
+
+def test_completed_review_requires_context_selection_receipts(
+    bound_review_context,
+    make_profile_review_report,
+    make_final_review_report,
+):
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review", bound_review_context)
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_profile=ReviewAgent.CODE_REVIEWER,
+    )
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profile=ReviewAgent.CODE_REVIEWER,
+        profile_reports=[
+            make_profile_review_report(
+                ReviewAgent.CODE_REVIEWER,
+                omit_context_selection=True,
+            )
+        ],
+        risk_signals=DeepReviewSignals(),
+    )
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.SYNTHESIS,
+        status="completed",
+    )
+    report = make_final_review_report((ReviewAgent.CODE_REVIEWER,))
+
+    with pytest.raises(OrchestrationError, match="context-selection receipt"):
+        orchestrator.finish(
+            run_id=session.run_id,
+            outcome="completed",
+            final_review_report=report,
+        )
+    partial = orchestrator.finish(
+        run_id=session.run_id,
+        outcome="partial",
+        final_review_report=report,
+    )
+    assert partial.final_review_report.coverage_ledger.profiles[0].context_selection_recorded is False
+
+
+def test_completed_review_requires_registered_text_excerpts_to_reach_a_reviewer(
+    bound_review_context,
+    make_profile_review_report,
+    make_final_review_report,
+):
+    context = ReviewContext.model_validate(
+        {
+            **bound_review_context.model_dump(),
+            "evidence_registry": (
+                EvidenceRecord(
+                    evidence_ref="E1",
+                    kind="source",
+                    revision=bound_review_context.head_sha,
+                    path="src/service.py",
+                    sha256="4" * 64,
+                    source_text_available=True,
+                ),
+                EvidenceRecord(
+                    evidence_ref="E2",
+                    kind="requirement",
+                    locator="TASK-123",
+                    sha256="5" * 64,
+                ),
+            ),
+        }
+    )
+    selection = ProfileContextSelection(
+        source_packet_sha256=context.evidence_packet_sha256,
+        selected_packet_sha256="7" * 64,
+        included_refs=("E2",),
+        omitted_refs=("E1",),
+        changed_files_count=1,
+        source_excerpt_files_available=1,
+        source_excerpt_files_included=0,
+        max_bytes=1024,
+        selected_bytes=256,
+    )
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review", context)
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_profile=ReviewAgent.CODE_REVIEWER,
+    )
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profile=ReviewAgent.CODE_REVIEWER,
+        profile_reports=[
+            make_profile_review_report(
+                ReviewAgent.CODE_REVIEWER,
+                context_selection=selection,
+            )
+        ],
+        risk_signals=DeepReviewSignals(),
+    )
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.SYNTHESIS,
+        status="completed",
+    )
+    report = make_final_review_report((ReviewAgent.CODE_REVIEWER,), context=context)
+
+    with pytest.raises(OrchestrationError, match="verified source excerpt.*indexes: 0"):
+        orchestrator.finish(
+            run_id=session.run_id,
+            outcome="completed",
+            final_review_report=report,
+        )
+    partial = orchestrator.finish(
+        run_id=session.run_id,
+        outcome="partial",
+        final_review_report=report,
+    )
+    assert partial.final_review_report.coverage_ledger.profiles[0].source_excerpt_included_path_indexes == ()
+
+
 def test_finish_rejects_review_artifacts_over_the_session_size_limit(
     bound_review_context,
     make_profile_review_report,
@@ -394,7 +725,7 @@ def test_finish_rejects_review_artifacts_over_the_session_size_limit(
         selected_bundle=ReviewBundle.WIDGET,
     )
     groups = bundle_execution_groups(ReviewBundle.WIDGET)
-    large_profile_gaps = tuple(ReviewNote(text="x" * 2000) for _ in range(29))
+    large_profile_gaps = tuple(ReviewNote(text="x" * 2000) for _ in range(25))
 
     for index, group in enumerate(groups):
         session = orchestrator.advance(
@@ -856,6 +1187,14 @@ def test_bundle_requires_each_profile_in_fixed_order_before_synthesis():
         completed_step=OrchestrationStep.PRIMARY_REVIEW,
         status="completed",
         completed_profile=ReviewAgent.PR_TEST_ANALYZER,
+    )
+    assert session.current_profile is ReviewAgent.OMISSION_AUDITOR
+
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profile=ReviewAgent.OMISSION_AUDITOR,
         risk_signals=DeepReviewSignals(),
     )
     assert session.current_step is OrchestrationStep.SYNTHESIS
@@ -972,20 +1311,34 @@ def test_group_transition_requires_risk_signals_for_the_final_group():
         completed_profiles=[ReviewAgent.CODE_EXPLORER],
     )
 
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profiles=[
+            ReviewAgent.CODE_REVIEWER,
+            ReviewAgent.PR_TEST_ANALYZER,
+        ],
+    )
+    assert session.current_profile is ReviewAgent.OMISSION_AUDITOR
+
     with pytest.raises(OrchestrationError, match="risk_signals are required"):
         orchestrator.advance(
             run_id=session.run_id,
             completed_step=OrchestrationStep.PRIMARY_REVIEW,
             status="completed",
-            completed_profiles=[
-                ReviewAgent.CODE_REVIEWER,
-                ReviewAgent.PR_TEST_ANALYZER,
-            ],
+            completed_profiles=[ReviewAgent.OMISSION_AUDITOR],
         )
 
-    unchanged = orchestrator.get(session.run_id)
-    assert unchanged.current_profile is ReviewAgent.CODE_REVIEWER
-    assert unchanged.completed_profiles == [ReviewAgent.CODE_EXPLORER]
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profiles=[ReviewAgent.OMISSION_AUDITOR],
+        risk_signals=DeepReviewSignals(),
+    )
+
+    assert session.current_step is OrchestrationStep.SYNTHESIS
 
 
 def test_clean_single_profile_batch_can_use_existing_fast_path():

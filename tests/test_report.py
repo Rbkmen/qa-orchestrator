@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 
 import pytest
 
@@ -7,12 +8,17 @@ from qa_orchestrator.contracts import (
     EvidenceRecord,
     FinalReviewFinding,
     FinalReviewReport,
+    ProfileAttemptMetrics,
+    ProfileChangedPathCoverage,
+    ProfileExecutionMetrics,
     ReviewAgent,
     ReviewCandidateDecision,
     ReviewContext,
+    ReviewCoverageLedger,
     ReviewFindingLocation,
     ReviewFindingSource,
     ReviewNote,
+    review_changed_paths_sha256,
 )
 from qa_orchestrator.refutation import make_refutation_check
 from qa_orchestrator.report import render_final_report, validate_final_report_context
@@ -173,6 +179,90 @@ def test_renderer_resolves_refs_from_bound_context(bound_review_context):
     rendered = render_final_report(report, context=context)
 
     assert 'Evidence refs:** E1 — `"src/api.py:10-20@111111111111' in rendered
+
+
+def test_renderer_maps_host_coverage_ledger_to_bound_changed_paths(bound_review_context):
+    context = ReviewContext.model_validate(
+        {
+            **bound_review_context.model_dump(),
+            "changed_files": ("src/service.py", "src/binary.dat", "docs/README.md"),
+            "evidence_registry": (
+                EvidenceRecord(
+                    evidence_ref="E1",
+                    kind="source",
+                    revision=bound_review_context.head_sha,
+                    path="src/service.py",
+                    sha256="4" * 64,
+                    source_text_available=True,
+                ),
+                EvidenceRecord(
+                    evidence_ref="E2",
+                    kind="source",
+                    revision=bound_review_context.head_sha,
+                    path="src/binary.dat",
+                    sha256="5" * 64,
+                    source_text_available=False,
+                ),
+            ),
+        }
+    )
+    report = FinalReviewReport(
+        summary="Reviewed the changed service path.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        coverage_ledger=ReviewCoverageLedger(
+            changed_paths_sha256=review_changed_paths_sha256(context.changed_files),
+            changed_path_count=3,
+            registered_head_source_path_indexes=(0, 1),
+            head_source_excerpt_path_indexes=(0,),
+            head_source_text_unavailable_path_indexes=(1,),
+            profiles=(
+                ProfileChangedPathCoverage(
+                    profile=ReviewAgent.CODE_REVIEWER,
+                    context_selection_recorded=True,
+                    source_excerpt_included_path_indexes=(0,),
+                    reviewer_attested_path_indexes=(0,),
+                    execution_metrics=ProfileExecutionMetrics(
+                        started_at=datetime(2026, 10, 19, 12, tzinfo=UTC),
+                        completed_at=datetime(2026, 10, 19, 12, 0, 3, tzinfo=UTC),
+                        input_tokens=1200,
+                        output_tokens=240,
+                        attempt_count=1,
+                        attempts=(
+                            ProfileAttemptMetrics(
+                                profile=ReviewAgent.CODE_REVIEWER,
+                                attempt=1,
+                                outcome="completed",
+                                started_at=datetime(2026, 10, 19, 12, tzinfo=UTC),
+                                completed_at=datetime(2026, 10, 19, 12, 0, 3, tzinfo=UTC),
+                                queue_seconds=0.2,
+                                executor_seconds=2.8,
+                                preparation_seconds=0.4,
+                                model_seconds=2.0,
+                                validation_seconds=0.3,
+                                input_tokens=1200,
+                                output_tokens=240,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    rendered = render_final_report(report, context=context)
+
+    assert "## Changed-path coverage" in rendered
+    assert "Paths with registered head-source evidence: 2/3; paths with verified text excerpts: 1/3." in rendered
+    assert 'No registered head-source record: `"docs/README.md"`' in rendered
+    assert 'Source text explicitly marked unavailable: `"src/binary.dat"`' in rendered
+    assert 'Not explicitly attested as reviewed: `"src/binary.dat"`' in rendered
+    assert "## Profile execution" in rendered
+    assert "elapsed 3.00s; attempts 1; input tokens 1200; output tokens 240" in rendered
+    assert "queue 0.20s; executor 2.80s; preparation 0.40s; model 2.00s; validation 0.30s" in rendered
+    assert "Timing and token values are host-reported and are not independently verified." in rendered
+    validate_final_report_context(report, context)
+    with pytest.raises(ValueError, match="coverage ledger does not match"):
+        validate_final_report_context(report, bound_review_context)
 
 
 def test_renderer_shows_original_unconfirmed_candidate_and_refutation_evidence(

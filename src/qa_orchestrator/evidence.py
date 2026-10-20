@@ -5,7 +5,9 @@ import ast
 import hashlib
 import json
 import re
+import shutil
 import subprocess
+import time
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 
@@ -28,6 +30,8 @@ _DISCOVERY_MAX_SYMBOL_SEARCH_BYTES = 16_000_000
 _DISCOVERY_MAX_MODULE_SEARCH_TERMS = 48
 _DISCOVERY_MAX_MODULE_SEARCH_BYTES = 32_000_000
 _DISCOVERY_SYMBOL_SEARCH_BATCH_SIZE = 32
+_CODEGRAPH_MAX_SYMBOL_QUERIES = 24
+_CODEGRAPH_MAX_CALLER_CANDIDATES = 100
 _IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]{2,127}$")
 _IGNORED_IDENTIFIERS = {
     "call", "get", "init", "main", "run", "set", "test", "toString", "valueOf",
@@ -601,11 +605,185 @@ def _path_tokens(path: str) -> set[str]:
     }
 
 
+def _codegraph_caller_suggestions(
+    repository: Path,
+    context: ReviewContext,
+    changed_symbols_by_path: dict[str, set[str]],
+    tracked_paths: set[str],
+    *,
+    enabled: bool,
+    max_candidates: int,
+) -> dict:
+    """Read caller edges only from a complete index matching the bound checkout."""
+    summary = {
+        "status": "not_requested",
+        "repository_head_sha": None,
+        "symbols_considered": 0,
+        "symbols_checked": 0,
+        "caller_candidates": [],
+        "query_failures": 0,
+        "truncated": False,
+        "exhaustive": False,
+    }
+    if not enabled:
+        return summary
+    executable = shutil.which("codegraph")
+    if executable is None:
+        summary["status"] = "not_installed"
+        return summary
+    head = _git(repository, "rev-parse", "HEAD").decode("ascii").strip().lower()
+    summary["repository_head_sha"] = head
+    if head != context.head_sha.lower():
+        summary["status"] = "revision_mismatch"
+        return summary
+
+    try:
+        result = subprocess.run(
+            [executable, "status", "--json", str(repository)],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        summary["status"] = "status_unavailable"
+        return summary
+    if result.returncode:
+        summary["status"] = "status_unavailable"
+        return summary
+    try:
+        index_status = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError):
+        summary["status"] = "invalid_status"
+        return summary
+    if not isinstance(index_status, dict) or not index_status.get("initialized"):
+        summary["status"] = "not_indexed"
+        return summary
+    project_path = index_status.get("projectPath")
+    try:
+        same_project = Path(project_path).resolve() == repository.resolve()
+    except (TypeError, OSError):
+        same_project = False
+    pending = index_status.get("pendingChanges")
+    pending_clean = isinstance(pending, dict) and all(
+        type(pending.get(key)) is int and pending[key] == 0
+        for key in ("added", "modified", "removed")
+    )
+    index_data = index_status.get("index")
+    index_complete = isinstance(index_data, dict) and index_data.get("state") == "complete"
+    if (
+        not same_project
+        or not pending_clean
+        or index_status.get("worktreeMismatch", "missing") is not None
+        or not index_complete
+    ):
+        summary["status"] = "index_not_current"
+        return summary
+
+    symbols = [
+        (path, symbol)
+        for path in context.changed_files
+        for symbol in sorted(changed_symbols_by_path.get(path, ()))
+    ]
+    summary["symbols_considered"] = len(symbols)
+    query_budget = min(_CODEGRAPH_MAX_SYMBOL_QUERIES, max_candidates * 2)
+    candidates: dict[tuple[str, str, int], dict] = {}
+    query_deadline = time.monotonic() + 10
+    for path, symbol in symbols[:query_budget]:
+        remaining_seconds = query_deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            summary["truncated"] = True
+            break
+        summary["symbols_checked"] += 1
+        try:
+            query = subprocess.run(
+                [
+                    executable,
+                    "callers",
+                    symbol,
+                    "--path",
+                    str(repository),
+                    "--file",
+                    path,
+                    "--limit",
+                    "20",
+                    "--json",
+                ],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=min(2, max(0.1, remaining_seconds)),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            summary["query_failures"] += 1
+            continue
+        if query.returncode:
+            summary["query_failures"] += 1
+            continue
+        try:
+            payload = json.loads(query.stdout)
+        except (TypeError, json.JSONDecodeError):
+            summary["query_failures"] += 1
+            continue
+        if not isinstance(payload, dict):
+            summary["query_failures"] += 1
+            continue
+        summary["truncated"] = summary["truncated"] or payload.get("truncated") is True
+        definitions = payload.get("definitions")
+        if not isinstance(definitions, list):
+            summary["query_failures"] += 1
+            continue
+        for item in definitions:
+            if not isinstance(item, dict):
+                continue
+            definition = item.get("definition")
+            callers = item.get("callers")
+            if not isinstance(definition, dict) or definition.get("filePath") != path:
+                continue
+            if not isinstance(callers, list):
+                continue
+            for caller in callers:
+                if not isinstance(caller, dict):
+                    continue
+                caller_path = caller.get("filePath")
+                line = caller.get("startLine")
+                if (
+                    not isinstance(caller_path, str)
+                    or caller_path not in tracked_paths
+                    or caller_path in context.changed_files
+                    or type(line) is not int
+                    or line < 1
+                ):
+                    continue
+                key = (caller_path, symbol, line)
+                candidates[key] = {
+                    "path": caller_path,
+                    "symbol": symbol,
+                    "changed_path": path,
+                    "start_line": line,
+                    "kind": caller.get("kind") if isinstance(caller.get("kind"), str) else None,
+                }
+                if len(candidates) >= _CODEGRAPH_MAX_CALLER_CANDIDATES:
+                    summary["truncated"] = True
+                    break
+            if len(candidates) >= _CODEGRAPH_MAX_CALLER_CANDIDATES:
+                break
+        if len(candidates) >= _CODEGRAPH_MAX_CALLER_CANDIDATES:
+            break
+
+    summary["caller_candidates"] = [candidates[key] for key in sorted(candidates)]
+    summary["status"] = "partial" if summary["query_failures"] else "ready"
+    if len(symbols) > query_budget:
+        summary["truncated"] = True
+    return summary
+
+
 def discover_neighbor_evidence(
     context: ReviewContext,
     repository: Path,
     *,
     max_candidates: int = 50,
+    use_codegraph: bool = False,
 ) -> dict:
     """Suggest pinned declarations, callers, contracts, tests and test manifests.
 
@@ -631,6 +809,7 @@ def discover_neighbor_evidence(
     test_audit_by_path: dict[str, dict] = {}
     test_audit_files_scanned = 0
     defined_symbols: set[str] = set()
+    defined_symbols_by_path: dict[str, set[str]] = {}
     referenced_symbols: set[str] = set()
     referenced_module_paths: set[str] = set()
     total_bytes = 0
@@ -647,7 +826,9 @@ def discover_neighbor_evidence(
         total_bytes += len(source)
         scanned_sources += 1
         if collect_changed_symbols:
-            defined_symbols.update(_defined_symbols(path, source))
+            path_symbols = _defined_symbols(path, source)
+            defined_symbols_by_path[path] = path_symbols
+            defined_symbols.update(path_symbols)
             referenced_symbols.update(_referenced_symbols(path, source, tracked_set))
             if len(defined_symbols | referenced_symbols) >= _DISCOVERY_MAX_SYMBOLS:
                 collect_changed_symbols = False
@@ -676,6 +857,17 @@ def discover_neighbor_evidence(
             module_names.append(name)
     all_module_search_terms = tuple(dict.fromkeys((*module_names, *ordered_symbols)))
     module_search_terms = all_module_search_terms[:_DISCOVERY_MAX_MODULE_SEARCH_TERMS]
+    codegraph = _codegraph_caller_suggestions(
+        repository,
+        context,
+        defined_symbols_by_path,
+        tracked_set,
+        enabled=use_codegraph,
+        max_candidates=max_candidates,
+    )
+    codegraph_by_path: dict[str, list[dict]] = {}
+    for item in codegraph["caller_candidates"]:
+        codegraph_by_path.setdefault(item["path"], []).append(item)
 
     changed_path_tokens = set().union(*(_path_tokens(path) for path in changed)) if changed else set()
     symbol_path_tokens = (
@@ -787,16 +979,18 @@ def discover_neighbor_evidence(
             | referenced_module_paths
             | test_paths
             | dependency_manifest_paths
+            | set(codegraph_by_path)
         )
         - changed,
         key=lambda path: (
             0 if path in dependency_manifest_paths else
             1 if path in referenced_module_paths else
-            2 if path in module_name_search_paths else
-            3 if path in test_paths else
-            4 if path in grep_paths and "test" in _neighbor_categories(path) else
-            5 if path in grep_paths and "contract" in _neighbor_categories(path) else
-            6 if path in grep_paths else 7,
+            2 if path in codegraph_by_path else
+            3 if path in module_name_search_paths else
+            4 if path in test_paths else
+            5 if path in grep_paths and "test" in _neighbor_categories(path) else
+            6 if path in grep_paths and "contract" in _neighbor_categories(path) else
+            7 if path in grep_paths else 8,
             path,
         ),
     )
@@ -841,6 +1035,9 @@ def discover_neighbor_evidence(
             for symbol, lines in sorted(matches_by_symbol.items())
         ]
         categories = list(_neighbor_categories(path))
+        codegraph_matches = codegraph_by_path.get(path, [])
+        if codegraph_matches and "caller" not in categories:
+            categories.append("caller")
         imported_changed_paths = sorted(
             _referenced_module_paths(path, source, tracked_set) & changed
         )
@@ -857,6 +1054,8 @@ def discover_neighbor_evidence(
         reasons = []
         if matches:
             reasons.append("symbol_reference")
+        if codegraph_matches:
+            reasons.append("codegraph_caller_edge")
         if declarations:
             reasons.append("symbol_declaration")
         if "test" in categories and path in test_paths:
@@ -882,6 +1081,7 @@ def discover_neighbor_evidence(
                 "path": path,
                 "categories": list(categories),
                 "matched_symbols": matches,
+                "codegraph_callers": codegraph_matches,
                 "reasons": reasons,
                 "imported_changed_paths": imported_changed_paths,
                 "test_audit_candidates": test_audit["candidates"] if test_audit else [],
@@ -931,6 +1131,7 @@ def discover_neighbor_evidence(
     return {
         "schema_version": 1,
         "method": "pinned_git_symbol_scan",
+        "codegraph": codegraph,
         "base_sha": context.base_sha,
         "head_sha": context.head_sha,
         "diff_sha256": context.diff_sha256,
@@ -1004,7 +1205,7 @@ def discover_neighbor_evidence(
             "Module-name search and direct-import verification are bounded; omitted paths and terms remain possible.",
             "Changed source symbol extraction stops at its symbol budget, while direct import and changed-test scans continue within byte limits.",
             "Test-audit signals cover changed and selected neighbor test files only; use repo audit-tests for wider coverage.",
-            "Reconcile callers/contracts with CodeGraph before binding neighbor evidence.",
+            "Use --codegraph to add caller edges from a complete local index; stale, missing, or unbound indexes are reported and skipped.",
             "Add accepted record objects and refs to the full registry before building the Evidence Packet.",
         ],
     }
@@ -1030,6 +1231,11 @@ def evidence_main(argv: list[str]) -> int:
         help="Suggest pinned declarations, callers, contracts, tests and test dependency manifests",
     )
     discover.add_argument("--max-candidates", default=50, type=int)
+    discover.add_argument(
+        "--codegraph",
+        action="store_true",
+        help="Add callers from a complete CodeGraph index matching the bound checkout",
+    )
     pack = subparsers.add_parser("pack", help="Build exact profile-selectable context from pinned refs")
     pack.add_argument("--plan", type=Path, help="Explicit host plan: optional_profiles, priorities, external_content")
     pack.add_argument("--bound-context", required=True, type=Path)
@@ -1072,7 +1278,10 @@ def evidence_main(argv: list[str]) -> int:
     context = ReviewContext.model_validate_json(args.context.read_bytes())
     if args.command == "discover":
         payload = discover_neighbor_evidence(
-            context, args.repository, max_candidates=args.max_candidates
+            context,
+            args.repository,
+            max_candidates=args.max_candidates,
+            use_codegraph=args.codegraph,
         )
         output = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
         if args.output:

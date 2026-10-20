@@ -1,6 +1,6 @@
 import hashlib
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from threading import RLock
@@ -22,12 +22,15 @@ from pydantic import (
 from qa_orchestrator.contracts import (
     EvidenceRefId,
     FinalReviewReport,
+    ProfileChangedPathCoverage,
     ProfileReviewReport,
     QaTaskOutcome,
     QaTaskType,
     ReviewAgent,
     ReviewBundle,
     ReviewContext,
+    ReviewCoverageLedger,
+    review_changed_paths_sha256,
 )
 from qa_orchestrator.evidence import validate_context_selection, validate_registered_locations
 from qa_orchestrator.model_policy import (
@@ -384,6 +387,80 @@ def _stable_json_sha256(payload: dict) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _build_review_coverage_ledger(
+    context: ReviewContext,
+    reports: Sequence[ProfileReviewReport],
+    profiles: Sequence[ReviewAgent],
+) -> ReviewCoverageLedger:
+    path_indexes = {path: index for index, path in enumerate(context.changed_files)}
+    registered_source_paths: set[str] = set()
+    unavailable_source_paths: set[str] = set()
+    source_refs_by_path: dict[str, set[str]] = {}
+    for entry in context.evidence_registry:
+        if (
+            entry.kind == "source"
+            and entry.revision == context.head_sha
+            and entry.path in path_indexes
+        ):
+            registered_source_paths.add(entry.path)
+            if entry.source_text_available is True:
+                source_refs_by_path.setdefault(entry.path, set()).add(entry.evidence_ref)
+            elif entry.source_text_available is False:
+                unavailable_source_paths.add(entry.path)
+
+    registered_indexes = tuple(
+        index
+        for index, path in enumerate(context.changed_files)
+        if path in registered_source_paths
+    )
+
+    available_indexes = tuple(
+        index
+        for index, path in enumerate(context.changed_files)
+        if path in source_refs_by_path
+    )
+    unavailable_indexes = tuple(
+        index
+        for index, path in enumerate(context.changed_files)
+        if path in unavailable_source_paths and path not in source_refs_by_path
+    )
+    reports_by_profile = {report.profile: report for report in reports}
+    profile_coverage = []
+    for profile in profiles:
+        report = reports_by_profile.get(profile)
+        selection = report.context_selection if report is not None else None
+        included_refs = set(selection.included_refs) if selection is not None else set()
+        included_indexes = tuple(
+            index
+            for index, path in enumerate(context.changed_files)
+            if source_refs_by_path.get(path, set()) & included_refs
+        )
+        attested_paths = set(report.reviewed_changed_paths) if report is not None else set()
+        attested_indexes = tuple(
+            index
+            for index, path in enumerate(context.changed_files)
+            if path in attested_paths
+        )
+        profile_coverage.append(
+            ProfileChangedPathCoverage(
+                profile=profile,
+                context_selection_recorded=selection is not None,
+                source_excerpt_included_path_indexes=included_indexes,
+                reviewer_attested_path_indexes=attested_indexes,
+                execution_metrics=report.execution_metrics if report is not None else None,
+            )
+        )
+
+    return ReviewCoverageLedger(
+        changed_paths_sha256=review_changed_paths_sha256(context.changed_files),
+        changed_path_count=len(context.changed_files),
+        registered_head_source_path_indexes=registered_indexes,
+        head_source_excerpt_path_indexes=available_indexes,
+        head_source_text_unavailable_path_indexes=unavailable_indexes,
+        profiles=tuple(profile_coverage),
+    )
+
+
 def _append_audit_event(
     session: "QaOrchestrationSession",
     *,
@@ -456,7 +533,7 @@ class QaOrchestrationSession(BaseModel):
     review_profiles: list[ReviewAgent] = Field(default_factory=list)
     current_profile: ReviewAgent | None = None
     completed_profiles: list[ReviewAgent] = Field(default_factory=list)
-    profile_reports: list[ProfileReviewReport] = Field(default_factory=list, max_length=10)
+    profile_reports: list[ProfileReviewReport] = Field(default_factory=list, max_length=11)
     final_review_report: FinalReviewReport | None = None
     risk_signals: DeepReviewSignals | None = None
     deep_assessment: DeepReviewAssessment | None = None
@@ -595,7 +672,7 @@ class AdvanceQaOrchestrationRequest(BaseModel):
     completed_profile: ReviewAgent | None = None
     completed_profiles: list[ReviewAgent] | None = None
     profile_reports: list[ProfileReviewReport] | None = Field(
-        default=None, min_length=1, max_length=10
+        default=None, min_length=1, max_length=11
     )
     risk_signals: DeepReviewSignals | None = None
     skip_synthesis: bool = Field(
@@ -1023,11 +1100,18 @@ class QaOrchestrator:
         except ValueError as exc:
             raise OrchestrationError("invalid final outcome") from exc
         try:
-            validated_report = (
-                FinalReviewReport.model_validate(final_review_report)
-                if final_review_report is not None
-                else None
-            )
+            if final_review_report is None:
+                validated_report = None
+            else:
+                report_payload = (
+                    final_review_report.model_dump()
+                    if isinstance(final_review_report, FinalReviewReport)
+                    else final_review_report
+                )
+                if isinstance(report_payload, Mapping):
+                    report_payload = dict(report_payload)
+                    report_payload.pop("coverage_ledger", None)
+                validated_report = FinalReviewReport.model_validate(report_payload)
         except ValidationError as exc:
             raise OrchestrationError("invalid final review report") from exc
 
@@ -1049,6 +1133,43 @@ class QaOrchestrator:
                 and validated_report is not None
                 and validated_report == session.final_review_report
             )
+            if validated_report is not None:
+                if session.review_context is None:
+                    raise OrchestrationError("final review report requires a bound review context")
+                if validated_report.profiles_reviewed != tuple(session.completed_profiles):
+                    raise OrchestrationError(
+                        "final report profiles do not match completed profiles"
+                    )
+                expected_rules = (
+                    session.review_context.review_rules.digest
+                    if session.review_context.review_rules
+                    else None
+                )
+                if validated_report.review_rules_sha256 != expected_rules:
+                    raise OrchestrationError("final report rules digest mismatch")
+            if validated_report is not None and not is_idempotent_legacy_replay:
+                try:
+                    validated_report = FinalReviewReport.model_validate(
+                        {
+                            **validated_report.model_dump(),
+                            "coverage_ledger": _build_review_coverage_ledger(
+                                session.review_context,
+                                session.profile_reports,
+                                session.completed_profiles,
+                            ),
+                        }
+                    )
+                except ValidationError as exc:
+                    raise OrchestrationError("invalid host-generated coverage ledger") from exc
+                is_idempotent_legacy_replay = (
+                    is_idempotent_legacy_replay
+                    or (
+                        session.status in _TERMINAL_SESSION_STATUSES
+                        and session.status is final_status
+                        and validated_report == session.final_review_report
+                    )
+                )
+
             if (expected_revision is not None and expected_revision != session.revision
                 and not is_idempotent_legacy_replay):
                 raise OrchestrationError("stale session revision")
@@ -1065,16 +1186,64 @@ class QaOrchestrator:
                 )
 
             if validated_report is not None:
-                if session.review_context is None:
-                    raise OrchestrationError("final review report requires a bound review context")
-                expected_rules = (session.review_context.review_rules.digest
-                                  if session.review_context.review_rules else None)
-                if validated_report.review_rules_sha256 != expected_rules:
-                    raise OrchestrationError("final report rules digest mismatch")
-                if validated_report.profiles_reviewed != tuple(session.completed_profiles):
-                    raise OrchestrationError(
-                        "final report profiles do not match completed profiles"
+                if final_status is OrchestrationStatus.COMPLETED and not is_idempotent_legacy_replay:
+                    coverage_ledger = validated_report.coverage_ledger
+                    if coverage_ledger is None:
+                        raise OrchestrationError("host-generated coverage ledger is required")
+                    profiles_without_receipts = [
+                        profile.profile.value
+                        for profile in coverage_ledger.profiles
+                        if not profile.context_selection_recorded
+                    ]
+                    if profiles_without_receipts:
+                        missing_profiles = ", ".join(profiles_without_receipts[:10])
+                        if len(profiles_without_receipts) > 10:
+                            missing_profiles += ", ..."
+                        raise OrchestrationError(
+                            "completed review requires a host context-selection receipt for every "
+                            f"profile; missing: {missing_profiles}"
+                        )
+                    review_profiles = [
+                        profile
+                        for profile in coverage_ledger.profiles
+                        if profile.profile is not ReviewAgent.CODE_EXPLORER
+                    ]
+                    delivered_excerpt_indexes = {
+                        index
+                        for profile in review_profiles
+                        for index in profile.source_excerpt_included_path_indexes
+                    }
+                    missing_excerpt_indexes = sorted(
+                        set(coverage_ledger.head_source_excerpt_path_indexes)
+                        - delivered_excerpt_indexes
                     )
+                    if missing_excerpt_indexes:
+                        examples = ", ".join(
+                            str(index) for index in missing_excerpt_indexes[:10]
+                        )
+                        if len(missing_excerpt_indexes) > 10:
+                            examples += ", ..."
+                        raise OrchestrationError(
+                            "completed review requires a non-explorer profile to receive a "
+                            f"verified source excerpt for each text path; uncovered path indexes: {examples}"
+                        )
+                    covered_indexes = {
+                        index
+                        for profile in review_profiles
+                        for index in profile.reviewer_attested_path_indexes
+                    }
+                    missing_indexes = sorted(
+                        set(range(coverage_ledger.changed_path_count))
+                        - covered_indexes
+                    )
+                    if missing_indexes:
+                        examples = ", ".join(str(index) for index in missing_indexes[:10])
+                        if len(missing_indexes) > 10:
+                            examples += ", ..."
+                        raise OrchestrationError(
+                            "completed review requires a non-explorer profile to attest every "
+                            f"changed path; uncovered path indexes: {examples}"
+                        )
                 context_refs = set(session.review_context.evidence_refs)
                 report_refs = {
                     reference
@@ -1396,6 +1565,12 @@ class QaOrchestrator:
                                       if session.review_context.review_rules else None)
                     if report.review_rules_sha256 != expected_rules:
                         raise OrchestrationError("profile report rules digest mismatch")
+                    if set(report.reviewed_changed_paths) - set(
+                        session.review_context.changed_files
+                    ):
+                        raise OrchestrationError(
+                            "profile report attests changed paths outside the bound context"
+                        )
                     if any(
                         not candidate.failure_condition or not candidate.flip_condition
                         for candidate in report.finding_candidates
@@ -1447,7 +1622,7 @@ class QaOrchestrator:
                     raise OrchestrationError(
                         "risk signals must be sent with the final primary-review profile"
                     )
-                next_profile = session.review_profiles[next_profile_index + 1]
+                next_profile = session.review_profiles[len(completed_profiles)]
                 return session.model_copy(
                     update={
                         "current_profile": next_profile,

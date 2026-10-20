@@ -5,7 +5,11 @@ import json
 import re
 from pathlib import Path
 
-from qa_orchestrator.contracts import FinalReviewReport, ReviewContext
+from qa_orchestrator.contracts import (
+    FinalReviewReport,
+    ReviewContext,
+    review_changed_paths_sha256,
+)
 from qa_orchestrator.evidence import validate_registered_locations
 
 _SEVERITY_ORDER = {"blocker": 0, "high": 1, "medium": 2, "low": 3, None: 4}
@@ -66,6 +70,193 @@ def _refs(refs: tuple[str, ...], context: ReviewContext | None = None) -> str:
             item += f" — {_code(locator)}"
         rendered.append(item)
     return ", ".join(rendered) or "нет"
+
+
+def _coverage_path_label(
+    index: int,
+    *,
+    ledger_path_count: int,
+    context: ReviewContext | None,
+) -> str:
+    if context is not None and len(context.changed_files) == ledger_path_count:
+        return _code(context.changed_files[index])
+    return f"index {index}"
+
+
+def _render_coverage_ledger(
+    report: FinalReviewReport,
+    context: ReviewContext | None,
+) -> list[str]:
+    lines = ["## Changed-path coverage", ""]
+    ledger = report.coverage_ledger
+    if ledger is None:
+        lines.extend((
+            "Host-generated coverage ledger is unavailable; this report may predate coverage tracking.",
+            "",
+        ))
+        return lines
+
+    mapping_valid = (
+        context is not None
+        and len(context.changed_files) == ledger.changed_path_count
+        and review_changed_paths_sha256(context.changed_files) == ledger.changed_paths_sha256
+    )
+    if mapping_valid:
+        lines.append("Path indexes are mapped to the matching bound changed-path list.")
+    elif context is None:
+        lines.append(
+            f"Path mapping requires the bound context ({ledger.changed_path_count} paths; "
+            f"SHA-256 {ledger.changed_paths_sha256})."
+        )
+    else:
+        lines.append(
+            "The supplied context does not match this ledger; path names are suppressed and indexes are shown."
+        )
+    lines.append(
+        "This records source excerpts delivered by the host and inspection paths attested by the executor; "
+        "it does not prove model reasoning."
+    )
+
+    available = set(ledger.head_source_excerpt_path_indexes)
+    registered = set(ledger.registered_head_source_path_indexes)
+    unavailable = set(ledger.head_source_text_unavailable_path_indexes)
+    all_indexes = set(range(ledger.changed_path_count))
+    missing_registration = sorted(all_indexes - registered)
+    unavailable_text = sorted(unavailable)
+    unknown_text_status = sorted(registered - available - unavailable)
+    lines.append(
+        f"Paths with registered head-source evidence: {len(registered)}/{ledger.changed_path_count}; "
+        f"paths with verified text excerpts: {len(available)}/{ledger.changed_path_count}."
+    )
+    if missing_registration:
+        labels = ", ".join(
+            _coverage_path_label(
+                index,
+                ledger_path_count=ledger.changed_path_count,
+                context=context if mapping_valid else None,
+            )
+            for index in missing_registration
+        )
+        lines.append(f"- No registered head-source record: {labels}")
+    if unavailable_text:
+        labels = ", ".join(
+            _coverage_path_label(
+                index,
+                ledger_path_count=ledger.changed_path_count,
+                context=context if mapping_valid else None,
+            )
+            for index in unavailable_text
+        )
+        lines.append(f"- Source text explicitly marked unavailable: {labels}")
+    if unknown_text_status:
+        labels = ", ".join(
+            _coverage_path_label(
+                index,
+                ledger_path_count=ledger.changed_path_count,
+                context=context if mapping_valid else None,
+            )
+            for index in unknown_text_status
+        )
+        lines.append(f"- Source text availability not verified: {labels}")
+
+    for profile in ledger.profiles:
+        attested = set(profile.reviewer_attested_path_indexes)
+        included = set(profile.source_excerpt_included_path_indexes)
+        lines.append("")
+        lines.append(
+            f"- **{_text(profile.profile.value)}:** context selection "
+            f"{'recorded' if profile.context_selection_recorded else 'not recorded'}; "
+            f"reviewer-attested {len(attested)}/{ledger.changed_path_count} paths."
+        )
+        if not profile.context_selection_recorded:
+            if available:
+                lines.append(
+                    "  - Source-excerpt delivery cannot be confirmed because no selection receipt was recorded."
+                )
+        else:
+            lines.append(
+                f"  - Paths with at least one verified excerpt in the selection: "
+                f"{len(included)}/{len(available)}."
+            )
+            omitted_source = sorted(available - included)
+            if omitted_source:
+                labels = ", ".join(
+                    _coverage_path_label(
+                        index,
+                        ledger_path_count=ledger.changed_path_count,
+                        context=context if mapping_valid else None,
+                    )
+                    for index in omitted_source
+                )
+                lines.append(f"  - Available excerpts not recorded in selection: {labels}")
+        unattested = sorted(all_indexes - attested)
+        if unattested:
+            labels = ", ".join(
+                _coverage_path_label(
+                    index,
+                    ledger_path_count=ledger.changed_path_count,
+                    context=context if mapping_valid else None,
+                )
+                for index in unattested
+            )
+            lines.append(f"  - Not explicitly attested as reviewed: {labels}")
+    lines.append("")
+    return lines
+
+
+def _render_profile_execution(report: FinalReviewReport) -> list[str]:
+    ledger = report.coverage_ledger
+    if ledger is None:
+        return []
+
+    profiles = [
+        profile for profile in ledger.profiles if profile.execution_metrics is not None
+    ]
+    if not profiles:
+        return []
+
+    lines = [
+        "## Profile execution",
+        "",
+        "Timing and token values are host-reported and are not independently verified.",
+        "",
+    ]
+    for profile in profiles:
+        metrics = profile.execution_metrics
+        assert metrics is not None
+        elapsed = (metrics.completed_at - metrics.started_at).total_seconds()
+        summary = [
+            f"elapsed {elapsed:.2f}s",
+            f"attempts {metrics.attempt_count}",
+        ]
+        if metrics.input_tokens is not None:
+            summary.append(f"input tokens {metrics.input_tokens}")
+        if metrics.output_tokens is not None:
+            summary.append(f"output tokens {metrics.output_tokens}")
+        lines.append(f"- **{_text(profile.profile.value)}:** " + "; ".join(summary))
+
+        for attempt in metrics.attempts:
+            attempt_details = [
+                f"queue {attempt.queue_seconds:.2f}s",
+                f"executor {attempt.executor_seconds:.2f}s",
+            ]
+            for label, value in (
+                ("preparation", attempt.preparation_seconds),
+                ("model", attempt.model_seconds),
+                ("validation", attempt.validation_seconds),
+            ):
+                if value is not None:
+                    attempt_details.append(f"{label} {value:.2f}s")
+            if attempt.input_tokens is not None:
+                attempt_details.append(f"input tokens {attempt.input_tokens}")
+            if attempt.output_tokens is not None:
+                attempt_details.append(f"output tokens {attempt.output_tokens}")
+            lines.append(
+                f"  - Attempt {attempt.attempt} ({_text(attempt.outcome)}): "
+                + "; ".join(attempt_details)
+            )
+    lines.append("")
+    return lines
 
 
 def render_final_report(
@@ -189,6 +380,9 @@ def render_final_report(
                 lines.append("- **Refutation status:** проверка не сохранена")
             lines.append("")
 
+    lines.extend(_render_coverage_ledger(report, context))
+    lines.extend(_render_profile_execution(report))
+
     for heading, notes in (
         ("Coverage gaps", report.coverage_gaps),
         ("Unverified", report.unverified),
@@ -205,6 +399,56 @@ def render_final_report(
 
 
 def validate_final_report_context(report: FinalReviewReport, context: ReviewContext) -> None:
+    ledger = report.coverage_ledger
+    if ledger is not None:
+        if (
+            ledger.changed_path_count != len(context.changed_files)
+            or ledger.changed_paths_sha256 != review_changed_paths_sha256(context.changed_files)
+        ):
+            raise ValueError("coverage ledger does not match the bound changed paths")
+        if tuple(profile.profile for profile in ledger.profiles) != report.profiles_reviewed:
+            raise ValueError("coverage ledger profiles do not match the final report")
+        paths = set(context.changed_files)
+        registered_paths = {
+            entry.path
+            for entry in context.evidence_registry
+            if entry.kind == "source"
+            and entry.revision == context.head_sha
+            and entry.path in paths
+        }
+        available_paths = {
+            entry.path
+            for entry in context.evidence_registry
+            if entry.kind == "source"
+            and entry.revision == context.head_sha
+            and entry.source_text_available is True
+            and entry.path in paths
+        }
+        explicitly_unavailable_paths = {
+            entry.path
+            for entry in context.evidence_registry
+            if entry.kind == "source"
+            and entry.revision == context.head_sha
+            and entry.source_text_available is False
+            and entry.path in paths
+        } - available_paths
+        expected_registered = tuple(
+            index for index, path in enumerate(context.changed_files) if path in registered_paths
+        )
+        expected_available = tuple(
+            index for index, path in enumerate(context.changed_files) if path in available_paths
+        )
+        expected_unavailable = tuple(
+            index
+            for index, path in enumerate(context.changed_files)
+            if path in explicitly_unavailable_paths
+        )
+        if (
+            ledger.registered_head_source_path_indexes != expected_registered
+            or ledger.head_source_excerpt_path_indexes != expected_available
+            or ledger.head_source_text_unavailable_path_indexes != expected_unavailable
+        ):
+            raise ValueError("coverage ledger source status does not match the bound evidence registry")
     report_refs = {
         ref for finding in report.finding_candidates for ref in finding.evidence_refs
     }

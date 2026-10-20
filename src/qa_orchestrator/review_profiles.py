@@ -189,6 +189,22 @@ REVIEW_PROFILES: Mapping[ReviewAgent, ReviewProfileDefinition] = MappingProxyTyp
                 "A lifecycle, background, or deep-link change depends on an unverified OS contract.",
             ),
         ),
+        ReviewAgent.OMISSION_AUDITOR: ReviewProfileDefinition(
+            display_name="Omission Auditor",
+            focus=(
+                "Independently inspect every changed path after the specialist reviews. Compare "
+                "the bound diff and evidence with prior profile reports; search specifically for "
+                "failure modes, boundary conditions, state transitions, error/retry behavior, "
+                "and downstream side effects that the earlier reports may have missed. Return "
+                "only concrete, evidence-backed findings absent from prior reports. Do not repeat "
+                "existing candidates; report unresolved scenarios as coverage gaps or unverified."
+            ),
+            required_sections=("Scope", "Finding Candidates", "Coverage Gaps", "Unverified"),
+            escalation_signals=(
+                "A changed behavior path has no concrete evidence-backed scenario in prior reports.",
+                "Prior reviews rely on the same unverified contract or omit a relevant boundary.",
+            ),
+        ),
     }
 )
 
@@ -199,47 +215,56 @@ REVIEW_BUNDLES: Mapping[ReviewBundle, tuple[ReviewAgent, ...]] = MappingProxyTyp
             ReviewAgent.CODE_EXPLORER,
             ReviewAgent.CODE_REVIEWER,
             ReviewAgent.PR_TEST_ANALYZER,
+            ReviewAgent.OMISSION_AUDITOR,
         ),
         ReviewBundle.WIDGET: (
             ReviewAgent.CODE_EXPLORER,
             ReviewAgent.REACT_REVIEWER,
             ReviewAgent.TYPESCRIPT_REVIEWER,
             ReviewAgent.PR_TEST_ANALYZER,
+            ReviewAgent.OMISSION_AUDITOR,
         ),
         ReviewBundle.WIDGET_JS: (
             ReviewAgent.CODE_EXPLORER,
             ReviewAgent.CODE_REVIEWER,
             ReviewAgent.REACT_REVIEWER,
             ReviewAgent.PR_TEST_ANALYZER,
+            ReviewAgent.OMISSION_AUDITOR,
         ),
         ReviewBundle.RUBY_BACKEND: (
             ReviewAgent.CODE_EXPLORER,
             ReviewAgent.RUBY_REVIEWER,
             ReviewAgent.PR_TEST_ANALYZER,
+            ReviewAgent.OMISSION_AUDITOR,
         ),
         ReviewBundle.PYTHON_BACKEND: (
             ReviewAgent.CODE_EXPLORER,
             ReviewAgent.PYTHON_REVIEWER,
             ReviewAgent.PR_TEST_ANALYZER,
+            ReviewAgent.OMISSION_AUDITOR,
         ),
         ReviewBundle.MOBILE: (
             ReviewAgent.CODE_EXPLORER,
             ReviewAgent.MOBILE_REVIEWER,
             ReviewAgent.PR_TEST_ANALYZER,
+            ReviewAgent.OMISSION_AUDITOR,
         ),
         ReviewBundle.SECURITY: (
             ReviewAgent.CODE_EXPLORER,
             ReviewAgent.SECURITY_REVIEWER,
             ReviewAgent.SILENT_FAILURE_HUNTER,
+            ReviewAgent.OMISSION_AUDITOR,
         ),
         ReviewBundle.AUTOTEST: (
             ReviewAgent.CODE_REVIEWER,
             ReviewAgent.TYPESCRIPT_REVIEWER,
             ReviewAgent.PR_TEST_ANALYZER,
+            ReviewAgent.OMISSION_AUDITOR,
         ),
         ReviewBundle.REQUIREMENTS: (
             ReviewAgent.CODE_EXPLORER,
             ReviewAgent.CODE_REVIEWER,
+            ReviewAgent.OMISSION_AUDITOR,
         ),
     }
 )
@@ -251,6 +276,7 @@ _REVIEW_BUNDLE_EXECUTION_GROUPS: Mapping[
         ReviewBundle.ORDINARY_MR: (
             (ReviewAgent.CODE_EXPLORER,),
             (ReviewAgent.CODE_REVIEWER, ReviewAgent.PR_TEST_ANALYZER),
+            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.WIDGET: (
             (ReviewAgent.CODE_EXPLORER,),
@@ -259,6 +285,7 @@ _REVIEW_BUNDLE_EXECUTION_GROUPS: Mapping[
                 ReviewAgent.TYPESCRIPT_REVIEWER,
                 ReviewAgent.PR_TEST_ANALYZER,
             ),
+            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.WIDGET_JS: (
             (ReviewAgent.CODE_EXPLORER,),
@@ -267,10 +294,12 @@ _REVIEW_BUNDLE_EXECUTION_GROUPS: Mapping[
                 ReviewAgent.REACT_REVIEWER,
                 ReviewAgent.PR_TEST_ANALYZER,
             ),
+            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.RUBY_BACKEND: (
             (ReviewAgent.CODE_EXPLORER,),
             (ReviewAgent.RUBY_REVIEWER, ReviewAgent.PR_TEST_ANALYZER),
+            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.PYTHON_BACKEND: (
             (
@@ -278,14 +307,17 @@ _REVIEW_BUNDLE_EXECUTION_GROUPS: Mapping[
                 ReviewAgent.PYTHON_REVIEWER,
                 ReviewAgent.PR_TEST_ANALYZER,
             ),
+            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.MOBILE: (
             (ReviewAgent.CODE_EXPLORER,),
             (ReviewAgent.MOBILE_REVIEWER, ReviewAgent.PR_TEST_ANALYZER),
+            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.SECURITY: (
             (ReviewAgent.CODE_EXPLORER,),
             (ReviewAgent.SECURITY_REVIEWER, ReviewAgent.SILENT_FAILURE_HUNTER),
+            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.AUTOTEST: (
             (
@@ -293,10 +325,12 @@ _REVIEW_BUNDLE_EXECUTION_GROUPS: Mapping[
                 ReviewAgent.TYPESCRIPT_REVIEWER,
                 ReviewAgent.PR_TEST_ANALYZER,
             ),
+            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.REQUIREMENTS: (
             (ReviewAgent.CODE_EXPLORER,),
             (ReviewAgent.CODE_REVIEWER,),
+            (ReviewAgent.OMISSION_AUDITOR,),
         ),
     }
 )

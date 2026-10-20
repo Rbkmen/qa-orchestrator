@@ -6,11 +6,13 @@ from pydantic import ValidationError
 
 from qa_orchestrator.contracts import (
     FinalReviewReport,
+    ProfileChangedPathCoverage,
     ProfileExecutionMetrics,
     ProfileReviewReport,
     ReviewAgent,
     ReviewBundle,
     ReviewContext,
+    ReviewCoverageLedger,
     ReviewFindingLocation,
     ReviewNote,
     ReviewRouteSelection,
@@ -38,6 +40,42 @@ def test_review_route_selection_rejects_group_order_mismatch():
         ReviewRouteSelection(
             routes=routes,
             execution_groups=[[ReviewAgent.CODE_REVIEWER], [ReviewAgent.CODE_EXPLORER]],
+        )
+
+
+def test_review_coverage_ledger_rejects_invalid_indexes_and_inclusion_claims():
+    with pytest.raises(ValidationError, match="unique and sorted"):
+        ProfileChangedPathCoverage(
+            profile=ReviewAgent.CODE_REVIEWER,
+            context_selection_recorded=True,
+            source_excerpt_included_path_indexes=(0, 0),
+        )
+
+    with pytest.raises(ValidationError, match="outside changed paths"):
+        ReviewCoverageLedger(
+            changed_paths_sha256="a" * 64,
+            changed_path_count=1,
+            head_source_excerpt_path_indexes=(1,),
+            profiles=(
+                ProfileChangedPathCoverage(
+                    profile=ReviewAgent.CODE_REVIEWER,
+                    context_selection_recorded=True,
+                ),
+            ),
+        )
+
+    with pytest.raises(ValidationError, match="have verified text"):
+        ReviewCoverageLedger(
+            changed_paths_sha256="a" * 64,
+            changed_path_count=1,
+            registered_head_source_path_indexes=(0,),
+            profiles=(
+                ProfileChangedPathCoverage(
+                    profile=ReviewAgent.CODE_REVIEWER,
+                    context_selection_recorded=True,
+                    source_excerpt_included_path_indexes=(0,),
+                ),
+            ),
         )
 
 

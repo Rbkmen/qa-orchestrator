@@ -453,6 +453,7 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
         missing_cases = sorted(set(cases) - {r["case_id"] for r in rows})
         gold_count = sum(r["gold_count"] for r in rows)
         selected_runs = runs_by_configuration[configuration]
+        elapsed_values = sorted(row["elapsed_ms"] for row in rows)
         stratified_gold_recall = {}
         for dimension in (
             "severity",
@@ -511,6 +512,11 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
             "median_elapsed_ms": (
                 statistics.median(r["elapsed_ms"] for r in rows) if rows else None
             ),
+            "p95_elapsed_ms": (
+                elapsed_values[math.ceil(0.95 * len(elapsed_values)) - 1]
+                if elapsed_values
+                else None
+            ),
             "input_tokens": sum(r["input_tokens"] for r in rows)
             if rows and all(r["input_tokens"] is not None for r in rows)
             else None,
@@ -547,6 +553,9 @@ def evaluate_quality_gate(
     min_evidence_validation_rate: float | None = None,
     min_location_validation_rate: float | None = None,
     max_mean_elapsed_ms: float | None = None,
+    max_p95_elapsed_ms: float | None = None,
+    min_stratum_recall: float | None = None,
+    min_stratum_gold_count: int = 5,
 ) -> dict:
     """Evaluate explicit quality and optional speed thresholds on a scored run."""
     if not isinstance(score, dict):
@@ -574,12 +583,21 @@ def evaluate_quality_gate(
     validate_rate(
         "min_location_validation_rate", min_location_validation_rate, optional=True
     )
+    validate_rate("min_stratum_recall", min_stratum_recall, optional=True)
+    if type(min_stratum_gold_count) is not int or min_stratum_gold_count < 1:
+        raise ValueError("min_stratum_gold_count must be a positive integer")
     if max_mean_elapsed_ms is not None and (
         type(max_mean_elapsed_ms) not in {int, float}
         or not math.isfinite(max_mean_elapsed_ms)
         or max_mean_elapsed_ms < 0
     ):
         raise ValueError("max_mean_elapsed_ms must be a non-negative finite number")
+    if max_p95_elapsed_ms is not None and (
+        type(max_p95_elapsed_ms) not in {int, float}
+        or not math.isfinite(max_p95_elapsed_ms)
+        or max_p95_elapsed_ms < 0
+    ):
+        raise ValueError("max_p95_elapsed_ms must be a non-negative finite number")
 
     configurations = score.get("configurations")
     if not isinstance(configurations, dict) or configuration_id not in configurations:
@@ -628,6 +646,13 @@ def evaluate_quality_gate(
         or mean_elapsed_ms < 0
     ):
         raise ValueError("mean_elapsed_ms must be a non-negative finite number")
+    p95_elapsed_ms = aggregate.get("p95_elapsed_ms")
+    if p95_elapsed_ms is not None and (
+        type(p95_elapsed_ms) not in {int, float}
+        or not math.isfinite(p95_elapsed_ms)
+        or p95_elapsed_ms < 0
+    ):
+        raise ValueError("p95_elapsed_ms must be a non-negative finite number")
 
     case_count = len(set(cases))
     observed = {
@@ -642,6 +667,8 @@ def evaluate_quality_gate(
         "evidence_validation_rate": evidence_validation_rate,
         "location_validation_rate": location_validation_rate,
         "mean_elapsed_ms": mean_elapsed_ms,
+        "p95_elapsed_ms": p95_elapsed_ms,
+        "stratum_checks": [],
     }
     reasons = []
     if not observed["coverage_complete"]:
@@ -682,6 +709,80 @@ def evaluate_quality_gate(
             f"mean elapsed time {elapsed if elapsed is not None else 'unavailable'} ms "
             f"exceeds {max_mean_elapsed_ms:g} ms"
         )
+    p95_elapsed = observed["p95_elapsed_ms"]
+    if max_p95_elapsed_ms is not None and (
+        p95_elapsed is None or p95_elapsed > max_p95_elapsed_ms
+    ):
+        reasons.append(
+            f"p95 elapsed time {p95_elapsed if p95_elapsed is not None else 'unavailable'} ms "
+            f"exceeds {max_p95_elapsed_ms:g} ms"
+        )
+    if min_stratum_recall is not None:
+        stratified = aggregate.get("gold_recall_by")
+        if not isinstance(stratified, dict):
+            reasons.append("stratified gold recall is unavailable")
+        else:
+            if any(
+                not isinstance(dimension, str) or not isinstance(buckets, dict)
+                for dimension, buckets in stratified.items()
+            ):
+                raise TypeError("gold_recall_by must map dimensions to bucket objects")
+            eligible = 0
+            for dimension, buckets in sorted(stratified.items()):
+                if any(
+                    not isinstance(value, str) or not isinstance(metrics, dict)
+                    for value, metrics in buckets.items()
+                ):
+                    raise TypeError("gold_recall_by buckets must be objects")
+                for value, metrics in sorted(buckets.items()):
+                    matched_count = metrics.get("matched_gold")
+                    gold_count = metrics.get("gold_count")
+                    recall_value = metrics.get("recall")
+                    if (
+                        type(matched_count) is not int
+                        or type(gold_count) is not int
+                        or matched_count < 0
+                        or gold_count < matched_count
+                    ):
+                        raise ValueError("gold_recall_by counts are invalid")
+                    if recall_value is not None and (
+                        type(recall_value) not in {int, float}
+                        or not math.isfinite(recall_value)
+                        or not 0 <= recall_value <= 1
+                    ):
+                        raise ValueError("gold_recall_by recall must be between 0 and 1")
+                    check = {
+                        "dimension": dimension,
+                        "value": value,
+                        "matched_gold": matched_count,
+                        "gold_count": gold_count,
+                        "recall": recall_value,
+                        "minimum_gold_count": min_stratum_gold_count,
+                    }
+                    if gold_count < min_stratum_gold_count:
+                        check["status"] = "insufficient_sample"
+                    else:
+                        eligible += 1
+                        check["status"] = "passed"
+                        if recall_value is None:
+                            check["status"] = "unavailable"
+                            reasons.append(
+                                f"{dimension}={value} recall is unavailable "
+                                f"for {gold_count} gold finding(s)"
+                            )
+                        elif recall_value < min_stratum_recall:
+                            check["status"] = "below_threshold"
+                            reasons.append(
+                                f"{dimension}={value} recall {recall_value:.4f} "
+                                f"is below {min_stratum_recall:.4f} "
+                                f"({matched_count}/{gold_count})"
+                            )
+                    observed["stratum_checks"].append(check)
+            if eligible == 0:
+                reasons.append(
+                    "no gold-recall stratum meets the minimum sample count "
+                    f"of {min_stratum_gold_count}"
+                )
     return {
         "schema_version": 1,
         "configuration_id": configuration_id,
@@ -695,6 +796,9 @@ def evaluate_quality_gate(
             "min_evidence_validation_rate": min_evidence_validation_rate,
             "min_location_validation_rate": min_location_validation_rate,
             "max_mean_elapsed_ms": max_mean_elapsed_ms,
+            "max_p95_elapsed_ms": max_p95_elapsed_ms,
+            "min_stratum_recall": min_stratum_recall,
+            "min_stratum_gold_count": min_stratum_gold_count,
         },
         "observed": observed,
         "reasons": reasons,
@@ -1307,6 +1411,9 @@ def benchmark_main(argv: list[str]) -> int:
     quality_gate.add_argument("--min-evidence-validation-rate", type=float)
     quality_gate.add_argument("--min-location-validation-rate", type=float)
     quality_gate.add_argument("--max-mean-elapsed-ms", type=float)
+    quality_gate.add_argument("--max-p95-elapsed-ms", type=float)
+    quality_gate.add_argument("--min-stratum-recall", type=float)
+    quality_gate.add_argument("--min-stratum-gold-count", default=5, type=int)
     quality_gate.add_argument("--output", type=Path)
     reliability = subparsers.add_parser("reliability", help="Score fresh repeated review runs")
     reliability.add_argument("--dataset", required=True, type=Path)
@@ -1358,6 +1465,9 @@ def benchmark_main(argv: list[str]) -> int:
             min_evidence_validation_rate=args.min_evidence_validation_rate,
             min_location_validation_rate=args.min_location_validation_rate,
             max_mean_elapsed_ms=args.max_mean_elapsed_ms,
+            max_p95_elapsed_ms=args.max_p95_elapsed_ms,
+            min_stratum_recall=args.min_stratum_recall,
+            min_stratum_gold_count=args.min_stratum_gold_count,
         )
     elif args.command == "import-reviewbench":
         payload = import_reviewbench(args.golden, args.repository).model_dump(mode="json")
