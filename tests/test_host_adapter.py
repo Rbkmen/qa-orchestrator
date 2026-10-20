@@ -189,7 +189,8 @@ async def test_attempt_ledger_reports_semaphore_wait(host_session):
     service, run_id = host_session(bundle="python_backend")
 
     async def execute(job):
-        await asyncio.sleep(0.01)
+        # Leave timing headroom for Windows timer granularity and runner load.
+        await asyncio.sleep(0.05)
         return report(job.profile)
 
     result = await HostReviewAdapter(
