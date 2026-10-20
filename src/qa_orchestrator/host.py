@@ -496,6 +496,11 @@ class HostReviewAdapter:
             raise ValueError("profile report rules digest mismatch")
         if set(report.reviewed_changed_paths) - set(context.changed_files):
             raise ValueError("profile report claims review of paths outside the bound change")
+        if any(
+            index >= len(context.diff_hunks)
+            for index in report.reviewed_diff_hunk_indexes
+        ):
+            raise ValueError("profile report claims review of a hunk outside the bound diff")
         validate_registered_locations(context, report.finding_candidates)
         validate_context_selection(context, report)
 

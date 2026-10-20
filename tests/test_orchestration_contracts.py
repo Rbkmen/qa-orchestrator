@@ -15,12 +15,14 @@ from qa_orchestrator.contracts import (
     ReviewBundle,
     ReviewContext,
     ReviewCoverageLedger,
+    ReviewDiffHunk,
     ReviewFindingLocation,
     ReviewInputSource,
     ReviewNote,
     ReviewRouteSelection,
     ReviewVerificationRecord,
     VerificationReceipt,
+    review_diff_hunk_inventory_sha256,
 )
 from qa_orchestrator.orchestration import (
     MODEL_POLICIES,
@@ -196,6 +198,67 @@ def test_review_coverage_ledger_rejects_invalid_indexes_and_inclusion_claims():
         )
 
 
+def test_review_coverage_ledger_accounts_for_every_bound_diff_hunk():
+    profile = ProfileChangedPathCoverage(
+        profile=ReviewAgent.CODE_REVIEWER,
+        context_selection_recorded=True,
+        reviewed_diff_hunk_indexes=(0,),
+    )
+    valid = ReviewCoverageLedger(
+        changed_paths_sha256="a" * 64,
+        changed_path_count=1,
+        profiles=(profile,),
+        diff_hunk_inventory_sha256="b" * 64,
+        diff_hunk_count=2,
+        unreviewed_diff_hunk_indexes=(1,),
+    )
+
+    assert valid.unreviewed_diff_hunk_indexes == (1,)
+    with pytest.raises(ValidationError, match="must match reviewer attestations"):
+        ReviewCoverageLedger(
+            changed_paths_sha256="a" * 64,
+            changed_path_count=1,
+            profiles=(profile,),
+            diff_hunk_inventory_sha256="b" * 64,
+            diff_hunk_count=2,
+            unreviewed_diff_hunk_indexes=(),
+        )
+
+
+def test_review_context_binds_ordered_hunk_inventory_to_exact_diff(
+    bound_review_context,
+):
+    hunk = ReviewDiffHunk(
+        index=0,
+        changed_path_index=0,
+        old_start=1,
+        old_count=1,
+        new_start=1,
+        new_count=2,
+        header="@@ -1 +1,2 @@",
+        sha256="c" * 64,
+    )
+    inventory_digest = review_diff_hunk_inventory_sha256(
+        bound_review_context.diff_sha256, (hunk,)
+    )
+    context = ReviewContext.model_validate(
+        {
+            **bound_review_context.model_dump(),
+            "diff_hunks": (hunk.model_dump(mode="json"),),
+            "diff_hunk_inventory_sha256": inventory_digest,
+        }
+    )
+
+    assert context.diff_hunks == (hunk,)
+    with pytest.raises(ValidationError, match="inventory digest does not match"):
+        ReviewContext.model_validate(
+            {
+                **context.model_dump(),
+                "diff_hunk_inventory_sha256": "d" * 64,
+            }
+        )
+
+
 def test_impact_coverage_rejects_duplicate_candidates_and_invalid_dispositions():
     candidate = {
         "candidate_id": "src.module:caller",
@@ -354,6 +417,8 @@ def test_legacy_completed_session_without_completion_mode_loads_as_legacy(
             **bound_review_context.model_dump(),
             "input_manifest": None,
             "neighbor_discovery_sha256": None,
+            "neighbor_discovery_candidate_count": None,
+            "neighbor_discovery_candidate_set_sha256": None,
         }
     )
     session = QaOrchestrationSession(
@@ -484,6 +549,8 @@ def test_legacy_review_context_without_input_manifest_round_trips(bound_review_c
             **bound_review_context.model_dump(),
             "input_manifest": None,
             "neighbor_discovery_sha256": None,
+            "neighbor_discovery_candidate_count": None,
+            "neighbor_discovery_candidate_set_sha256": None,
         }
     )
     legacy_json = legacy_context.model_dump_json()

@@ -112,7 +112,7 @@ The Python bundle starts its three primary profiles together, then runs `omissio
 
 ## Evidence and context
 
-A bound `ReviewContext` pins repository identity, full base/head commits, diff and packet SHA-256, changed paths, and evidence IDs. Optional registry metadata adds source hashes, coordinates, text availability and external locators. Binary and non-UTF-8 source stays hash-bound but cannot support source coordinates. Bound profiles submit structured reports; finding coordinates must be supported by cited, text-available head-source records when a registry is supplied.
+A bound `ReviewContext` pins repository identity, full base/head commits, diff and packet SHA-256, changed paths, and evidence IDs. Discovery can also bind its exact candidate set and a diff-ordered hunk inventory (up to 500 hunks) to the review. Partial or unavailable hunk inventory blocks strict completion. Profiles attest inspected hunk indexes; the report labels this as an attestation, not proof of reasoning. Changed-path coverage still accounts for binary and metadata-only changes that have no text hunks. Optional registry metadata adds source hashes, coordinates, text availability and external locators. Binary and non-UTF-8 source stays hash-bound but cannot support source coordinates. Bound profiles submit structured reports; finding coordinates must be supported by cited, text-available head-source records when a registry is supplied.
 
 Local utilities verify immutable Git bytes, hashes and coordinates. External requirements/runtime evidence remains unverified by the Git checker. The MCP server validates identifiers and citations; it does not read the raw packet.
 
@@ -172,7 +172,7 @@ Reads do not extend TTL. Deletion neither finalizes a review nor cancels host ex
 |---|---|
 | `qa-orch setup` / `setup --host-default` | Configure per-stage models or return to host settings |
 | `qa-orch config show` / `reload` | Inspect/validate the saved policy |
-| `qa-orch evidence discover` | Suggest pinned declarations, callers/callees, direct importers, contracts, tests, and bounded test-audit signals; reports traced relations and bounded omissions |
+| `qa-orch evidence discover` | Suggest pinned declarations, callers/callees, direct importers, contracts, tests, and bounded test-audit signals; reports traced relations and bounded omissions; `--bound-context` binds the exact candidate set and diff hunk inventory |
 | `qa-orch evidence build` / `verify` | Register/verify source and diff |
 | `qa-orch evidence pack` / `chunks` | Exact context packets/source chunks |
 | `qa-orch repo profile` / `audit-tests` | Profile tracked project/test/CI metadata and report source-anchored test-suite review candidates |

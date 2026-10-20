@@ -20,12 +20,15 @@ from qa_orchestrator.contracts import (
     ReviewContext,
     ReviewCoverageLedger,
     ReviewCriterionCoverage,
+    ReviewDiffHunk,
     ReviewFindingLocation,
     ReviewFindingSource,
     ReviewInputSource,
     ReviewNote,
     ReviewVerificationRecord,
+    impact_candidate_set_sha256,
     review_changed_paths_sha256,
+    review_diff_hunk_inventory_sha256,
 )
 from qa_orchestrator.refutation import make_refutation_check
 from qa_orchestrator.report import (
@@ -120,11 +123,20 @@ def _impact_ledger(**overrides):
     return ImpactCoverageLedger.model_validate({**payload, **overrides})
 
 
-def _context_with_discovery(bound_review_context, discovery_sha256="4" * 64):
+def _context_with_discovery(
+    bound_review_context,
+    discovery_sha256="4" * 64,
+    *,
+    candidates=(("src.module:caller", "caller", "src/module.py"),),
+):
     return ReviewContext.model_validate(
         {
             **bound_review_context.model_dump(),
             "neighbor_discovery_sha256": discovery_sha256,
+            "neighbor_discovery_candidate_count": len(candidates),
+            "neighbor_discovery_candidate_set_sha256": impact_candidate_set_sha256(
+                candidates
+            ),
         }
     )
 
@@ -140,6 +152,18 @@ def _impact_ledger_for_context(context, **overrides):
     )
     payload.update(overrides)
     return ImpactCoverageLedger.model_validate(payload)
+
+
+def _impact_candidate(identity):
+    candidate_id, relation, locator = identity
+    return {
+        "candidate_id": candidate_id,
+        "relation": relation,
+        "locator": locator,
+        "disposition": "reviewed",
+        "rationale": "The discovered relationship was checked against the change.",
+        "evidence_refs": ["E1"],
+    }
 
 
 def test_impact_coverage_status_is_scoped_and_conservative():
@@ -226,6 +250,67 @@ def test_impact_ledger_rejects_evidence_refs_outside_bound_context(bound_review_
         validate_final_report_context(report, context)
 
 
+@pytest.mark.parametrize(
+    "ledger_candidates",
+    [
+        (("N0001", "discovery_candidate", "src/one.py"),),
+        (
+            ("N0001", "discovery_candidate", "src/one.py"),
+            ("N0002", "discovery_candidate", "src/two.py"),
+            ("N0003", "discovery_candidate", "src/extra.py"),
+        ),
+        (
+            ("N0001", "discovery_candidate", "src/changed-locator.py"),
+            ("N0002", "discovery_candidate", "src/two.py"),
+        ),
+    ],
+    ids=("missing", "extra", "identity-changed"),
+)
+def test_impact_ledger_requires_exact_discovery_candidate_set(
+    bound_review_context, ledger_candidates
+):
+    expected = (
+        ("N0001", "discovery_candidate", "src/one.py"),
+        ("N0002", "discovery_candidate", "src/two.py"),
+    )
+    context = _context_with_discovery(bound_review_context, candidates=expected)
+    ledger = _impact_ledger_for_context(
+        context,
+        candidates=[_impact_candidate(identity) for identity in ledger_candidates],
+    )
+    report = FinalReviewReport(
+        summary="Reviewed impact candidates.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        impact_coverage=ledger,
+    )
+
+    with pytest.raises(ValueError, match="exactly match discovery"):
+        validate_final_report_context(report, context)
+
+
+def test_impact_ledger_closes_only_after_exact_discovery_set_is_disposed(
+    bound_review_context,
+):
+    expected = (
+        ("N0001", "discovery_candidate", "src/one.py"),
+        ("N0002", "discovery_candidate", "src/two.py"),
+    )
+    context = _context_with_discovery(bound_review_context, candidates=expected)
+    ledger = _impact_ledger_for_context(
+        context,
+        candidates=[_impact_candidate(identity) for identity in expected],
+    )
+    report = FinalReviewReport(
+        summary="Reviewed every discovered impact candidate.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        impact_coverage=ledger,
+    )
+
+    validate_final_report_context(report, context)
+
+    assert impact_coverage_status(ledger) == "closed"
+
+
 def test_report_never_calls_capped_discovery_closed(bound_review_context):
     context = _context_with_discovery(bound_review_context)
     ledger = _impact_ledger_for_context(
@@ -290,7 +375,14 @@ def test_impact_rationale_is_markdown_escaped(bound_review_context):
 
 
 def test_impact_locator_is_markdown_escaped(bound_review_context):
-    context = _context_with_discovery(bound_review_context)
+    candidate_identity = (
+        "src.module:caller",
+        "caller",
+        "<script>alert(1)</script>.py",
+    )
+    context = _context_with_discovery(
+        bound_review_context, candidates=(candidate_identity,)
+    )
     ledger = _impact_ledger_for_context(
         context,
         candidates=[
@@ -682,6 +774,9 @@ def test_renderer_maps_host_coverage_ledger_to_bound_changed_paths(bound_review_
                     ),
                 ),
             ),
+            diff_hunk_inventory_sha256=context.diff_hunk_inventory_sha256,
+            diff_hunk_count=len(context.diff_hunks),
+            unreviewed_diff_hunk_indexes=(),
         ),
     )
 
@@ -710,9 +805,112 @@ def test_renderer_maps_host_coverage_ledger_to_bound_changed_paths(bound_review_
         validate_final_report_context(report, bound_review_context)
 
 
+@pytest.mark.parametrize(
+    ("reviewed_indexes", "expected_coverage", "expected_unreviewed"),
+    (((), "0/1", "0"), ((0,), "1/1", None)),
+)
+def test_report_accounts_for_bound_diff_hunk_attestations(
+    bound_review_context, reviewed_indexes, expected_coverage, expected_unreviewed
+):
+    hunk = ReviewDiffHunk(
+        index=0,
+        changed_path_index=0,
+        old_start=10,
+        old_count=1,
+        new_start=10,
+        new_count=1,
+        header="@@ -10 +10 @@",
+        sha256="a" * 64,
+    )
+    context = bound_review_context.model_copy(
+        update={
+            "diff_hunks": (hunk,),
+            "diff_hunk_inventory_sha256": review_diff_hunk_inventory_sha256(
+                bound_review_context.diff_sha256, (hunk,)
+            ),
+        }
+    )
+    ledger = ReviewCoverageLedger(
+        changed_paths_sha256=review_changed_paths_sha256(context.changed_files),
+        changed_path_count=len(context.changed_files),
+        profiles=(
+            ProfileChangedPathCoverage(
+                profile=ReviewAgent.CODE_REVIEWER,
+                context_selection_recorded=True,
+                reviewer_attested_path_indexes=(0,),
+                reviewed_diff_hunk_indexes=reviewed_indexes,
+            ),
+        ),
+        diff_hunk_inventory_sha256=context.diff_hunk_inventory_sha256,
+        diff_hunk_count=1,
+        unreviewed_diff_hunk_indexes=() if reviewed_indexes else (0,),
+    )
+    report = FinalReviewReport(
+        summary="Reviewed the changed hunk.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        coverage_ledger=ledger,
+    )
+
+    rendered = render_final_report(report, context=context)
+    gaps = evidence_module.review_completion_gaps(context, report)
+
+    assert f"Diff hunk coverage: {expected_coverage} hunk indexes" in rendered
+    if expected_unreviewed is None:
+        assert "Unreviewed diff hunk indexes:" not in rendered
+        assert not any(gap.startswith("unreviewed diff hunk indexes:") for gap in gaps)
+    else:
+        assert f"Unreviewed diff hunk indexes: {expected_unreviewed}" in rendered
+        assert f"unreviewed diff hunk indexes: {expected_unreviewed}" in gaps
+
+
+def test_strict_completion_requires_a_bound_diff_hunk_inventory(bound_review_context):
+    payload = bound_review_context.model_dump()
+    payload.pop("diff_hunks")
+    payload.pop("diff_hunk_inventory_sha256")
+    context = ReviewContext.model_validate(payload)
+    report = FinalReviewReport(
+        summary="Review report without a complete diff inventory.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        coverage_ledger=ReviewCoverageLedger(
+            changed_paths_sha256=review_changed_paths_sha256(context.changed_files),
+            changed_path_count=len(context.changed_files),
+            profiles=(
+                ProfileChangedPathCoverage(
+                    profile=ReviewAgent.CODE_REVIEWER,
+                    context_selection_recorded=True,
+                ),
+            ),
+        ),
+    )
+
+    gaps = evidence_module.review_completion_gaps(context, report)
+
+    assert "complete diff hunk inventory is not bound to the review" in gaps
+
+
+def test_new_completion_requires_hunk_ledger_but_legacy_restore_can_omit_it(
+    bound_review_context,
+):
+    report = FinalReviewReport(
+        summary="Report without a hunk ledger.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+    )
+
+    strict_gaps = evidence_module.review_completion_gaps(bound_review_context, report)
+    legacy_gaps = evidence_module.review_completion_gaps(
+        bound_review_context,
+        report,
+        allow_legacy_missing_hunk_ledger=True,
+    )
+
+    assert "diff hunk coverage ledger does not match the bound inventory" in strict_gaps
+    assert not any("diff hunk" in gap for gap in legacy_gaps)
+
+
 def _input_source(
     source_id,
     *,
+    kind="jira_issue",
     required=True,
     retrieval_status="complete",
     pagination_status="complete",
@@ -721,7 +919,7 @@ def _input_source(
 ):
     return ReviewInputSource(
         source_id=source_id,
-        kind="jira_issue",
+        kind=kind,
         locator=f"jira:{source_id}",
         required=required,
         retrieval_status=retrieval_status,
@@ -735,6 +933,16 @@ def _context_with_input_sources(bound_review_context, sources):
     return ReviewContext.model_validate(
         {
             **bound_review_context.model_dump(),
+            "input_manifest": {"sources": tuple(sources)},
+        }
+    )
+
+
+def _context_with_changed_paths(bound_review_context, changed_files, sources):
+    return ReviewContext.model_validate(
+        {
+            **bound_review_context.model_dump(),
+            "changed_files": tuple(changed_files),
             "input_manifest": {"sources": tuple(sources)},
         }
     )
@@ -763,6 +971,170 @@ def test_report_renders_incomplete_required_input_as_partial(bound_review_contex
     assert "JIRA-1" in rendered
     assert "pagination incomplete" in rendered
     assert "extraction partial" in rendered
+
+
+def test_api_scope_requires_contract_and_consumer_map(bound_review_context):
+    context = _context_with_changed_paths(
+        bound_review_context,
+        ("src/api/checkout.py",),
+        (_input_source("MR-1"),),
+    )
+
+    summary = evidence_module.input_manifest_completeness(context)
+
+    assert summary["scope_policy_version"] == 1
+    assert summary["scope_categories"] == ["api"]
+    assert summary["scope_required_source_kinds"] == [
+        "api_consumer_map",
+        "api_contract",
+    ]
+    assert summary["missing_scope_source_kinds"] == [
+        "api_consumer_map",
+        "api_contract",
+    ]
+    assert summary["status"] == "partial"
+    gaps = evidence_module.review_completion_gaps(
+        context,
+        FinalReviewReport(
+            summary="Scope sources are missing.",
+            profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        ),
+    )
+    assert any("required scope source kinds missing from manifest" in gap for gap in gaps)
+
+
+def test_missing_manifest_is_partial_when_changed_paths_define_requirements(
+    bound_review_context,
+):
+    context = ReviewContext.model_validate(
+        {
+            **bound_review_context.model_dump(),
+            "changed_files": ("src/api/checkout.py",),
+            "input_manifest": None,
+        }
+    )
+
+    summary = evidence_module.input_manifest_completeness(context)
+
+    assert summary["status"] == "partial"
+    assert summary["missing_scope_source_kinds"] == [
+        "api_consumer_map",
+        "api_contract",
+    ]
+
+
+def test_scope_requirements_need_required_complete_sources(bound_review_context):
+    context = _context_with_changed_paths(
+        bound_review_context,
+        ("src/api/checkout.py",),
+        (
+            _input_source("MR-1"),
+            _input_source("API-CONTRACT", kind="api_contract", required=False),
+            _input_source(
+                "API-CONSUMERS",
+                kind="api_consumer_map",
+                retrieval_status="failed",
+            ),
+        ),
+    )
+
+    summary = evidence_module.input_manifest_completeness(context)
+
+    assert summary["missing_scope_source_kinds"] == ["api_contract"]
+    assert summary["status"] == "partial"
+    assert summary["source_counts"]["incomplete_required"] == 1
+
+
+def test_complete_api_scope_requires_both_boundaries(bound_review_context):
+    context = _context_with_changed_paths(
+        bound_review_context,
+        ("src/api/checkout.py",),
+        (
+            _input_source("MR-1"),
+            _input_source("API-CONTRACT", kind="api_contract"),
+            _input_source("API-CONSUMERS", kind="api_consumer_map"),
+        ),
+    )
+
+    summary = evidence_module.input_manifest_completeness(context)
+
+    assert summary["missing_scope_source_kinds"] == []
+    assert summary["status"] == "complete"
+
+
+def test_scope_policy_unions_database_event_deployment_and_service_requirements(
+    bound_review_context,
+):
+    context = _context_with_changed_paths(
+        bound_review_context,
+        (
+            "db/migrations/001_add_status.sql",
+            "events/deposit_published.py",
+            "deploy/values.yaml",
+            "services/wallet/client.py",
+        ),
+        (_input_source("MR-1"),),
+    )
+
+    summary = evidence_module.input_manifest_completeness(context)
+
+    assert summary["scope_categories"] == [
+        "database",
+        "deployment",
+        "event",
+        "service_boundary",
+    ]
+    assert summary["scope_required_source_kinds"] == [
+        "database_consumer_map",
+        "database_schema",
+        "deployment_manifest",
+        "event_consumer_map",
+        "event_contract",
+        "service_dependency_map",
+    ]
+    assert summary["status"] == "partial"
+
+
+def test_scope_policy_requires_config_authorization_and_job_sources(bound_review_context):
+    context = _context_with_changed_paths(
+        bound_review_context,
+        (
+            "config/runtime.yaml",
+            "auth/roles.py",
+            "jobs/cleanup.py",
+        ),
+        (_input_source("MR-1"),),
+    )
+
+    summary = evidence_module.input_manifest_completeness(context)
+
+    assert summary["scope_categories"] == ["authorization", "config", "job"]
+    assert summary["scope_required_source_kinds"] == [
+        "authorization_consumer_map",
+        "authorization_policy",
+        "configuration_contract",
+        "flag_consumer_map",
+        "job_registration",
+        "trigger_consumer_map",
+    ]
+
+
+def test_input_report_lists_scope_policy_gaps(bound_review_context):
+    context = _context_with_changed_paths(
+        bound_review_context,
+        ("src/api/checkout.py",),
+        (_input_source("MR-1"),),
+    )
+    report = FinalReviewReport(
+        summary="Reviewed the API change.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+    )
+
+    rendered = render_final_report(report, context=context)
+
+    assert '- **Path-derived scope:** policy v1; `"api"`' in rendered
+    assert '`"api_consumer_map"`' in rendered
+    assert '`"api_contract"`' in rendered
 
 
 def test_report_marks_missing_input_manifest_unknown(bound_review_context):

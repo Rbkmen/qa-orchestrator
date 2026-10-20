@@ -263,7 +263,7 @@ def test_packet_marks_binary_source_as_omitted_and_keeps_raw_hash(pinned_evidenc
         select_context,
         validate_packet_context,
     )
-    from qa_orchestrator.contracts import ReviewContext
+    from qa_orchestrator.contracts import ReviewContext, review_diff_hunk_inventory_sha256
 
     repo, _, context, _ = pinned_evidence
     binary_path = repo / "assets/logo.png"
@@ -285,6 +285,9 @@ def test_packet_marks_binary_source_as_omitted_and_keeps_raw_hash(pinned_evidenc
             **context.model_dump(),
             "head_sha": head,
             "diff_sha256": hashlib.sha256(diff).hexdigest(),
+            "diff_hunk_inventory_sha256": review_diff_hunk_inventory_sha256(
+                hashlib.sha256(diff).hexdigest(), context.diff_hunks
+            ),
             "changed_files": ("src/api.py", "assets/logo.png"),
             "evidence_refs": ("S1", "B1", "D1"),
         }
@@ -402,6 +405,7 @@ def test_deleted_file_uses_verified_base_source(pinned_evidence):
     import subprocess
 
     from qa_orchestrator.context_pack import build_context_packet, validate_packet_context
+    from qa_orchestrator.contracts import review_diff_hunk_inventory_sha256
 
     repo, _, context, definitions = pinned_evidence
     base = context.head_sha
@@ -437,7 +441,14 @@ def test_deleted_file_uses_verified_base_source(pinned_evidence):
         ]
     )
     context = context.model_copy(
-        update={"base_sha": base, "head_sha": head, "diff_sha256": hashlib.sha256(diff).hexdigest()}
+        update={
+            "base_sha": base,
+            "head_sha": head,
+            "diff_sha256": hashlib.sha256(diff).hexdigest(),
+            "diff_hunk_inventory_sha256": review_diff_hunk_inventory_sha256(
+                hashlib.sha256(diff).hexdigest(), context.diff_hunks
+            ),
+        }
     )
     definitions[0]["revision"], definitions[1]["revision"] = base, head
     context = register_evidence(context, definitions, repo)

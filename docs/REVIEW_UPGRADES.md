@@ -149,9 +149,16 @@ The output schema requires an empty `finding_candidates` array for
 It also requires `reviewed_changed_paths`: list every bound path whose supplied
 diff/source evidence was inspected, including paths with no finding. The host
 adds a `coverage_gap` for every unlisted path and rejects paths outside the bound
-change. This is an executor attestation, not independent proof of review.
-Other profiles retain their existing finding limit. Executor identity v11
-invalidates checkpoints produced under the previous report schema and prompt.
+change. When discovery binds a complete hunk inventory, the prompt maps indexes
+to hunks in exact diff order and the schema requires `reviewed_diff_hunk_indexes`.
+The host rejects out-of-range indexes and blocks strict completion while any
+bound text hunk lacks a non-explorer reviewer attestation. Inventories are capped
+at 500; an incomplete parse or larger diff is visible and cannot be finalized as
+complete. Binary and metadata-only changes may have no hunks and remain covered
+by changed-path checks. Path and hunk indexes are executor attestations, not
+independent proof of reasoning. Other profiles retain their existing finding
+limit. Executor identity v12 invalidates checkpoints produced under the previous
+report schema and prompt.
 
 Each call checks the packet hash, accounts for the complete prompt envelope, and
 keeps the combined prompt within 1,000,000 bytes before launch. It starts a fresh temporary
@@ -264,6 +271,23 @@ For repeated packet construction, pass the same `PinnedSourceCache` to
 and 128 entries, and validates each extracted fragment against the registry.
 Dirty worktree files are never read. There is no persistent learned review memory.
 
+### Diff-derived input requirements
+
+Input completeness policy v1 derives required source kinds from changed paths.
+API or contract paths require `api_contract` and `api_consumer_map`; database
+paths require `database_schema` and `database_consumer_map`; event paths require
+`event_contract` and `event_consumer_map`; job paths require `job_registration`
+and `trigger_consumer_map`; config paths require `configuration_contract` and
+`flag_consumer_map`; authorization paths require `authorization_policy` and
+`authorization_consumer_map`; deployment paths require `deployment_manifest` and
+`service_dependency_map`; service/client/integration/adapter paths require
+`service_dependency_map`. These source kinds must be declared as required in the
+host manifest and retrieved, paginated, and extracted completely. Missing or
+unavailable boundary evidence keeps the review partial; the report lists the
+path categories and exact missing kinds. Path classification is conservative
+and heuristic, so this policy exposes required evidence without claiming that
+it found every runtime consumer.
+
 ## 9. Neighbor evidence suggestions
 
 Before binding a review context, scan pinned changed symbols for likely callers,
@@ -272,8 +296,15 @@ contract files and tests with:
 ```sh
 qa-orch evidence discover --context registered-context.json \
   --repository /path/to/repo --max-candidates 50 --codegraph \
-  --output neighbor-candidates.json
+  --output neighbor-candidates.json --bound-context discovered-context.json
 ```
+
+Use `discovered-context.json` for the review. It binds the full discovery digest,
+candidate count, and a digest of every `(candidate_id, relation, locator)` tuple.
+The final impact ledger must dispose of that exact set; missing, extra, or altered
+candidate identities cannot be reported as closed. The bound context is emitted
+from the same verified discovery payload, so a separately copied candidate list
+cannot silently drift.
 
 `--codegraph` adds caller and callee edges only when the local CodeGraph index is
 initialized, complete, clean, and bound to the same repository checkout as the review head.

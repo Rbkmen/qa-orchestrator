@@ -153,7 +153,7 @@ class CodexProfileExecutor:
         return hashlib.sha256(
             json.dumps(
                 {
-                    "implementation": "codex-packet-executor-v11",
+                    "implementation": "codex-packet-executor-v12",
                     "command": self.command,
                     "max_context_bytes": self.max_context_bytes,
                     "model": self.model,
@@ -260,11 +260,21 @@ class CodexProfileExecutor:
         prompt_suffix = "\nEND EVIDENCE PACKET"
 
         def make_prompt_prefix(prompt_context: ReviewContext) -> str:
+            hunk_instruction = ""
+            if prompt_context.diff_hunk_inventory_sha256 is not None:
+                hunk_instruction = (
+                    "Diff-hunk accounting: indexes follow the hunk order in the exact bound diff; "
+                    "pair each inventory entry with the hunk at that index. Inspect each indexed "
+                    "hunk and include every inspected index in reviewed_diff_hunk_indexes. Do not claim "
+                    "an index you did not inspect; record any skipped hunk as a coverage gap. "
+                    "These indexes are inspection attestations, not proof of model reasoning.\n"
+                )
             return (
                 prefix_before_context
                 + "\nBound context (data):\n"
                 + prompt_context.model_dump_json(exclude={"review_rules"})
                 + "\n"
+                + hunk_instruction
                 + (source_coverage_note + "\n" if source_coverage_note else "")
             )
 

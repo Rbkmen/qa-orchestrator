@@ -15,10 +15,13 @@ from qa_orchestrator.contracts import (
     ReviewAgent,
     ReviewContext,
     ReviewFindingCandidate,
+    impact_candidate_set_sha256,
+    review_diff_hunk_inventory_sha256,
 )
 from qa_orchestrator.evidence import (
     _neighbor_categories,
     _path_tokens,
+    bind_neighbor_discovery,
     discover_neighbor_evidence,
     evidence_main,
     neighbor_discovery_sha256,
@@ -79,6 +82,12 @@ def pinned_evidence(tmp_path):
             )
         },
         neighbor_discovery_sha256="4" * 64,
+        neighbor_discovery_candidate_count=0,
+        neighbor_discovery_candidate_set_sha256=impact_candidate_set_sha256(()),
+        diff_hunks=(),
+        diff_hunk_inventory_sha256=review_diff_hunk_inventory_sha256(
+            hashlib.sha256(diff).hexdigest(), ()
+        ),
     )
     definitions = [
         {
@@ -183,7 +192,15 @@ def test_content_packet_and_diff_mismatches_are_rejected(pinned_evidence):
     packet.write_bytes(b"different packet")
     with pytest.raises(ValueError, match="Packet hash mismatch"):
         verify_evidence(bound, repository, packet)
-    wrong_diff = ReviewContext.model_validate({**context.model_dump(), "diff_sha256": "f" * 64})
+    wrong_diff = ReviewContext.model_validate(
+        {
+            **context.model_dump(),
+            "diff_sha256": "f" * 64,
+            "diff_hunk_inventory_sha256": review_diff_hunk_inventory_sha256(
+                "f" * 64, context.diff_hunks
+            ),
+        }
+    )
     with pytest.raises(ValueError, match="bound diff hash"):
         register_evidence(wrong_diff, definitions, repository)
 
@@ -215,6 +232,9 @@ def test_legacy_source_record_without_text_status_keeps_previous_location_behavi
     pinned_evidence,
 ):
     repository, _, context, definitions = pinned_evidence
+    context = bind_neighbor_discovery(
+        context, discover_neighbor_evidence(context, repository)
+    )
     bound = register_evidence(context, definitions, repository)
     legacy = ReviewContext.model_validate_json(bound.model_dump_json())
     record = legacy.evidence_registry[0].model_dump(mode="python")
@@ -345,6 +365,9 @@ def test_binary_source_cannot_support_a_claimed_source_location(pinned_evidence)
             **context.model_dump(),
             "head_sha": head,
             "diff_sha256": hashlib.sha256(diff).hexdigest(),
+            "diff_hunk_inventory_sha256": review_diff_hunk_inventory_sha256(
+                hashlib.sha256(diff).hexdigest(), context.diff_hunks
+            ),
             "changed_files": changed_files,
             "evidence_refs": ("S1", "B1", "D1"),
         }
@@ -622,6 +645,18 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
 
     monkeypatch.setattr(evidence_module.subprocess, "run", fake_run)
     manifest = discover_neighbor_evidence(context, repository, use_codegraph=True)
+    hunk_inventory = manifest["diff_hunk_inventory"]
+    assert manifest["schema_version"] == 2
+    assert hunk_inventory["status"] == "complete"
+    assert hunk_inventory["count"] == 1
+    assert hunk_inventory["hunks"][0]["changed_path_index"] == 0
+    assert hunk_inventory["hunks"][0]["old_start"] == 1
+    assert hunk_inventory["hunks"][0]["new_start"] == 1
+    bound_with_discovery = bind_neighbor_discovery(context, manifest)
+    assert bound_with_discovery.diff_hunk_inventory_sha256 == hunk_inventory[
+        "inventory_sha256"
+    ]
+    assert len(bound_with_discovery.diff_hunks) == 1
     assert manifest["codegraph"]["status"] == "ready"
     assert manifest["codegraph"]["symbols_checked"] == 1
     assert manifest["codegraph"]["caller_queries_checked"] == 1
@@ -679,6 +714,7 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
 
     context_path = tmp_path / "context.json"
     output_path = tmp_path / "neighbors.json"
+    bound_context_path = tmp_path / "bound-context.json"
     context_path.write_text(context.model_dump_json(), encoding="utf-8")
     assert evidence_main(
         [
@@ -690,11 +726,33 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
             "--codegraph",
             "--output",
             str(output_path),
+            "--bound-context",
+            str(bound_context_path),
         ]
     ) == 0
     cli_manifest = json.loads(output_path.read_text(encoding="utf-8"))
     assert len(cli_manifest["candidate_records"]) == 3
     assert cli_manifest["codegraph"]["status"] == "index_not_current"
+    assert cli_manifest["candidate_count"] == 3
+    assert cli_manifest["candidate_set_sha256"] == impact_candidate_set_sha256(
+        tuple(
+            (item["candidate_id"], item["relation"], item["locator"])
+            for item in cli_manifest["candidate_manifest"]
+        )
+    )
+    bound_context = ReviewContext.model_validate_json(
+        bound_context_path.read_bytes()
+    )
+    assert bound_context.neighbor_discovery_sha256 == cli_manifest["discovery_sha256"]
+    assert bound_context.neighbor_discovery_candidate_count == 3
+    assert bound_context.neighbor_discovery_candidate_set_sha256 == cli_manifest[
+        "candidate_set_sha256"
+    ]
+    assert bound_context.diff_hunk_inventory_sha256 == cli_manifest[
+        "diff_hunk_inventory"
+    ]["inventory_sha256"]
+    assert len(bound_context.diff_hunks) == cli_manifest["diff_hunk_inventory"]["count"]
+    assert bind_neighbor_discovery(context, cli_manifest) == bound_context
 
 
 def test_discovery_reports_unavailable_optional_codegraph(pinned_evidence, monkeypatch):
@@ -709,6 +767,112 @@ def test_discovery_reports_unavailable_optional_codegraph(pinned_evidence, monke
     assert manifest["codegraph"]["caller_candidates"] == []
     assert manifest["exhaustive"] is False
     assert manifest["discovery_sha256"] == neighbor_discovery_sha256(manifest)
+
+
+def test_diff_hunk_inventory_handles_add_delete_rename_and_binary_paths(tmp_path):
+    import qa_orchestrator.evidence as evidence_module
+
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args])
+
+    git("init", "--quiet")
+    (repository / "rename").mkdir()
+    (repository / "rename/old.py").write_text(
+        "def run():\n    return 1\n\n\ndef stable():\n    return True\n",
+        encoding="utf-8",
+    )
+    (repository / "deleted.py").write_text("def removed():\n    return 1\n", encoding="utf-8")
+    (repository / "binary.dat").write_bytes(b"old\x00bytes")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").decode().strip()
+
+    git("mv", "rename/old.py", "rename/new.py")
+    (repository / "rename/new.py").write_text(
+        "def run():\n    return 2\n\n\ndef stable():\n    return True\n",
+        encoding="utf-8",
+    )
+    (repository / "deleted.py").unlink()
+    (repository / "added.py").write_text("def added():\n    return 1\n", encoding="utf-8")
+    (repository / "binary.dat").write_bytes(b"new\x00bytes")
+    git("add", "-A")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "head")
+    head = git("rev-parse", "HEAD").decode().strip()
+    diff = git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head, "--")
+    changed_files = tuple(
+        path.decode("utf-8")
+        for path in git("diff", "--name-only", "-z", base, head, "--").split(b"\0")
+        if path
+    )
+    context = ReviewContext(
+        repository="github.com/example/repo",
+        base_sha=base,
+        head_sha=head,
+        diff_sha256=hashlib.sha256(diff).hexdigest(),
+        evidence_packet_sha256=hashlib.sha256(b"packet").hexdigest(),
+        changed_files=changed_files,
+        evidence_refs=("D1",),
+    )
+
+    inventory = evidence_module._diff_hunk_inventory(context, diff)
+
+    assert inventory["status"] == "complete"
+    paths = {
+        context.changed_files[hunk["changed_path_index"]]
+        for hunk in inventory["hunks"]
+    }
+    assert "added.py" in paths
+    assert "deleted.py" in paths
+    assert "rename/new.py" in paths
+    assert "binary.dat" not in paths
+    assert inventory["count"] == len(inventory["hunks"])
+
+
+def test_diff_hunk_inventory_fails_closed_on_parse_error_and_limit():
+    import qa_orchestrator.evidence as evidence_module
+
+    malformed_diff = (
+        b"diff --git a/src/service.py b/src/service.py\n"
+        b"--- a/src/service.py\n"
+        b"+++ b/src/service.py\n"
+        b"@@ malformed @@\n"
+    )
+    context = ReviewContext(
+        repository="github.com/example/repo",
+        base_sha="0" * 40,
+        head_sha="1" * 40,
+        diff_sha256=hashlib.sha256(malformed_diff).hexdigest(),
+        evidence_packet_sha256=hashlib.sha256(b"packet").hexdigest(),
+        changed_files=("src/service.py",),
+        evidence_refs=("D1",),
+    )
+
+    malformed = evidence_module._diff_hunk_inventory(context, malformed_diff)
+
+    assert malformed["status"] == "partial"
+    assert malformed["reason"] == "diff_hunk_parse_failed"
+    assert malformed["hunks"] == []
+    assert malformed["inventory_sha256"] is None
+
+    many_hunks = (
+        b"diff --git a/src/service.py b/src/service.py\n"
+        b"--- a/src/service.py\n"
+        b"+++ b/src/service.py\n"
+        + b"@@ -1 +1 @@\n-old\n+new\n" * 501
+    )
+    over_limit_context = context.model_copy(
+        update={"diff_sha256": hashlib.sha256(many_hunks).hexdigest()}
+    )
+    over_limit = evidence_module._diff_hunk_inventory(over_limit_context, many_hunks)
+
+    assert over_limit["status"] == "partial"
+    assert over_limit["reason"] == "diff_hunk_limit_reached"
+    assert over_limit["count_at_least"] == 501
+    assert over_limit["hunks"] == []
+    assert over_limit["inventory_sha256"] is None
 
 
 def test_discovery_digest_is_stable_and_changes_when_omissions_change():

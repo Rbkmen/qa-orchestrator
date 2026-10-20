@@ -462,9 +462,29 @@ def _build_review_coverage_ledger(
                 executor_input_receipt_verified=input_receipt_verified,
                 source_excerpt_included_path_indexes=included_indexes,
                 reviewer_attested_path_indexes=attested_indexes,
+                reviewed_diff_hunk_indexes=(
+                    report.reviewed_diff_hunk_indexes if report is not None else ()
+                ),
                 execution_metrics=report.execution_metrics if report is not None else None,
             )
         )
+
+    diff_hunk_count = (
+        len(context.diff_hunks)
+        if context.diff_hunk_inventory_sha256 is not None
+        else None
+    )
+    reviewed_hunks = {
+        index
+        for profile in profile_coverage
+        if profile.profile is not ReviewAgent.CODE_EXPLORER
+        for index in profile.reviewed_diff_hunk_indexes
+    }
+    unreviewed_hunks = (
+        tuple(index for index in range(diff_hunk_count) if index not in reviewed_hunks)
+        if diff_hunk_count is not None
+        else ()
+    )
 
     return ReviewCoverageLedger(
         changed_paths_sha256=review_changed_paths_sha256(context.changed_files),
@@ -473,6 +493,9 @@ def _build_review_coverage_ledger(
         head_source_excerpt_path_indexes=available_indexes,
         head_source_text_unavailable_path_indexes=unavailable_indexes,
         profiles=tuple(profile_coverage),
+        diff_hunk_inventory_sha256=context.diff_hunk_inventory_sha256,
+        diff_hunk_count=diff_hunk_count,
+        unreviewed_diff_hunk_indexes=unreviewed_hunks,
     )
 
 
@@ -641,7 +664,14 @@ class QaOrchestrationSession(BaseModel):
             and self.review_context is not None
             and self.final_review_report is not None
         ):
-            gaps = review_completion_gaps(self.review_context, self.final_review_report)
+            # Older completed artifacts predate hunk ledgers; new finishes always write one.
+            gaps = review_completion_gaps(
+                self.review_context,
+                self.final_review_report,
+                allow_legacy_missing_hunk_ledger=(
+                    self.final_review_report.coverage_ledger is None
+                ),
+            )
             if gaps:
                 raise ValueError(
                     "strict completed session has incomplete review coverage: "

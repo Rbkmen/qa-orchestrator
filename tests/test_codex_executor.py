@@ -24,6 +24,8 @@ def test_output_schema_enforces_profile_finding_scope(profile):
     assert schema["properties"]["coverage_gaps"]["maxItems"] == 97
     assert schema["properties"]["reviewed_changed_paths"]["type"] == "array"
     assert "reviewed_changed_paths" in schema["required"]
+    assert schema["properties"]["reviewed_diff_hunk_indexes"]["type"] == "array"
+    assert "reviewed_diff_hunk_indexes" in schema["required"]
     assert schema["properties"]["profile"]["enum"] == [profile.value]
 
 
@@ -119,6 +121,55 @@ async def test_executor_launches_readonly_and_validates_actual_process_output(ex
     assert result.profile == "python_reviewer"
     assert result.execution_metrics.input_tokens == 12
     assert result.execution_metrics.output_tokens == 5
+
+
+async def test_executor_prompts_for_and_accepts_bound_diff_hunk_attestations(executor_input):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.contracts import ReviewDiffHunk, review_diff_hunk_inventory_sha256
+
+    packet, job, script = executor_input
+    context = job.session.review_context
+    assert context is not None
+    hunk = ReviewDiffHunk(
+        index=0,
+        changed_path_index=0,
+        old_start=1,
+        old_count=1,
+        new_start=1,
+        new_count=1,
+        header="@@ -1 +1 @@",
+        sha256="a" * 64,
+    )
+    context = context.model_copy(
+        update={
+            "diff_hunks": (hunk,),
+            "diff_hunk_inventory_sha256": review_diff_hunk_inventory_sha256(
+                context.diff_sha256, (hunk,)
+            ),
+        }
+    )
+    job = replace(
+        job,
+        session=job.session.model_copy(update={"review_context": context}),
+    )
+    source = script.read_text(encoding="utf-8").replace(
+        "prompt=sys.stdin.read()",
+        "schema=json.loads(pathlib.Path(a[a.index('--output-schema')+1]).read_text())\n"
+        "assert schema['properties']['reviewed_diff_hunk_indexes']['type']=='array'\n"
+        "assert 'reviewed_diff_hunk_indexes' in schema['required']\n"
+        "prompt=sys.stdin.read()\n"
+        "assert 'Diff-hunk accounting' in prompt\n"
+        "assert 'indexes follow the hunk order in the exact bound diff' in prompt\n"
+        "assert 'reviewed_diff_hunk_indexes' in prompt",
+    ).replace(
+        "'reviewed_changed_paths':['src/service.py']",
+        "'reviewed_changed_paths':['src/service.py'], 'reviewed_diff_hunk_indexes':[0]",
+    )
+    script.write_text(source, encoding="utf-8")
+
+    report = await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(job)
+
+    assert report.reviewed_diff_hunk_indexes == (0,)
 
 
 @pytest.mark.parametrize(
@@ -299,7 +350,11 @@ async def test_executor_selects_context_and_binds_actual_subset_hash(executor_in
     from qa_orchestrator import codex_executor
     from qa_orchestrator.codex_executor import CodexProfileExecutor
     from qa_orchestrator.context_pack import ContextFragment, ContextPacket
-    from qa_orchestrator.contracts import EvidenceRecord, ProfileAttemptObservation
+    from qa_orchestrator.contracts import (
+        EvidenceRecord,
+        ProfileAttemptObservation,
+        review_diff_hunk_inventory_sha256,
+    )
 
     packet, job, script = executor_input
     fragments = []
@@ -333,6 +388,9 @@ async def test_executor_selects_context_and_binds_actual_subset_hash(executor_in
     context = job.session.review_context.model_copy(update={
         "evidence_packet_sha256": hashlib.sha256(packet.read_bytes()).hexdigest(),
         "diff_sha256": hashlib.sha256(b"changed diff").hexdigest(),
+        "diff_hunk_inventory_sha256": review_diff_hunk_inventory_sha256(
+            hashlib.sha256(b"changed diff").hexdigest(), ()
+        ),
         "evidence_refs": ("E1", "E2", "E3", "E4", "E5"),
         "evidence_registry": tuple(f.record for f in fragments),
         "changed_files": (*job.session.review_context.changed_files, "src/omitted.py"),
@@ -340,7 +398,7 @@ async def test_executor_selects_context_and_binds_actual_subset_hash(executor_in
     job = replace(job, session=job.session.model_copy(update={"review_context": context}))
     observation = ProfileAttemptObservation()
     job = replace(job, observation=observation)
-    monkeypatch.setattr(codex_executor, "MAX_EXECUTOR_PROMPT_BYTES", 8192)
+    monkeypatch.setattr(codex_executor, "MAX_EXECUTOR_PROMPT_BYTES", 12288)
     script.write_text(script.read_text().replace(
         "prompt=sys.stdin.read()",
         "prompt=sys.stdin.read()\nassert 'OMITTED_TEST_ONLY' not in prompt\n"
@@ -348,7 +406,7 @@ async def test_executor_selects_context_and_binds_actual_subset_hash(executor_in
         "assert '1 of 2 changed paths have excerpts available' in prompt\n"
         "assert 'Inspect every changed path and hunk' in prompt\n"
         "assert 'do a second systematic sweep over the diff' in prompt\n"
-        "assert len(prompt.encode())<=8192",
+        "assert len(prompt.encode())<=12288",
     ))
     report = await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(job)
     assert report.context_selection.included_refs == ("E1", "E3", "E4")
@@ -381,7 +439,7 @@ async def test_executor_excludes_binary_and_base_only_source_from_excerpt_covera
 ):
     from qa_orchestrator.codex_executor import CodexProfileExecutor
     from qa_orchestrator.context_pack import ContextFragment, ContextPacket
-    from qa_orchestrator.contracts import EvidenceRecord
+    from qa_orchestrator.contracts import EvidenceRecord, review_diff_hunk_inventory_sha256
 
     packet, job, script = executor_input
     head = job.session.review_context.head_sha
@@ -431,6 +489,9 @@ async def test_executor_excludes_binary_and_base_only_source_from_excerpt_covera
         update={
             "evidence_packet_sha256": hashlib.sha256(packet.read_bytes()).hexdigest(),
             "diff_sha256": hashlib.sha256(b"changed diff").hexdigest(),
+            "diff_hunk_inventory_sha256": review_diff_hunk_inventory_sha256(
+                hashlib.sha256(b"changed diff").hexdigest(), ()
+            ),
             "evidence_refs": ("B1", "S1", "D1"),
             "evidence_registry": registry,
             "changed_files": changed_paths,

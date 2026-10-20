@@ -18,8 +18,11 @@ from qa_orchestrator.contracts import (
     ProfileReviewReport,
     ReviewContext,
     ReviewCriterionCoverage,
+    ReviewDiffHunk,
     ReviewFindingCandidate,
+    impact_candidate_set_sha256,
     review_changed_paths_sha256,
+    review_diff_hunk_inventory_sha256,
 )
 
 _DISCOVERY_MAX_SYMBOLS = 128
@@ -27,6 +30,7 @@ _DISCOVERY_MAX_TRACKED_PATHS = 200_000
 _DISCOVERY_MAX_SOURCE_BYTES = 4_000_000
 _DISCOVERY_MAX_TOTAL_BYTES = 64_000_000
 _DISCOVERY_MAX_CANDIDATES = 200
+_DISCOVERY_MAX_DIFF_HUNKS = 500
 _DISCOVERY_MAX_CANDIDATE_SCAN_PATHS = 200
 _DISCOVERY_MAX_SYMBOL_SEARCH_PATHS = 32
 _DISCOVERY_MAX_SYMBOL_SEARCH_BYTES = 16_000_000
@@ -78,9 +82,32 @@ _CONFIG_PATH = re.compile(
 _AUTHORIZATION_PATH = re.compile(
     r"(^|/)(auth|authorization|permissions?|policies|rbac|roles?)(/|$)", re.IGNORECASE
 )
-_SYSTEM_BOUNDARY_CATEGORIES = frozenset(
-    {"api", "authorization", "config", "contract", "database", "event", "job"}
+_DEPLOYMENT_PATH = re.compile(
+    r"(^|/)(deploy|deployments?|helm|charts?|k8s|kubernetes|terraform|infrastructure|infra)(/|$)"
+    r"|(^|/)(?:Dockerfile(?:\..*)?|docker-compose(?:\.[^.]+)?\.ya?ml)$",
+    re.IGNORECASE,
 )
+_SERVICE_BOUNDARY_PATH = re.compile(
+    r"(^|/)(services?|clients?|integrations?|adapters?)(/|$)", re.IGNORECASE
+)
+_SYSTEM_BOUNDARY_CATEGORIES = frozenset(
+    {
+        "api", "authorization", "config", "contract", "database", "deployment",
+        "event", "job", "service_boundary",
+    }
+)
+_INPUT_SCOPE_POLICY_VERSION = 1
+_SCOPE_REQUIRED_INPUT_KINDS = {
+    "api": ("api_contract", "api_consumer_map"),
+    "contract": ("api_contract", "api_consumer_map"),
+    "database": ("database_schema", "database_consumer_map"),
+    "event": ("event_contract", "event_consumer_map"),
+    "job": ("job_registration", "trigger_consumer_map"),
+    "config": ("configuration_contract", "flag_consumer_map"),
+    "authorization": ("authorization_policy", "authorization_consumer_map"),
+    "deployment": ("deployment_manifest", "service_dependency_map"),
+    "service_boundary": ("service_dependency_map",),
+}
 _TS_IMPORT = re.compile(
     r"\bimport\s+(?P<bindings>[^;]*?)\s+from\s*['\"](?P<module>[^'\"]+)['\"]",
     re.DOTALL,
@@ -152,6 +179,170 @@ def _diff(context: ReviewContext, repository: Path) -> bytes:
     if changed_paths != set(context.changed_files):
         raise ValueError("bound changed_files do not match the pinned diff paths")
     return data
+
+
+def _patch_path(raw_path: bytes) -> str | None:
+    """Decode a unified-diff path header, including Git's C-style quoting."""
+    raw_path = raw_path.rstrip(b"\n")
+    if raw_path.startswith(b'"'):
+        if not raw_path.endswith(b'"'):
+            raise ValueError("malformed quoted Git diff path")
+        encoded = raw_path[1:-1]
+        decoded = bytearray()
+        index = 0
+        escapes = {
+            ord('"'): ord('"'),
+            ord("\\"): ord("\\"),
+            ord("a"): 7,
+            ord("b"): 8,
+            ord("t"): 9,
+            ord("n"): 10,
+            ord("v"): 11,
+            ord("f"): 12,
+            ord("r"): 13,
+        }
+        while index < len(encoded):
+            byte = encoded[index]
+            if byte != ord("\\"):
+                decoded.append(byte)
+                index += 1
+                continue
+            index += 1
+            if index >= len(encoded):
+                raise ValueError("malformed Git diff path escape")
+            if (
+                encoded[index] in b"01234567"
+                and index + 2 < len(encoded)
+                and encoded[index + 1] in b"01234567"
+                and encoded[index + 2] in b"01234567"
+            ):
+                decoded.append(int(encoded[index : index + 3], 8))
+                index += 3
+                continue
+            escaped = escapes.get(encoded[index])
+            if escaped is None:
+                raise ValueError("unsupported Git diff path escape")
+            decoded.append(escaped)
+            index += 1
+        raw_path = bytes(decoded)
+    if raw_path == b"/dev/null":
+        return None
+    if raw_path.startswith((b"a/", b"b/")):
+        raw_path = raw_path[2:]
+    else:
+        raise ValueError("Git diff path is missing its source prefix")
+    try:
+        return raw_path.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("Git diff path is not valid UTF-8") from exc
+
+
+_DIFF_HUNK_HEADER = re.compile(
+    rb"^@@ -(?P<old_start>[0-9]+)(?:,(?P<old_count>[0-9]+))? "
+    rb"\+(?P<new_start>[0-9]+)(?:,(?P<new_count>[0-9]+))? @@"
+)
+
+
+def _parse_diff_hunks(
+    context: ReviewContext,
+    diff: bytes,
+) -> tuple[ReviewDiffHunk, ...]:
+    path_indexes = {path: index for index, path in enumerate(context.changed_files)}
+    lines = diff.splitlines(keepends=True)
+    hunks = []
+    old_path = None
+    new_path = None
+    active_path = None
+    in_file_header = False
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith(b"diff --git "):
+            old_path = new_path = active_path = None
+            in_file_header = True
+            index += 1
+            continue
+        if in_file_header and line.startswith(b"--- "):
+            old_path = _patch_path(line[4:])
+            index += 1
+            continue
+        if in_file_header and line.startswith(b"+++ "):
+            new_path = _patch_path(line[4:])
+            active_path = new_path or old_path
+            index += 1
+            continue
+        if line.startswith(b"@@ "):
+            in_file_header = False
+            if active_path is None or active_path not in path_indexes:
+                raise ValueError("diff hunk is not bound to a changed path")
+            match = _DIFF_HUNK_HEADER.match(line.rstrip(b"\n"))
+            if match is None:
+                raise ValueError("malformed unified-diff hunk header")
+            end = index + 1
+            while end < len(lines) and not lines[end].startswith(
+                (b"@@ ", b"diff --git ")
+            ):
+                end += 1
+            hunk_bytes = b"".join(lines[index:end])
+            if len(hunks) >= _DISCOVERY_MAX_DIFF_HUNKS:
+                raise OverflowError("diff hunk inventory exceeds its configured limit")
+            old_start = int(match.group("old_start"))
+            old_count = int(match.group("old_count") or b"1")
+            new_start = int(match.group("new_start"))
+            new_count = int(match.group("new_count") or b"1")
+            hunk = ReviewDiffHunk(
+                index=len(hunks),
+                changed_path_index=path_indexes[active_path],
+                old_start=old_start,
+                old_count=old_count,
+                new_start=new_start,
+                new_count=new_count,
+                header=(
+                    f"@@ -{old_start}"
+                    + (f",{old_count}" if match.group("old_count") is not None else "")
+                    + f" +{new_start}"
+                    + (f",{new_count}" if match.group("new_count") is not None else "")
+                    + " @@"
+                ),
+                sha256=hashlib.sha256(hunk_bytes).hexdigest(),
+            )
+            hunks.append(hunk)
+            index = end
+            continue
+        index += 1
+    return tuple(hunks)
+
+
+def _diff_hunk_inventory(context: ReviewContext, diff: bytes) -> dict[str, object]:
+    try:
+        hunks = _parse_diff_hunks(context, diff)
+    except OverflowError:
+        return {
+            "status": "partial",
+            "max_hunks": _DISCOVERY_MAX_DIFF_HUNKS,
+            "count_at_least": _DISCOVERY_MAX_DIFF_HUNKS + 1,
+            "hunks": [],
+            "inventory_sha256": None,
+            "reason": "diff_hunk_limit_reached",
+        }
+    except (UnicodeDecodeError, ValueError):
+        return {
+            "status": "partial",
+            "max_hunks": _DISCOVERY_MAX_DIFF_HUNKS,
+            "count_at_least": None,
+            "hunks": [],
+            "inventory_sha256": None,
+            "reason": "diff_hunk_parse_failed",
+        }
+    return {
+        "status": "complete",
+        "max_hunks": _DISCOVERY_MAX_DIFF_HUNKS,
+        "count": len(hunks),
+        "hunks": [hunk.model_dump(mode="json") for hunk in hunks],
+        "inventory_sha256": review_diff_hunk_inventory_sha256(
+            context.diff_sha256, hunks
+        ),
+    }
 
 
 def _source_bytes(entry: EvidenceRecord, repository: Path) -> bytes:
@@ -322,11 +513,30 @@ def profile_input_receipt_verified(context: ReviewContext, report: ProfileReview
 
 
 def input_manifest_completeness(context: ReviewContext | None) -> dict[str, object]:
-    """Derive required-input status from host-authored manifest metadata."""
+    """Check host inputs against source kinds required by the changed-path scope."""
     manifest = context.input_manifest if context is not None else None
     sources = manifest.sources if manifest is not None else ()
     required_sources = tuple(source for source in sources if source.required)
     optional_sources = tuple(source for source in sources if not source.required)
+    scope_categories = sorted(
+        {
+            category
+            for path in (context.changed_files if context is not None else ())
+            for category in _neighbor_categories(path)
+            if category in _SCOPE_REQUIRED_INPUT_KINDS
+        }
+    )
+    scope_required_source_kinds = sorted(
+        {
+            source_kind
+            for category in scope_categories
+            for source_kind in _SCOPE_REQUIRED_INPUT_KINDS[category]
+        }
+    )
+    declared_required_kinds = {source.kind for source in required_sources}
+    missing_scope_source_kinds = sorted(
+        set(scope_required_source_kinds) - declared_required_kinds
+    )
 
     def incomplete_reasons(source) -> tuple[str, ...]:
         reasons = []
@@ -381,8 +591,21 @@ def input_manifest_completeness(context: ReviewContext | None) -> dict[str, obje
         status = "unknown"
         status_reason = "review context is unavailable"
     elif manifest is None:
-        status = "unknown"
-        status_reason = "input manifest was not provided"
+        if missing_scope_source_kinds:
+            status = "partial"
+            status_reason = (
+                "input manifest is missing required sources for changed path scope: "
+                + ", ".join(missing_scope_source_kinds)
+            )
+        else:
+            status = "unknown"
+            status_reason = "input manifest was not provided"
+    elif missing_scope_source_kinds:
+        status = "partial"
+        status_reason = (
+            "changed path scope requires undeclared sources: "
+            + ", ".join(missing_scope_source_kinds)
+        )
     elif not required_sources:
         status = "unknown"
         status_reason = "no required source was declared"
@@ -396,6 +619,10 @@ def input_manifest_completeness(context: ReviewContext | None) -> dict[str, obje
     return {
         "status": status,
         "status_reason": status_reason,
+        "scope_policy_version": _INPUT_SCOPE_POLICY_VERSION,
+        "scope_categories": scope_categories,
+        "scope_required_source_kinds": scope_required_source_kinds,
+        "missing_scope_source_kinds": missing_scope_source_kinds,
         "source_counts": {
             "declared": len(sources),
             "required": len(required_sources),
@@ -451,6 +678,22 @@ def validate_impact_coverage_context(
         or ledger.discovery_sha256 != context.neighbor_discovery_sha256
     ):
         raise ValueError("impact coverage ledger does not match the bound review")
+    if (
+        context.neighbor_discovery_candidate_count is None
+        or context.neighbor_discovery_candidate_set_sha256 is None
+    ):
+        raise ValueError("impact coverage requires a bound discovery candidate set")
+    if (
+        len(ledger.candidates) != context.neighbor_discovery_candidate_count
+        or impact_candidate_set_sha256(
+            tuple(
+                (candidate.candidate_id, candidate.relation, candidate.locator)
+                for candidate in ledger.candidates
+            )
+        )
+        != context.neighbor_discovery_candidate_set_sha256
+    ):
+        raise ValueError("impact coverage candidates do not exactly match discovery")
     impact_refs = {
         ref
         for candidate in ledger.candidates
@@ -463,8 +706,10 @@ def validate_impact_coverage_context(
 def review_completion_gaps(
     context: ReviewContext,
     report: FinalReviewReport,
+    *,
+    allow_legacy_missing_hunk_ledger: bool = False,
 ) -> tuple[str, ...]:
-    """Describe why a new bound review cannot be finalized as completed."""
+    """Describe why a bound review cannot be finalized as completed."""
     gaps = []
     input_status = input_manifest_completeness(context)
     if input_status["status"] != "complete":
@@ -494,6 +739,12 @@ def review_completion_gaps(
             if len(unlisted_criteria) > len(examples):
                 examples.append(f"{len(unlisted_criteria) - len(examples)} more")
             gaps.append("registered criterion refs missing from manifest: " + ", ".join(examples))
+    missing_scope_source_kinds = input_status["missing_scope_source_kinds"]
+    if missing_scope_source_kinds:
+        gaps.append(
+            "required scope source kinds missing from manifest: "
+            + ", ".join(missing_scope_source_kinds)
+        )
     try:
         validate_impact_coverage_context(report, context, require_ledger=True)
     except ValueError as exc:
@@ -502,6 +753,23 @@ def review_completion_gaps(
         status = impact_coverage_status(report.impact_coverage)
         if status != "closed":
             gaps.append(f"impact coverage status is {status}")
+    coverage = report.coverage_ledger
+    if not (allow_legacy_missing_hunk_ledger and coverage is None):
+        if context.diff_hunk_inventory_sha256 is None:
+            gaps.append("complete diff hunk inventory is not bound to the review")
+        elif (
+            coverage is None
+            or coverage.diff_hunk_inventory_sha256 != context.diff_hunk_inventory_sha256
+            or coverage.diff_hunk_count != len(context.diff_hunks)
+        ):
+            gaps.append("diff hunk coverage ledger does not match the bound inventory")
+        elif coverage.unreviewed_diff_hunk_indexes:
+            examples = ", ".join(
+                str(index) for index in coverage.unreviewed_diff_hunk_indexes[:10]
+            )
+            if len(coverage.unreviewed_diff_hunk_indexes) > 10:
+                examples += ", ..."
+            gaps.append("unreviewed diff hunk indexes: " + examples)
     return tuple(gaps)
 
 
@@ -920,6 +1188,93 @@ def neighbor_discovery_sha256(payload: Mapping[str, object]) -> str:
     return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
 
+def bind_neighbor_discovery(
+    context: ReviewContext, payload: Mapping[str, object]
+) -> ReviewContext:
+    """Bind a verified discovery payload and its exact candidate set to a review."""
+    if not isinstance(payload, Mapping):
+        raise TypeError("neighbor discovery payload must be an object")
+    if (
+        payload.get("schema_version") != 2
+        or payload.get("base_sha") != context.base_sha
+        or payload.get("head_sha") != context.head_sha
+        or payload.get("diff_sha256") != context.diff_sha256
+        or payload.get("changed_files") != list(context.changed_files)
+    ):
+        raise ValueError("neighbor discovery does not match the bound review")
+    if payload.get("discovery_sha256") != neighbor_discovery_sha256(payload):
+        raise ValueError("neighbor discovery digest is invalid")
+    candidate_records = payload.get("candidate_records")
+    if not isinstance(candidate_records, list):
+        raise TypeError("neighbor discovery candidate records must be a list")
+    candidate_manifest = []
+    for item in candidate_records:
+        if not isinstance(item, Mapping) or not isinstance(item.get("record"), Mapping):
+            raise TypeError("neighbor discovery candidate record is invalid")
+        candidate_record = item["record"]
+        candidate_id = candidate_record.get("evidence_ref")
+        locator = item.get("path")
+        if not isinstance(candidate_id, str) or not isinstance(locator, str):
+            raise TypeError("neighbor discovery candidate identity is invalid")
+        candidate_manifest.append(
+            {
+                "candidate_id": candidate_id,
+                "relation": "discovery_candidate",
+                "locator": locator,
+            }
+        )
+    if payload.get("candidate_manifest") != candidate_manifest:
+        raise ValueError("neighbor discovery candidate manifest does not match its records")
+    candidate_digest = impact_candidate_set_sha256(
+        tuple(
+            (item["candidate_id"], item["relation"], item["locator"])
+            for item in candidate_manifest
+        )
+    )
+    if (
+        type(payload.get("candidate_count")) is not int
+        or payload.get("candidate_count") != len(candidate_manifest)
+        or payload.get("candidate_set_sha256") != candidate_digest
+    ):
+        raise ValueError("neighbor discovery candidate set digest is invalid")
+    inventory = payload.get("diff_hunk_inventory")
+    if not isinstance(inventory, Mapping):
+        raise TypeError("neighbor discovery diff hunk inventory must be an object")
+    bound_hunks: tuple[ReviewDiffHunk, ...] = ()
+    bound_hunk_digest = None
+    if inventory.get("status") == "complete":
+        raw_hunks = inventory.get("hunks")
+        if not isinstance(raw_hunks, list) or type(inventory.get("count")) is not int:
+            raise ValueError("complete diff hunk inventory is malformed")
+        if (
+            inventory.get("max_hunks") != _DISCOVERY_MAX_DIFF_HUNKS
+            or inventory["count"] != len(raw_hunks)
+            or len(raw_hunks) > _DISCOVERY_MAX_DIFF_HUNKS
+        ):
+            raise ValueError("complete diff hunk inventory has inconsistent limits")
+        bound_hunks = tuple(ReviewDiffHunk.model_validate(item) for item in raw_hunks)
+        bound_hunk_digest = review_diff_hunk_inventory_sha256(
+            context.diff_sha256, bound_hunks
+        )
+        if inventory.get("inventory_sha256") != bound_hunk_digest:
+            raise ValueError("diff hunk inventory digest is invalid")
+    elif inventory.get("status") == "partial":
+        if inventory.get("hunks") != [] or inventory.get("inventory_sha256") is not None:
+            raise ValueError("partial diff hunk inventory must not claim complete hunks")
+    else:
+        raise ValueError("neighbor discovery diff hunk inventory status is invalid")
+    return ReviewContext.model_validate(
+        {
+            **context.model_dump(mode="json"),
+            "neighbor_discovery_sha256": payload["discovery_sha256"],
+            "neighbor_discovery_candidate_count": len(candidate_manifest),
+            "neighbor_discovery_candidate_set_sha256": candidate_digest,
+            "diff_hunks": [hunk.model_dump(mode="json") for hunk in bound_hunks],
+            "diff_hunk_inventory_sha256": bound_hunk_digest,
+        }
+    )
+
+
 def _neighbor_categories(path: str) -> tuple[str, ...]:
     tags = []
     if _TEST_PATH.search(path):
@@ -938,6 +1293,10 @@ def _neighbor_categories(path: str) -> tuple[str, ...]:
         tags.append("config")
     if _AUTHORIZATION_PATH.search(path):
         tags.append("authorization")
+    if _DEPLOYMENT_PATH.search(path):
+        tags.append("deployment")
+    if _SERVICE_BOUNDARY_PATH.search(path):
+        tags.append("service_boundary")
     return tuple(tags or ("caller",))
 
 
@@ -1177,7 +1536,8 @@ def discover_neighbor_evidence(
     """
     if not 1 <= max_candidates <= _DISCOVERY_MAX_CANDIDATES:
         raise ValueError("neighbor candidate limit must be between 1 and 200")
-    _diff(context, repository)
+    pinned_diff = _diff(context, repository)
+    diff_hunk_inventory = _diff_hunk_inventory(context, pinned_diff)
     if _git(repository, "cat-file", "-t", context.head_sha).strip() != b"commit":
         raise ValueError("bound head revision must identify a commit")
 
@@ -1539,6 +1899,21 @@ def discover_neighbor_evidence(
         ]
         records.append({**candidate, "record": record.model_dump(mode="json")})
 
+    candidate_manifest = [
+        {
+            "candidate_id": item["record"]["evidence_ref"],
+            "relation": "discovery_candidate",
+            "locator": item["path"],
+        }
+        for item in records
+    ]
+    candidate_set_sha256 = impact_candidate_set_sha256(
+        tuple(
+            (item["candidate_id"], item["relation"], item["locator"])
+            for item in candidate_manifest
+        )
+    )
+
     omissions = []
     omission_reasons = {
         "changed_source_size_limit": "Changed source exceeded a per-file or total-source byte cap.",
@@ -1664,12 +2039,13 @@ def discover_neighbor_evidence(
     )
 
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "method": "pinned_git_symbol_scan",
         "codegraph": codegraph,
         "base_sha": context.base_sha,
         "head_sha": context.head_sha,
         "diff_sha256": context.diff_sha256,
+        "diff_hunk_inventory": diff_hunk_inventory,
         "changed_files": list(context.changed_files),
         "defined_symbols": list(ordered_defined_symbols),
         "referenced_symbols": list(ordered_referenced_symbols),
@@ -1687,6 +2063,9 @@ def discover_neighbor_evidence(
         "changed_sources_skipped_symbol_scan": changed_sources_skipped_symbol_scan,
         "changed_sources_skipped_symbol_scan_examples": changed_sources_skipped_symbol_scan_paths[:_DISCOVERY_MAX_OMISSION_EXAMPLES],
         "candidate_records": records,
+        "candidate_manifest": candidate_manifest,
+        "candidate_count": len(candidate_manifest),
+        "candidate_set_sha256": candidate_set_sha256,
         "candidate_limit": max_candidates,
         "candidate_paths_considered": len(candidate_paths),
         "candidate_paths_omitted_by_limit": max(0, len(all_candidate_paths) - len(candidate_paths)),
@@ -1783,6 +2162,11 @@ def evidence_main(argv: list[str]) -> int:
         action="store_true",
         help="Add callers and callees from a complete CodeGraph index matching the bound checkout",
     )
+    discover.add_argument(
+        "--bound-context",
+        type=Path,
+        help="Write a review context bound to this discovery result and exact candidate set",
+    )
     pack = subparsers.add_parser("pack", help="Build exact profile-selectable context from pinned refs")
     pack.add_argument("--plan", type=Path, help="Explicit host plan: optional_profiles, priorities, external_content")
     pack.add_argument("--bound-context", required=True, type=Path)
@@ -1830,6 +2214,14 @@ def evidence_main(argv: list[str]) -> int:
             max_candidates=args.max_candidates,
             use_codegraph=args.codegraph,
         )
+        if args.bound_context:
+            output_paths = {args.context.resolve()}
+            if args.output:
+                output_paths.add(args.output.resolve())
+            if args.bound_context.resolve() in output_paths:
+                raise ValueError("bound context must use a distinct output path")
+            bound_context = bind_neighbor_discovery(context, payload)
+            args.bound_context.write_text(bound_context.model_dump_json(), encoding="utf-8")
         output = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
         if args.output:
             args.output.write_text(output, encoding="utf-8")

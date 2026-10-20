@@ -18,7 +18,9 @@ from qa_orchestrator.contracts import (
     ReviewFindingCandidate,
     ReviewFindingLocation,
     ReviewFindingSource,
+    impact_candidate_set_sha256,
     review_changed_paths_sha256,
+    review_diff_hunk_inventory_sha256,
 )
 
 
@@ -59,6 +61,10 @@ def bound_review_context():
             )
         },
         neighbor_discovery_sha256="4" * 64,
+        neighbor_discovery_candidate_count=0,
+        neighbor_discovery_candidate_set_sha256=impact_candidate_set_sha256(()),
+        diff_hunks=(),
+        diff_hunk_inventory_sha256=review_diff_hunk_inventory_sha256("2" * 64, ()),
     )
 
 
@@ -89,6 +95,7 @@ def make_profile_review_report(bound_review_context):
         context_selection=None,
         omit_context_selection=False,
         reviewed_changed_paths=None,
+        reviewed_diff_hunk_indexes=None,
         omit_input_receipt=False,
         findings=(),
         coverage_gaps=(),
@@ -154,6 +161,11 @@ def make_profile_review_report(bound_review_context):
                 if reviewed_changed_paths is None
                 else reviewed_changed_paths
             ),
+            reviewed_diff_hunk_indexes=tuple(
+                range(len(bound_review_context.diff_hunks))
+                if reviewed_diff_hunk_indexes is None
+                else reviewed_diff_hunk_indexes
+            ),
             coverage_gaps=tuple(coverage_gaps),
             unverified=tuple(unverified),
             evidence_map=tuple(evidence_map),
@@ -166,7 +178,11 @@ def make_profile_review_report(bound_review_context):
 @pytest.fixture
 def make_impact_coverage():
     def make(context):
-        if context.neighbor_discovery_sha256 is None:
+        if (
+            context.neighbor_discovery_sha256 is None
+            or context.neighbor_discovery_candidate_count is None
+            or context.neighbor_discovery_candidate_set_sha256 is None
+        ):
             return None
         return ImpactCoverageLedger(
             head_sha=context.head_sha,

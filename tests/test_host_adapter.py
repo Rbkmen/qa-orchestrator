@@ -94,6 +94,17 @@ def test_host_rejects_attestation_for_path_outside_bound_change(bound_review_con
         HostReviewAdapter._with_changed_path_coverage_gaps(bound_review_context, invalid)
 
 
+def test_host_rejects_hunk_attestation_outside_bound_diff(bound_review_context):
+    invalid = report(ReviewAgent.PYTHON_REVIEWER, bound_review_context).model_copy(
+        update={"reviewed_diff_hunk_indexes": (0,)}
+    )
+
+    with pytest.raises(ValueError, match="hunk outside the bound diff"):
+        HostReviewAdapter._validate_report(
+            bound_review_context, ReviewAgent.PYTHON_REVIEWER, invalid
+        )
+
+
 async def test_finish_review_exports_markdown_with_the_accepted_outcome(
     host_session,
     make_impact_coverage,

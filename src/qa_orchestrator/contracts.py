@@ -1,5 +1,6 @@
 import hashlib
 import json
+from collections.abc import Iterable
 from enum import StrEnum
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -63,11 +64,45 @@ type EvidenceRefId = Annotated[
 ]
 type ChangedFilePath = Annotated[str, Field(min_length=1, max_length=1024)]
 type ChangedPathIndex = Annotated[int, Field(strict=True, ge=0, le=499)]
+type DiffHunkIndex = Annotated[int, Field(strict=True, ge=0, le=499)]
+_MAX_REVIEW_DIFF_HUNKS = 500
 
 
 def review_changed_paths_sha256(paths: tuple[str, ...]) -> str:
     """Hash the ordered path list so coverage indexes cannot be detached from their diff."""
     canonical = json.dumps(list(paths), separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def impact_candidate_set_sha256(
+    candidates: Iterable[tuple[str, str, str]],
+) -> str:
+    """Hash the exact candidate identities independently of ledger dispositions."""
+    identities = [
+        {"candidate_id": candidate_id, "relation": relation, "locator": locator}
+        for candidate_id, relation, locator in candidates
+    ]
+    if any(
+        not value.strip()
+        for identity in identities
+        for value in identity.values()
+    ):
+        raise ValueError("impact candidate identities must not be blank")
+    candidate_ids = [identity["candidate_id"] for identity in identities]
+    if len(set(candidate_ids)) != len(candidate_ids):
+        raise ValueError("impact candidate identities must be unique")
+    identities.sort(
+        key=lambda identity: (
+            identity["candidate_id"], identity["relation"], identity["locator"]
+        )
+    )
+    canonical = json.dumps(
+        {"schema_version": 1, "candidates": identities},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 # Added defaulted fields expand legacy persisted reports when they are loaded.
@@ -226,6 +261,48 @@ class ReviewInputManifest(BaseModel):
         return self
 
 
+class ReviewDiffHunk(BaseModel):
+    """One unified-diff hunk, indexed in the exact bound diff order."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    index: DiffHunkIndex
+    changed_path_index: ChangedPathIndex
+    old_start: int = Field(strict=True, ge=0)
+    old_count: int = Field(strict=True, ge=0)
+    new_start: int = Field(strict=True, ge=0)
+    new_count: int = Field(strict=True, ge=0)
+    header: str = Field(
+        min_length=10,
+        max_length=128,
+        pattern=r"^@@ -[0-9]+(?:,[0-9]+)? \+[0-9]+(?:,[0-9]+)? @@$",
+    )
+    sha256: Sha256Digest
+
+    @field_validator("sha256")
+    @classmethod
+    def normalize_hunk_digest(cls, value: str) -> str:
+        return value.lower()
+
+
+def review_diff_hunk_inventory_sha256(
+    diff_sha256: str,
+    hunks: tuple[ReviewDiffHunk, ...],
+) -> str:
+    canonical = json.dumps(
+        {
+            "schema_version": 1,
+            "diff_sha256": diff_sha256.lower(),
+            "hunks": [hunk.model_dump(mode="json") for hunk in hunks],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class ReviewContext(BaseModel):
     """Immutable identifiers for the exact source and evidence packet reviewed."""
 
@@ -245,6 +322,14 @@ class ReviewContext(BaseModel):
     )
     input_manifest: ReviewInputManifest | None = None
     neighbor_discovery_sha256: Sha256Digest | None = None
+    neighbor_discovery_candidate_count: int | None = Field(
+        default=None, strict=True, ge=0, le=200
+    )
+    neighbor_discovery_candidate_set_sha256: Sha256Digest | None = None
+    diff_hunks: tuple[ReviewDiffHunk, ...] = Field(
+        default=(), max_length=_MAX_REVIEW_DIFF_HUNKS
+    )
+    diff_hunk_inventory_sha256: Sha256Digest | None = None
 
     @field_validator("repository")
     @classmethod
@@ -278,7 +363,8 @@ class ReviewContext(BaseModel):
 
     @field_validator(
         "base_sha", "head_sha", "diff_sha256", "evidence_packet_sha256",
-        "neighbor_discovery_sha256",
+        "neighbor_discovery_sha256", "neighbor_discovery_candidate_set_sha256",
+        "diff_hunk_inventory_sha256",
     )
     @classmethod
     def normalize_hashes(cls, value: str | None) -> str | None:
@@ -294,6 +380,28 @@ class ReviewContext(BaseModel):
             raise ValueError("changed_files must be unique")
         if len(set(self.evidence_refs)) != len(self.evidence_refs):
             raise ValueError("evidence_refs must be unique")
+        if (self.neighbor_discovery_candidate_count is None) != (
+            self.neighbor_discovery_candidate_set_sha256 is None
+        ):
+            raise ValueError("neighbor discovery candidate count and digest must be bound together")
+        if (
+            self.neighbor_discovery_candidate_count is not None
+            and self.neighbor_discovery_sha256 is None
+        ):
+            raise ValueError("neighbor discovery candidates require a discovery digest")
+        if self.diff_hunk_inventory_sha256 is None:
+            if self.diff_hunks:
+                raise ValueError("diff hunk inventory digest is required when hunks are present")
+        else:
+            for index, hunk in enumerate(self.diff_hunks):
+                if hunk.index != index:
+                    raise ValueError("diff hunk indexes must be contiguous and ordered")
+                if hunk.changed_path_index >= len(self.changed_files):
+                    raise ValueError("diff hunk path index is outside changed files")
+            if self.diff_hunk_inventory_sha256 != review_diff_hunk_inventory_sha256(
+                self.diff_sha256, self.diff_hunks
+            ):
+                raise ValueError("diff hunk inventory digest does not match the bound diff")
         if self.evidence_registry:
             ids = [entry.evidence_ref for entry in self.evidence_registry]
             if len(set(ids)) != len(ids) or set(ids) != set(self.evidence_refs):
@@ -323,6 +431,13 @@ class ReviewContext(BaseModel):
             payload.pop("input_manifest", None)
         if self.neighbor_discovery_sha256 is None:
             payload.pop("neighbor_discovery_sha256", None)
+        if self.neighbor_discovery_candidate_count is None:
+            payload.pop("neighbor_discovery_candidate_count", None)
+        if self.neighbor_discovery_candidate_set_sha256 is None:
+            payload.pop("neighbor_discovery_candidate_set_sha256", None)
+        if self.diff_hunk_inventory_sha256 is None:
+            payload.pop("diff_hunks", None)
+            payload.pop("diff_hunk_inventory_sha256", None)
         return payload
 
 
@@ -815,6 +930,9 @@ class ProfileChangedPathCoverage(BaseModel):
     reviewer_attested_path_indexes: tuple[ChangedPathIndex, ...] = Field(
         default=(), max_length=500
     )
+    reviewed_diff_hunk_indexes: tuple[DiffHunkIndex, ...] = Field(
+        default=(), max_length=_MAX_REVIEW_DIFF_HUNKS
+    )
     execution_metrics: ProfileExecutionMetrics | None = Field(
         default=None,
         description="Host-reported profile execution data; not independently verified by the orchestrator.",
@@ -825,6 +943,7 @@ class ProfileChangedPathCoverage(BaseModel):
         for name, indexes in (
             ("source_excerpt_included_path_indexes", self.source_excerpt_included_path_indexes),
             ("reviewer_attested_path_indexes", self.reviewer_attested_path_indexes),
+            ("reviewed_diff_hunk_indexes", self.reviewed_diff_hunk_indexes),
         ):
             if tuple(sorted(set(indexes))) != indexes:
                 raise ValueError(f"{name} must be unique and sorted")
@@ -850,11 +969,21 @@ class ReviewCoverageLedger(BaseModel):
         default=(), max_length=500
     )
     profiles: tuple[ProfileChangedPathCoverage, ...] = Field(default=(), max_length=11)
+    diff_hunk_inventory_sha256: Sha256Digest | None = None
+    diff_hunk_count: int | None = Field(default=None, strict=True, ge=0, le=_MAX_REVIEW_DIFF_HUNKS)
+    unreviewed_diff_hunk_indexes: tuple[DiffHunkIndex, ...] = Field(
+        default=(), max_length=_MAX_REVIEW_DIFF_HUNKS
+    )
 
     @field_validator("changed_paths_sha256")
     @classmethod
     def normalize_changed_paths_digest(cls, value: str) -> str:
         return value.lower()
+
+    @field_validator("diff_hunk_inventory_sha256")
+    @classmethod
+    def normalize_hunk_inventory_digest(cls, value: str | None) -> str | None:
+        return value.lower() if value is not None else None
 
     @model_validator(mode="after")
     def validate_coverage_indexes(self) -> "ReviewCoverageLedger":
@@ -877,6 +1006,33 @@ class ReviewCoverageLedger(BaseModel):
             raise ValueError("head source text cannot be both available and unavailable")
         if len({profile.profile for profile in self.profiles}) != len(self.profiles):
             raise ValueError("coverage ledger profiles must be unique")
+        if (self.diff_hunk_inventory_sha256 is None) != (self.diff_hunk_count is None):
+            raise ValueError("diff hunk count and inventory digest must be bound together")
+        if self.diff_hunk_inventory_sha256 is None:
+            if self.unreviewed_diff_hunk_indexes or any(
+                profile.reviewed_diff_hunk_indexes for profile in self.profiles
+            ):
+                raise ValueError("diff hunk indexes require a bound inventory")
+        else:
+            unreviewed = self.unreviewed_diff_hunk_indexes
+            if tuple(sorted(set(unreviewed))) != unreviewed:
+                raise ValueError("unreviewed diff hunk indexes must be unique and sorted")
+            reviewer_indexes = {
+                index
+                for profile in self.profiles
+                if profile.profile is not ReviewAgent.CODE_EXPLORER
+                for index in profile.reviewed_diff_hunk_indexes
+            }
+            if any(
+                index >= self.diff_hunk_count
+                for index in (*unreviewed, *reviewer_indexes)
+            ):
+                raise ValueError("diff hunk coverage index is outside the bound inventory")
+            expected_unreviewed = tuple(
+                index for index in range(self.diff_hunk_count) if index not in reviewer_indexes
+            )
+            if unreviewed != expected_unreviewed:
+                raise ValueError("unreviewed diff hunks must match reviewer attestations")
         for profile in self.profiles:
             indexes = (
                 *profile.source_excerpt_included_path_indexes,
@@ -1028,6 +1184,14 @@ class ProfileReviewReport(BaseModel):
             "verify that the inspection occurred."
         ),
     )
+    reviewed_diff_hunk_indexes: tuple[DiffHunkIndex, ...] = Field(
+        default=(),
+        max_length=_MAX_REVIEW_DIFF_HUNKS,
+        description=(
+            "Bound diff hunk indexes this profile explicitly inspected. This is an executor "
+            "attestation and does not prove model reasoning."
+        ),
+    )
     coverage_gaps: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
     unverified: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
     evidence_map: tuple[ReviewEvidenceMapEntry, ...] = Field(default=(), max_length=500)
@@ -1056,6 +1220,8 @@ class ProfileReviewReport(BaseModel):
             raise ValueError("finding candidate IDs must be unique within a profile report")
         if len(set(self.reviewed_changed_paths)) != len(self.reviewed_changed_paths):
             raise ValueError("reviewed_changed_paths must be unique")
+        if tuple(sorted(set(self.reviewed_diff_hunk_indexes))) != self.reviewed_diff_hunk_indexes:
+            raise ValueError("reviewed_diff_hunk_indexes must be unique and sorted")
         if len(self.model_dump_json().encode("utf-8")) > _MAX_PROFILE_REVIEW_REPORT_BYTES:
             raise ValueError("profile report exceeds the maximum serialized size")
         return self

@@ -110,6 +110,28 @@ def _render_coverage_ledger(
         ))
         return lines
 
+    if context is None or context.diff_hunk_inventory_sha256 is None:
+        lines.append("Diff hunk coverage: unknown; no complete bound hunk inventory was supplied.")
+    elif (
+        ledger.diff_hunk_inventory_sha256 != context.diff_hunk_inventory_sha256
+        or ledger.diff_hunk_count != len(context.diff_hunks)
+    ):
+        lines.append("Diff hunk coverage: unknown; ledger does not match the bound hunk inventory.")
+    else:
+        reviewed_count = ledger.diff_hunk_count - len(
+            ledger.unreviewed_diff_hunk_indexes
+        )
+        lines.append(
+            f"Diff hunk coverage: {reviewed_count}/{ledger.diff_hunk_count} hunk indexes "
+            "attested by a non-explorer reviewer. This records an attestation, not proof of reasoning."
+        )
+        if ledger.unreviewed_diff_hunk_indexes:
+            lines.append(
+                "Unreviewed diff hunk indexes: "
+                + ", ".join(map(str, ledger.unreviewed_diff_hunk_indexes[:20]))
+                + (", ..." if len(ledger.unreviewed_diff_hunk_indexes) > 20 else "")
+            )
+
     mapping_valid = (
         context is not None
         and len(context.changed_files) == ledger.changed_path_count
@@ -511,12 +533,27 @@ def render_final_report(
     lines = ["# QA review", "", _text(report.summary), ""]
     input_summary = input_manifest_completeness(context)
     source_counts = input_summary["source_counts"]
+    scope_categories = input_summary["scope_categories"]
+    required_scope_kinds = input_summary["scope_required_source_kinds"]
+    missing_scope_kinds = input_summary["missing_scope_source_kinds"]
     lines.extend(
         (
             "## Input completeness",
             "",
             f"Input completeness: {_text(input_summary['status'])}",
             f"- **Status basis:** {_text(input_summary['status_reason'])}",
+            (
+                f"- **Path-derived scope:** policy v{input_summary['scope_policy_version']}; "
+                + (", ".join(_code(category) for category in scope_categories) or "none")
+            ),
+            (
+                "- **Scope-required source kinds:** "
+                + (", ".join(_code(kind) for kind in required_scope_kinds) or "none")
+            ),
+            (
+                "- **Missing scope-required source kinds:** "
+                + (", ".join(_code(kind) for kind in missing_scope_kinds) or "none")
+            ),
             (
                 f"- **Sources:** {source_counts['declared']} declared "
                 f"({source_counts['required']} required, {source_counts['optional']} optional); "
@@ -720,6 +757,16 @@ def validate_final_report_context(report: FinalReviewReport, context: ReviewCont
     validate_impact_coverage_context(report, context)
     ledger = report.coverage_ledger
     if ledger is not None:
+        expected_hunk_count = (
+            len(context.diff_hunks)
+            if context.diff_hunk_inventory_sha256 is not None
+            else None
+        )
+        if (
+            ledger.diff_hunk_inventory_sha256 != context.diff_hunk_inventory_sha256
+            or ledger.diff_hunk_count != expected_hunk_count
+        ):
+            raise ValueError("coverage ledger does not match the bound diff hunk inventory")
         if (
             ledger.changed_path_count != len(context.changed_files)
             or ledger.changed_paths_sha256 != review_changed_paths_sha256(context.changed_files)
