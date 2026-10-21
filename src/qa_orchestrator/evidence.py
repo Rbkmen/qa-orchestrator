@@ -112,6 +112,9 @@ _TS_MODULE_REFERENCE = re.compile(
     r"\b(?:import|export)\s+(?P<bindings>[^;]*?)\s+from\s*['\"](?P<module>[^'\"]+)['\"]",
     re.DOTALL,
 )
+_TS_DYNAMIC_MODULE_REFERENCE = re.compile(
+    r"\b(?:import|require)\s*\(\s*['\"](?P<module>[^'\"]+)['\"]\s*\)"
+)
 _TS_DECLARATION_SUFFIXES = (".d.ts", ".d.mts", ".d.cts")
 _JS_TEST_MANIFESTS = {
     "package.json",
@@ -1079,7 +1082,7 @@ def _tracked_typescript_module_paths(
 
 
 def _referenced_module_paths(path: str, source: bytes, tracked_paths: set[str]) -> set[str]:
-    """Resolve static local Python imports and JavaScript/TypeScript module references."""
+    """Resolve local Python imports and JavaScript/TypeScript module references."""
     try:
         text = source.decode("utf-8")
     except UnicodeDecodeError:
@@ -1102,10 +1105,11 @@ def _referenced_module_paths(path: str, source: bytes, tracked_paths: set[str]) 
         return paths
     if PurePosixPath(path).suffix.lower() in {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}:
         paths = set()
-        for match in _TS_MODULE_REFERENCE.finditer(text):
-            paths.update(
-                _tracked_typescript_module_paths(path, match.group("module"), tracked_paths)
-            )
+        for reference_pattern in (_TS_MODULE_REFERENCE, _TS_DYNAMIC_MODULE_REFERENCE):
+            for match in reference_pattern.finditer(text):
+                paths.update(
+                    _tracked_typescript_module_paths(path, match.group("module"), tracked_paths)
+                )
         return paths
     return set()
 

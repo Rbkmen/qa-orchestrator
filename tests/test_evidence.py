@@ -1309,6 +1309,23 @@ def test_tracked_typescript_module_paths_resolves_declaration_files(module, trac
     assert resolved == tracked_paths
 
 
+@pytest.mark.parametrize(
+    "statement",
+    (
+        'const widget = import("../components/widget");',
+        'const widget = require("../components/widget");',
+    ),
+)
+def test_referenced_module_paths_resolves_literal_dynamic_imports(statement):
+    referenced = evidence_module._referenced_module_paths(
+        "src/entrypoints/billing.ts",
+        statement.encode("utf-8"),
+        {"src/components/widget.tsx"},
+    )
+
+    assert referenced == {"src/components/widget.tsx"}
+
+
 def test_discovery_finds_reverse_importers_and_exposes_test_audit_candidates(tmp_path):
     repository = tmp_path / "repo"
     repository.mkdir()
