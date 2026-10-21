@@ -102,13 +102,15 @@ def make_profile_review_report(bound_review_context):
         unverified=(),
         evidence_map=(),
         execution_metrics: ProfileExecutionMetrics | None = None,
+        context=None,
     ):
+        review_context = context or bound_review_context
         if context_selection is None and not omit_context_selection:
             context_selection = ProfileContextSelection(
-                source_packet_sha256=bound_review_context.evidence_packet_sha256,
+                source_packet_sha256=review_context.evidence_packet_sha256,
                 selected_packet_sha256="8" * 64,
-                included_refs=bound_review_context.evidence_refs,
-                changed_files_count=len(bound_review_context.changed_files),
+                included_refs=review_context.evidence_refs,
+                changed_files_count=len(review_context.changed_files),
                 max_bytes=1024,
                 selected_bytes=512,
             )
@@ -119,11 +121,11 @@ def make_profile_review_report(bound_review_context):
                 sorted(
                     {
                         entry.path
-                        for entry in bound_review_context.evidence_registry
+                        for entry in review_context.evidence_registry
                         if entry.kind == "source"
-                        and entry.revision == bound_review_context.head_sha
+                        and entry.revision == review_context.head_sha
                         and entry.source_text_available is True
-                        and entry.path in bound_review_context.changed_files
+                        and entry.path in review_context.changed_files
                         and entry.evidence_ref in included_refs
                     }
                 )
@@ -132,8 +134,8 @@ def make_profile_review_report(bound_review_context):
                 profile=profile,
                 attempt=1,
                 outcome="completed",
-                review_head_sha=bound_review_context.head_sha,
-                review_diff_sha256=bound_review_context.diff_sha256,
+                review_head_sha=review_context.head_sha,
+                review_diff_sha256=review_context.diff_sha256,
                 started_at=attempt_time,
                 completed_at=attempt_time,
                 queue_seconds=0,
@@ -157,12 +159,12 @@ def make_profile_review_report(bound_review_context):
             scope="Reviewed src/service.py and its changed behavior.",
             finding_candidates=tuple(findings),
             reviewed_changed_paths=tuple(
-                bound_review_context.changed_files
+                review_context.changed_files
                 if reviewed_changed_paths is None
                 else reviewed_changed_paths
             ),
             reviewed_diff_hunk_indexes=tuple(
-                range(len(bound_review_context.diff_hunks))
+                range(len(review_context.diff_hunks))
                 if reviewed_diff_hunk_indexes is None
                 else reviewed_diff_hunk_indexes
             ),

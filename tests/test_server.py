@@ -4,7 +4,7 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
-from qa_orchestrator.contracts import ReviewAgent, ReviewBundle
+from qa_orchestrator.contracts import EvidenceRecord, ReviewAgent, ReviewBundle
 from qa_orchestrator.review_profiles import bundle_execution_groups
 from qa_orchestrator.server import build_server
 from qa_orchestrator.service import OrchestratorService
@@ -820,10 +820,32 @@ async def test_bound_review_tools_record_context_and_structured_reports(
     make_final_review_report,
 ):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
-    review_context = _manifest_v2(bound_review_context)
+    review_context = _manifest_v2(bound_review_context).model_copy(
+        update={
+            "evidence_registry": (
+                EvidenceRecord(
+                    evidence_ref="E1",
+                    kind="source",
+                    revision=bound_review_context.head_sha,
+                    path="src/service.py",
+                    start_line=42,
+                    end_line=42,
+                    sha256="4" * 64,
+                    source_text_available=True,
+                ),
+                EvidenceRecord(
+                    evidence_ref="E2",
+                    kind="other",
+                    locator="host:context",
+                    sha256="5" * 64,
+                ),
+            )
+        }
+    )
     profile_report = make_profile_review_report(
         ReviewAgent.CODE_REVIEWER,
         findings=(review_finding_candidate,),
+        context=review_context,
     )
     final_report = make_final_review_report(
         (ReviewAgent.CODE_REVIEWER,),

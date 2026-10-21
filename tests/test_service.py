@@ -67,6 +67,17 @@ def test_service_exposes_fixed_profiles_and_bundles(tmp_path):
     )
 
 
+def test_review_profiles_require_evidence_backed_impact_tracing(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    constraints = service.prepare_review_route(ReviewAgent.CODE_EXPLORER).constraints
+    combined = " ".join(constraints).lower()
+
+    assert "inbound callers" in combined
+    assert "external consumer" in combined
+    assert "no matches do not prove no dependency" in combined
+    assert "source locations covered by cited head-source evidence" in combined
+
+
 def test_service_advances_with_a_fixed_bundle(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
     started = service.start_qa_orchestration("ordinary_review")

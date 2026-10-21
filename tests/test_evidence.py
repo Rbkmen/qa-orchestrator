@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
+import qa_orchestrator.evidence as evidence_module
 from qa_orchestrator.contracts import (
     EvidenceRecord,
     ProfileAttemptMetrics,
@@ -226,6 +227,61 @@ def test_claimed_lines_must_use_a_supporting_head_ref_and_stay_in_bounds(pinned_
     entire_file = register_evidence(context, definitions, repository)
     with pytest.raises(ValueError, match="outside the pinned head"):
         verify_evidence(entire_file, repository, candidates=(candidate(line=99),))
+
+
+def test_schema_v2_findings_require_registered_source_evidence(pinned_evidence):
+    repository, _, context, definitions = pinned_evidence
+    context_data = context.model_dump(mode="python")
+    manifest = dict(context_data["input_manifest"])
+    manifest.update(
+        schema_version=2,
+        source_inventory_status="complete",
+        source_conflict_status="clear",
+    )
+    context_data["input_manifest"] = manifest
+    strict_context = register_evidence(
+        ReviewContext.model_validate(context_data), definitions, repository
+    )
+
+    validate_registered_locations(strict_context, (candidate(),))
+    with pytest.raises(ValueError, match="require source locations"):
+        validate_registered_locations(
+            strict_context,
+            (candidate().model_copy(update={"source_locations": ()}),),
+        )
+    with pytest.raises(ValueError, match="unregistered evidence refs"):
+        validate_registered_locations(
+            strict_context,
+            (candidate(evidence_ref="UNREGISTERED"),),
+        )
+    without_registry = ReviewContext.model_validate(
+        {**strict_context.model_dump(mode="python"), "evidence_registry": ()}
+    )
+    with pytest.raises(ValueError, match="require registered evidence"):
+        validate_registered_locations(without_registry, (candidate(),))
+
+    legacy_context = register_evidence(context, definitions, repository)
+    validate_registered_locations(
+        legacy_context,
+        (candidate().model_copy(update={"source_locations": ()}),),
+    )
+
+
+def test_neighbor_discovery_uses_codegraph_by_default(monkeypatch, pinned_evidence):
+    repository, _, context, _ = pinned_evidence
+    original = evidence_module._codegraph_relationship_suggestions
+    requested = []
+
+    def capture(*args, **kwargs):
+        requested.append(kwargs["enabled"])
+        kwargs["enabled"] = False
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(evidence_module, "_codegraph_relationship_suggestions", capture)
+    manifest = discover_neighbor_evidence(context, repository)
+
+    assert requested == [True]
+    assert manifest["codegraph"]["status"] == "not_requested"
 
 
 def test_legacy_source_record_without_text_status_keeps_previous_location_behavior(
@@ -723,7 +779,6 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
             str(context_path),
             "--repository",
             str(repository),
-            "--codegraph",
             "--output",
             str(output_path),
             "--bound-context",
@@ -748,6 +803,22 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
     assert bound_context.neighbor_discovery_candidate_set_sha256 == cli_manifest[
         "candidate_set_sha256"
     ]
+
+    no_graph_output_path = tmp_path / "neighbors-no-codegraph.json"
+    assert evidence_main(
+        [
+            "discover",
+            "--context",
+            str(context_path),
+            "--repository",
+            str(repository),
+            "--no-codegraph",
+            "--output",
+            str(no_graph_output_path),
+        ]
+    ) == 0
+    no_graph_manifest = json.loads(no_graph_output_path.read_text(encoding="utf-8"))
+    assert no_graph_manifest["codegraph"]["status"] == "not_requested"
     assert bound_context.diff_hunk_inventory_sha256 == cli_manifest[
         "diff_hunk_inventory"
     ]["inventory_sha256"]

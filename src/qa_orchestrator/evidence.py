@@ -412,20 +412,34 @@ def validate_registered_locations(
     context: ReviewContext,
     candidates: Sequence[ReviewFindingCandidate],
 ) -> None:
+    if not candidates:
+        return
+    strict_bound_review = (
+        context.input_manifest is not None
+        and context.input_manifest.schema_version == 2
+    )
+    if strict_bound_review and not context.evidence_registry:
+        raise ValueError("strict review findings require registered evidence")
     if not context.evidence_registry:
         return
     registry = {entry.evidence_ref: entry for entry in context.evidence_registry}
     for candidate in candidates:
+        if strict_bound_review:
+            if not candidate.source_locations:
+                raise ValueError("strict review findings require source locations")
+            if set(candidate.evidence_refs) - set(registry):
+                raise ValueError("strict review finding cites unregistered evidence refs")
         source_entries = [
             registry[ref]
             for ref in candidate.evidence_refs
             if ref in registry
             and registry[ref].kind == "source"
             and registry[ref].revision == context.head_sha
-                # Records written before the text-availability flag are legacy
-                # metadata. Preserve their historical citation behavior; new
-                # registrations always write an explicit True/False value.
-                and registry[ref].source_text_available is not False
+            and (
+                registry[ref].source_text_available is True
+                if strict_bound_review
+                else registry[ref].source_text_available is not False
+            )
         ]
         for location in candidate.source_locations:
             if not any(
@@ -1563,7 +1577,7 @@ def discover_neighbor_evidence(
     repository: Path,
     *,
     max_candidates: int = 50,
-    use_codegraph: bool = False,
+    use_codegraph: bool = True,
 ) -> dict:
     """Suggest pinned declarations, callers, contracts, tests and test manifests.
 
@@ -2195,8 +2209,9 @@ def evidence_main(argv: list[str]) -> int:
     discover.add_argument("--max-candidates", default=50, type=int)
     discover.add_argument(
         "--codegraph",
-        action="store_true",
-        help="Add callers and callees from a complete CodeGraph index matching the bound checkout",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include callers and callees from a current CodeGraph index when available (default: enabled)",
     )
     discover.add_argument(
         "--bound-context",
