@@ -827,6 +827,9 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
     assert "event_names_subscribers_and_topics" in {
         item["kind"] for item in coverage["not_systematically_traced"]
     }
+    assert "unsupported_language_imports" in {
+        item["kind"] for item in coverage["not_systematically_traced"]
+    }
     assert "dynamic_generated_runtime_and_cross_repository_links" in {
         item["kind"] for item in coverage["not_systematically_traced"]
     }
@@ -1326,6 +1329,62 @@ def test_referenced_module_paths_resolves_literal_dynamic_imports(statement):
     assert referenced == {"src/components/widget.tsx"}
 
 
+@pytest.mark.parametrize(
+    ("path", "statement", "tracked_paths", "expected"),
+    (
+        (
+            "lib/jobs/restore.rb",
+            'require_relative "../payments/deadline"',
+            {"lib/payments/deadline.rb"},
+            {"lib/payments/deadline.rb"},
+        ),
+        (
+            "app/jobs/restore.rb",
+            'require "payments/deadline"',
+            {"lib/payments/deadline.rb"},
+            {"lib/payments/deadline.rb"},
+        ),
+        (
+            "lib/jobs/restore.rb",
+            'require_relative("../payments/deadline.rb") # pinned path',
+            {"lib/payments/deadline.rb"},
+            {"lib/payments/deadline.rb"},
+        ),
+        (
+            "lib/jobs/restore.rb",
+            'require_relative helper_path\nrequire_relative "#{name}"',
+            {"lib/jobs/helper_path.rb", "lib/jobs/name.rb"},
+            set(),
+        ),
+        (
+            "lib/jobs/restore.rb",
+            'require "json"',
+            {"lib/jobs/json.rb"},
+            set(),
+        ),
+        (
+            "lib/jobs/restore.rb",
+            'require "./json"',
+            {"lib/jobs/json.rb", "json.rb"},
+            set(),
+        ),
+        (
+            "lib/jobs/restore.rb",
+            '# require_relative "../payments/deadline"',
+            {"lib/payments/deadline.rb"},
+            set(),
+        ),
+    ),
+)
+def test_referenced_module_paths_resolves_only_literal_ruby_requires(
+    path, statement, tracked_paths, expected
+):
+    assert (
+        evidence_module._referenced_module_paths(path, statement.encode("utf-8"), tracked_paths)
+        == expected
+    )
+
+
 def test_discovery_finds_reverse_importers_and_exposes_test_audit_candidates(tmp_path):
     repository = tmp_path / "repo"
     repository.mkdir()
@@ -1398,6 +1457,79 @@ def test_discovery_finds_reverse_importers_and_exposes_test_audit_candidates(tmp
     audit_candidate = manifest["test_audit"]["candidates"][0]
     assert audit_candidate["category"] == "no_direct_assertion"
     assert audit_candidate["path"] == "tests/billing/price.test.ts"
+
+
+def test_discovery_finds_reverse_ruby_require_importers(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args])
+
+    git("init", "--quiet")
+    files = {
+        "lib/payments/deadline.rb": (
+            "module Payments\n"
+            "  class Deadline\n"
+            "    def expired?(now)\n"
+            "      now > expires_at\n"
+            "    end\n"
+            "  end\n"
+            "end\n"
+        ),
+        "lib/jobs/restore_job.rb": (
+            'require_relative "../payments/deadline"\n'
+            "module Jobs\n"
+            "  class RestoreJob\n"
+            "    def perform(now)\n"
+            "      Payments::Deadline.new.expired?(now)\n"
+            "    end\n"
+            "  end\n"
+            "end\n"
+        ),
+    }
+    for path, content in files.items():
+        target = repository / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").decode().strip()
+
+    changed = repository / "lib/payments/deadline.rb"
+    changed.write_text(
+        files["lib/payments/deadline.rb"].replace("now > expires_at", "now >= expires_at"),
+        encoding="utf-8",
+    )
+    git("add", "lib/payments/deadline.rb")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "head")
+    head = git("rev-parse", "HEAD").decode().strip()
+    diff = git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head, "--")
+    context = ReviewContext(
+        repository="github.com/example/repo",
+        base_sha=base,
+        head_sha=head,
+        diff_sha256=hashlib.sha256(diff).hexdigest(),
+        evidence_packet_sha256=hashlib.sha256(b"packet").hexdigest(),
+        changed_files=("lib/payments/deadline.rb",),
+        evidence_refs=("S1", "D1"),
+    )
+
+    manifest = discover_neighbor_evidence(context, repository, use_codegraph=False)
+    by_path = {entry["path"]: entry for entry in manifest["candidate_records"]}
+    caller = by_path["lib/jobs/restore_job.rb"]
+
+    assert "imports_changed_path" in caller["reasons"]
+    assert caller["imported_changed_paths"] == ["lib/payments/deadline.rb"]
+    traced_imports = next(
+        item
+        for item in manifest["relationship_coverage"]["traced"]
+        if item["kind"] == "local_imports_and_reverse_importers"
+    )
+    assert "Ruby" in traced_imports["languages"]
+    assert "ruby_dynamic_loads_and_autoload" in {
+        item["kind"] for item in manifest["relationship_coverage"]["not_systematically_traced"]
+    }
 
 
 def test_discovery_skips_symbol_search_when_neighbor_file_exceeds_byte_cap(

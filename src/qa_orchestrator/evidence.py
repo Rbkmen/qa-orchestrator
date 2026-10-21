@@ -55,6 +55,11 @@ _DECLARATION_PATTERNS = (
     re.compile(r"(?:^|\n)\s*(?:public\s+)?(?:func|type)\s+([A-Za-z_]\w*)", re.MULTILINE),
     re.compile(r"(?:^|\n)\s*(?:def|class|module)\s+([A-Za-z_]\w*)", re.MULTILINE),
 )
+_RUBY_REQUIRE_REFERENCE = re.compile(
+    r"^[ \t]*require(?P<relative>_relative)?[ \t]*(?:\([ \t]*)?"
+    r"(?P<quote>['\"])(?P<module>[^'\"\r\n]+)(?P=quote)[ \t]*\)?[ \t]*(?:#.*)?$",
+    re.MULTILINE,
+)
 _TEST_PATH = re.compile(
     r"(^|/)(tests?|specs?)(/|$)|(^|[._-])(test|spec)([._-]|$)", re.IGNORECASE
 )
@@ -1081,8 +1086,48 @@ def _tracked_typescript_module_paths(
     return {candidate for candidate in variants if candidate in tracked_paths}
 
 
+def _tracked_ruby_module_paths(
+    path: str,
+    module: str,
+    *,
+    relative: bool,
+    tracked_paths: set[str],
+) -> set[str]:
+    """Resolve literal Ruby require paths without guessing dynamic load paths."""
+    if not module or "#{" in module:
+        return set()
+    module_path = PurePosixPath(module)
+    if module_path.is_absolute() or (not relative and module.startswith(".")):
+        return set()
+
+    parts = list(PurePosixPath(path).parent.parts) if relative else []
+    for part in module_path.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not relative or not parts:
+                return set()
+            parts.pop()
+            continue
+        parts.append(part)
+    target = "/".join(parts)
+    if not target:
+        return set()
+
+    bases = [target]
+    if not relative and not target.startswith("lib/"):
+        bases.append(f"lib/{target}")
+    candidates = set()
+    for base in bases:
+        if PurePosixPath(base).suffix.lower() == ".rb":
+            candidates.add(base)
+        else:
+            candidates.add(f"{base}.rb")
+    return candidates & tracked_paths
+
+
 def _referenced_module_paths(path: str, source: bytes, tracked_paths: set[str]) -> set[str]:
-    """Resolve local Python imports and JavaScript/TypeScript module references."""
+    """Resolve supported static Python, Ruby, and JavaScript/TypeScript imports."""
     try:
         text = source.decode("utf-8")
     except UnicodeDecodeError:
@@ -1110,6 +1155,18 @@ def _referenced_module_paths(path: str, source: bytes, tracked_paths: set[str]) 
                 paths.update(
                     _tracked_typescript_module_paths(path, match.group("module"), tracked_paths)
                 )
+        return paths
+    if PurePosixPath(path).suffix.lower() == ".rb":
+        paths = set()
+        for match in _RUBY_REQUIRE_REFERENCE.finditer(text):
+            paths.update(
+                _tracked_ruby_module_paths(
+                    path,
+                    match.group("module"),
+                    relative=match.group("relative") is not None,
+                    tracked_paths=tracked_paths,
+                )
+            )
         return paths
     return set()
 
@@ -2091,8 +2148,11 @@ def discover_neighbor_evidence(
         },
         {
             "kind": "local_imports_and_reverse_importers",
-            "languages": ["Python", "JavaScript", "TypeScript"],
-            "method": "bounded pinned-source import parsing",
+            "languages": ["Python", "Ruby", "JavaScript", "TypeScript"],
+            "method": (
+                "bounded pinned-source import parsing; Ruby supports static literal require "
+                "and require_relative only"
+            ),
             "exhaustive": False,
         },
         {
@@ -2117,6 +2177,20 @@ def discover_neighbor_evidence(
         },
     ]
     not_systematically_traced = [
+        {
+            "kind": "unsupported_language_imports",
+            "reason": (
+                "Local import resolution covers Python, JavaScript/TypeScript, and static Ruby "
+                "require forms; imports in other languages are not systematically traced."
+            ),
+        },
+        {
+            "kind": "ruby_dynamic_loads_and_autoload",
+            "reason": (
+                "Dynamic Ruby require paths, $LOAD_PATH semantics, Rails autoloading, and "
+                "runtime-generated links are not resolved as static import edges."
+            ),
+        },
         {"kind": "api_and_serialized_contract_registration", "reason": "Framework route registries and serialized contracts may not have direct imports or matching identifiers."},
         {"kind": "database_model_schema_migration_query_relations", "reason": "Path labels and text matches do not establish ORM, migration, or query semantics."},
         {"kind": "event_names_subscribers_and_topics", "reason": "String-based event wiring and subscribers are not resolved as semantic edges."},
