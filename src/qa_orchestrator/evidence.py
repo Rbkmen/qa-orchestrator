@@ -108,8 +108,8 @@ _SCOPE_REQUIRED_INPUT_KINDS = {
     "deployment": ("deployment_manifest", "service_dependency_map"),
     "service_boundary": ("service_dependency_map",),
 }
-_TS_IMPORT = re.compile(
-    r"\bimport\s+(?P<bindings>[^;]*?)\s+from\s*['\"](?P<module>[^'\"]+)['\"]",
+_TS_MODULE_REFERENCE = re.compile(
+    r"\b(?:import|export)\s+(?P<bindings>[^;]*?)\s+from\s*['\"](?P<module>[^'\"]+)['\"]",
     re.DOTALL,
 )
 _JS_TEST_MANIFESTS = {
@@ -1072,7 +1072,7 @@ def _tracked_typescript_module_paths(
 
 
 def _referenced_module_paths(path: str, source: bytes, tracked_paths: set[str]) -> set[str]:
-    """Resolve static local Python or JavaScript/TypeScript imports."""
+    """Resolve static local Python imports and JavaScript/TypeScript module references."""
     try:
         text = source.decode("utf-8")
     except UnicodeDecodeError:
@@ -1095,7 +1095,7 @@ def _referenced_module_paths(path: str, source: bytes, tracked_paths: set[str]) 
         return paths
     if PurePosixPath(path).suffix.lower() in {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}:
         paths = set()
-        for match in _TS_IMPORT.finditer(text):
+        for match in _TS_MODULE_REFERENCE.finditer(text):
             paths.update(
                 _tracked_typescript_module_paths(path, match.group("module"), tracked_paths)
             )
@@ -1197,7 +1197,7 @@ def _referenced_symbols(path: str, source: bytes, tracked_paths: set[str]) -> tu
                     if symbol:
                         names.add(symbol)
     elif PurePosixPath(path).suffix.lower() in {".js", ".jsx", ".ts", ".tsx"}:
-        for match in _TS_IMPORT.finditer(text):
+        for match in _TS_MODULE_REFERENCE.finditer(text):
             module = match.group("module")
             if not (
                 module.startswith((".", "@/", "~/", "src/"))

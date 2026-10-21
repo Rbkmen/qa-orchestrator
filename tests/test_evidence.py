@@ -1273,6 +1273,24 @@ def test_discovery_follows_local_typescript_imports_to_action_contract(tmp_path)
     }
 
 
+@pytest.mark.parametrize(
+    "statement",
+    (
+        'export { renew } from "../services/renewal";',
+        'export * from "../services/renewal";',
+        'export type { Renewal } from "../services/renewal";',
+    ),
+)
+def test_referenced_module_paths_resolves_typescript_reexports(statement):
+    referenced = evidence_module._referenced_module_paths(
+        "src/entrypoints/billing.ts",
+        statement.encode("utf-8"),
+        {"src/services/renewal.ts"},
+    )
+
+    assert referenced == {"src/services/renewal.ts"}
+
+
 def test_discovery_finds_reverse_importers_and_exposes_test_audit_candidates(tmp_path):
     repository = tmp_path / "repo"
     repository.mkdir()
