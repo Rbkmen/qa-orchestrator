@@ -10,6 +10,17 @@ from qa_orchestrator.server import build_server
 from qa_orchestrator.service import OrchestratorService
 
 
+def _manifest_v2(context):
+    manifest = context.input_manifest.model_copy(
+        update={
+            "schema_version": 2,
+            "source_inventory_status": "complete",
+            "source_conflict_status": "clear",
+        }
+    )
+    return context.model_copy(update={"input_manifest": manifest})
+
+
 @pytest.mark.asyncio
 async def test_server_exposes_ten_tools(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
@@ -100,6 +111,41 @@ async def test_server_publishes_tool_descriptions(tmp_path):
     assert "selected_review_routes" in prepare_description
     assert "do not make a separate preparation call" in prepare_description
     assert "standalone bundle lookup" in tools["prepare_qa_orchestration_bundle"].description
+    start_context_description = tools["start_qa_orchestration"].inputSchema["properties"][
+        "review_context"
+    ]["description"]
+    assert "Required for ordinary_review and widget_review" in start_context_description
+    assert "schema v2" in start_context_description
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task_type", ["ordinary_review", "widget_review"])
+async def test_code_review_start_requires_bound_context_and_manifest_v2(
+    tmp_path, bound_review_context, task_type
+):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    async with Client(build_server(service)) as client:
+        with pytest.raises(ToolError, match="require a bound review_context"):
+            await client.call_tool("start_qa_orchestration", {"task_type": task_type})
+
+        with pytest.raises(ToolError, match="input_manifest schema_version=2"):
+            await client.call_tool(
+                "start_qa_orchestration",
+                {
+                    "task_type": task_type,
+                    "review_context": bound_review_context.model_dump(mode="json"),
+                },
+            )
+
+        started = await client.call_tool(
+            "start_qa_orchestration",
+            {
+                "task_type": task_type,
+                "review_context": _manifest_v2(bound_review_context).model_dump(mode="json"),
+            },
+        )
+
+    assert started.structured_content["review_completion_mode"] == "strict"
 
 
 @pytest.mark.asyncio
@@ -206,7 +252,7 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
 async def test_tools_support_keyed_retries_and_active_lease_renewal(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
     async with Client(build_server(service)) as client:
-        started = await client.call_tool("start_qa_orchestration", {"task_type": "ordinary_review"})
+        started = await client.call_tool("start_qa_orchestration", {"task_type": "other"})
         payload = {
             "run_id": started.structured_content["run_id"], "completed_step": "triage",
             "status": "completed", "selected_profile": "python_reviewer",
@@ -228,10 +274,10 @@ async def test_delete_session_removes_only_requested_run_and_is_idempotent(tmp_p
     service = OrchestratorService.from_settings(data_dir=tmp_path)
     async with Client(build_server(service)) as client:
         target = (await client.call_tool(
-            "start_qa_orchestration", {"task_type": "ordinary_review"}
+            "start_qa_orchestration", {"task_type": "other"}
         )).structured_content
         retained = (await client.call_tool(
-            "start_qa_orchestration", {"task_type": "widget_review"}
+            "start_qa_orchestration", {"task_type": "other"}
         )).structured_content
         run_id = target["run_id"]
         if state == "early_stop":
@@ -405,7 +451,7 @@ async def test_catalog_read_preserves_session_state_and_persisted_bytes(tmp_path
     service = OrchestratorService(Settings(orchestration_session_store_path=store_path))
     async with Client(build_server(service)) as client:
         started = (await client.call_tool(
-            "start_qa_orchestration", {"task_type": "ordinary_review"}
+            "start_qa_orchestration", {"task_type": "other"}
         )).structured_content
         before = store_path.read_bytes()
         first = await client.call_tool("get_qa_orchestration_catalog", {})
@@ -480,14 +526,14 @@ async def test_list_qa_orchestrations_recovers_run_id_without_changing_state(tmp
         empty = await client.call_tool("list_qa_orchestrations", {})
         assert empty.structured_content["sessions"] == []
         started = await client.call_tool(
-            "start_qa_orchestration", {"task_type": "ordinary_review"}
+            "start_qa_orchestration", {"task_type": "other"}
         )
         listed = await client.call_tool("list_qa_orchestrations", {})
         entries = listed.structured_content["sessions"]
         assert len(entries) == 1
         assert entries[0] == {
             "run_id": started.structured_content["run_id"],
-            "task_type": "ordinary_review",
+            "task_type": "other",
             "status": "active",
             "current_step": "triage",
             "selected_bundle": None,
@@ -515,7 +561,7 @@ async def test_orchestration_tools_return_no_evidence_fields(tmp_path):
     async with Client(build_server(service)) as client:
         result = await client.call_tool(
             "start_qa_orchestration",
-            {"task_type": "ordinary_review"},
+            {"task_type": "other"},
         )
 
     payload = result.structured_content
@@ -524,7 +570,7 @@ async def test_orchestration_tools_return_no_evidence_fields(tmp_path):
     assert payload["host_owns_decisions"] is True
     assert payload["allowed_profiles"] == [profile.value for profile in ReviewAgent]
     assert payload["allowed_bundles"] == [bundle.value for bundle in ReviewBundle]
-    assert payload["recommended_bundles"] == ["ordinary_mr"]
+    assert payload["recommended_bundles"] == []
     assert payload["recommended_profiles"] == []
     assert payload["selected_bundle"] is None
     assert payload["review_profiles"] == []
@@ -540,7 +586,7 @@ async def test_orchestration_tools_advance_and_get_structured_state(tmp_path):
     async with Client(build_server(service)) as client:
         started = await client.call_tool(
             "start_qa_orchestration",
-            {"task_type": "ordinary_review"},
+            {"task_type": "other"},
         )
         run_id = started.structured_content["run_id"]
         advanced = await client.call_tool(
@@ -567,7 +613,7 @@ async def test_orchestration_tool_finalizes_early_stop(tmp_path, outcome):
     async with Client(build_server(service)) as client:
         started = await client.call_tool(
             "start_qa_orchestration",
-            {"task_type": "ordinary_review"},
+            {"task_type": "other"},
         )
         run_id = started.structured_content["run_id"]
         with pytest.raises(ToolError):
@@ -609,7 +655,7 @@ async def test_orchestration_tool_selects_sol_from_structured_risk_signals(tmp_p
     async with Client(build_server(service)) as client:
         started = await client.call_tool(
             "start_qa_orchestration",
-            {"task_type": "ordinary_review"},
+            {"task_type": "other"},
         )
         run_id = started.structured_content["run_id"]
         primary = await client.call_tool(
@@ -653,7 +699,7 @@ async def test_orchestration_tools_advance_with_bundle_order(tmp_path):
     async with Client(build_server(service)) as client:
         started = await client.call_tool(
             "start_qa_orchestration",
-            {"task_type": "ordinary_review"},
+            {"task_type": "other"},
         )
         advanced = await client.call_tool(
             "advance_qa_orchestration",
@@ -696,7 +742,7 @@ async def test_orchestration_tools_complete_each_bundle(tmp_path, bundle: Review
     async with Client(build_server(service)) as client:
         started = await client.call_tool(
             "start_qa_orchestration",
-            {"task_type": "ordinary_review"},
+            {"task_type": "other"},
         )
         run_id = started.structured_content["run_id"]
         current = await client.call_tool(
@@ -774,6 +820,7 @@ async def test_bound_review_tools_record_context_and_structured_reports(
     make_final_review_report,
 ):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
+    review_context = _manifest_v2(bound_review_context)
     profile_report = make_profile_review_report(
         ReviewAgent.CODE_REVIEWER,
         findings=(review_finding_candidate,),
@@ -781,6 +828,7 @@ async def test_bound_review_tools_record_context_and_structured_reports(
     final_report = make_final_review_report(
         (ReviewAgent.CODE_REVIEWER,),
         findings=((review_finding_candidate, (ReviewAgent.CODE_REVIEWER,)),),
+        context=review_context,
     )
 
     async with Client(build_server(service)) as client:
@@ -788,7 +836,7 @@ async def test_bound_review_tools_record_context_and_structured_reports(
             "start_qa_orchestration",
             {
                 "task_type": "ordinary_review",
-                "review_context": bound_review_context.model_dump(mode="json"),
+                "review_context": review_context.model_dump(mode="json"),
             },
         )
         run_id = started.structured_content["run_id"]
@@ -848,7 +896,7 @@ async def test_clean_single_profile_can_finalize_without_synthesis_tool_step(tmp
     async with Client(build_server(service)) as client:
         started = await client.call_tool(
             "start_qa_orchestration",
-            {"task_type": "ordinary_review"},
+            {"task_type": "other"},
         )
         run_id = started.structured_content["run_id"]
         triage = await client.call_tool(
@@ -896,7 +944,7 @@ async def test_orchestration_tool_rejects_incompatible_bundle_signals(tmp_path):
     async with Client(build_server(service)) as client:
         started = await client.call_tool(
             "start_qa_orchestration",
-            {"task_type": "ordinary_review"},
+            {"task_type": "other"},
         )
         run_id = started.structured_content["run_id"]
 
@@ -941,7 +989,7 @@ async def test_orchestration_tool_rejects_selection_after_triage_and_custom_orde
     async with Client(build_server(service)) as client:
         started = await client.call_tool(
             "start_qa_orchestration",
-            {"task_type": "ordinary_review"},
+            {"task_type": "other"},
         )
         run_id = started.structured_content["run_id"]
         await client.call_tool(
@@ -984,7 +1032,7 @@ async def test_server_completes_full_flow_without_state_reads_or_task_persistenc
     async with Client(build_server(service)) as client:
         started = await client.call_tool(
             "start_qa_orchestration",
-            {"task_type": "ordinary_review"},
+            {"task_type": "other"},
         )
         run_id = started.structured_content["run_id"]
         primary = await client.call_tool(

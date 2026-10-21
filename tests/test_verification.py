@@ -10,6 +10,7 @@ _STARTED_AT = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
 _COMPLETED_AT = datetime(2026, 10, 20, 12, 5, tzinfo=UTC)
 _SCOPE = "pytest tests/test_service.py"
 _SCOPE_SHA256 = hashlib.sha256(_SCOPE.encode("utf-8")).hexdigest()
+_VERIFIER_ID = "github_actions.v1"
 
 
 @pytest.fixture
@@ -48,6 +49,7 @@ def test_verify_provider_run_rejects_wrong_sha(record):
         verify_provider_run(
             record,
             provider_response(record, head_sha="f" * 40),
+            verifier_id=_VERIFIER_ID,
             verified_at=_COMPLETED_AT + timedelta(seconds=1),
         )
 
@@ -64,6 +66,7 @@ def test_verify_provider_run_rejects_scope_or_timestamp_mismatch(record, changes
         verify_provider_run(
             record,
             provider_response(record, **changes),
+            verifier_id=_VERIFIER_ID,
             verified_at=_COMPLETED_AT + timedelta(seconds=1),
         )
 
@@ -73,6 +76,7 @@ def test_verify_provider_run_rejects_completion_after_verified_at(record):
         verify_provider_run(
             record,
             provider_response(record),
+            verifier_id=_VERIFIER_ID,
             verified_at=_COMPLETED_AT - timedelta(seconds=1),
         )
 
@@ -83,11 +87,13 @@ def test_verify_provider_run_returns_receipt_for_matching_run(record):
     receipt = verify_provider_run(
         record,
         provider_response(record),
+        verifier_id=_VERIFIER_ID,
         verified_at=verified_at,
     )
 
     assert receipt.head_sha == record.head_sha
     assert receipt.run_id == record.run_id
+    assert receipt.verifier_id == _VERIFIER_ID
     assert receipt.conclusion == record.status
     assert receipt.scope_sha256 == record.scope_sha256
     assert receipt.verified_at == verified_at
@@ -99,5 +105,17 @@ def test_verify_provider_run_rejects_unexpected_response_fields(record):
         verify_provider_run(
             record,
             provider_response(record, access_token="do-not-persist"),
+            verifier_id=_VERIFIER_ID,
+            verified_at=_COMPLETED_AT + timedelta(seconds=1),
+        )
+
+
+@pytest.mark.parametrize("verifier_id", ["", "GitHub", "adapter with spaces", "a" * 65])
+def test_verify_provider_run_rejects_unstable_verifier_id(record, verifier_id):
+    with pytest.raises(ValueError, match="verifier_id"):
+        verify_provider_run(
+            record,
+            provider_response(record),
+            verifier_id=verifier_id,
             verified_at=_COMPLETED_AT + timedelta(seconds=1),
         )

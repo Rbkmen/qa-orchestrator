@@ -12,6 +12,7 @@ _PROVIDER_RESPONSE_FIELDS = frozenset(
     {"run_id", "head_sha", "conclusion", "scope_sha256", "started_at", "completed_at"}
 )
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
+_VERIFIER_ID = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 
 
 def _aware_datetime(value: object, *, field: str) -> datetime:
@@ -24,6 +25,7 @@ def verify_provider_run(
     record: ReviewVerificationRecord,
     response: Mapping[str, object],
     *,
+    verifier_id: str,
     verified_at: datetime,
 ) -> VerificationReceipt:
     """Validate normalized provider run metadata and return a hash-only receipt.
@@ -33,6 +35,8 @@ def verify_provider_run(
     """
     if not isinstance(response, Mapping) or set(response) != _PROVIDER_RESPONSE_FIELDS:
         raise ValueError("provider response must contain only normalized run metadata")
+    if not isinstance(verifier_id, str) or not _VERIFIER_ID.fullmatch(verifier_id):
+        raise ValueError("verifier_id must be a stable lowercase adapter identifier")
     if record.source != "ci_provider":
         raise ValueError("provider run verification requires a ci_provider record")
     if not all(
@@ -92,7 +96,7 @@ def verify_provider_run(
         ).encode("utf-8")
     ).hexdigest()
     return VerificationReceipt(
-        verifier_id="provider-neutral",
+        verifier_id=verifier_id,
         run_id=run_id,
         head_sha=head_sha,
         conclusion=conclusion,

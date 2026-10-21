@@ -17,6 +17,8 @@ from qa_orchestrator.contracts import (
     ReviewCoverageLedger,
     ReviewDiffHunk,
     ReviewFindingLocation,
+    ReviewInputConflict,
+    ReviewInputManifest,
     ReviewInputSource,
     ReviewNote,
     ReviewRouteSelection,
@@ -94,6 +96,73 @@ def test_provider_verified_record_accepts_matching_verifier_receipt():
 
     assert record.provenance == "provider_verified"
     assert isinstance(record.receipt, VerificationReceipt)
+
+
+def test_input_manifest_v2_requires_an_explicit_inventory_and_conflict_assessment():
+    source = ReviewInputSource(
+        source_id="JIRA-1",
+        kind="issue_description",
+        locator="https://jira.example/browse/JIRA-1",
+        required=True,
+        retrieval_status="complete",
+        pagination_status="not_applicable",
+        extraction_status="complete",
+    )
+
+    with pytest.raises(ValidationError, match="requires inventory and conflict statuses"):
+        ReviewInputManifest(schema_version=2, sources=(source,))
+
+    legacy = ReviewInputManifest(sources=(source,))
+    assert legacy.schema_version == 1
+    assert legacy.source_inventory_status is None
+
+
+def test_input_manifest_v2_binds_conflicts_to_declared_sources():
+    first = ReviewInputSource(
+        source_id="JIRA-1",
+        kind="issue_description",
+        locator="https://jira.example/browse/JIRA-1",
+        required=True,
+    )
+    second = ReviewInputSource(
+        source_id="MR-1",
+        kind="merge_request",
+        locator="https://gitlab.example/group/repo/-/merge_requests/1",
+        required=True,
+    )
+    conflict = ReviewInputConflict(
+        conflict_id="CONFLICT-1",
+        source_ids=("JIRA-1", "MR-1"),
+        disposition="resolved",
+        resolution_source_id="JIRA-1",
+        summary="The two descriptions specify different retry behavior.",
+        resolution_summary="The ticket is the approved behavior source.",
+    )
+
+    manifest = ReviewInputManifest(
+        schema_version=2,
+        sources=(first, second),
+        source_inventory_status="complete",
+        source_conflict_status="resolved",
+        source_conflicts=(conflict,),
+    )
+
+    assert manifest.source_conflicts == (conflict,)
+    with pytest.raises(ValidationError, match="undeclared input source"):
+        ReviewInputManifest(
+            schema_version=2,
+            sources=(first,),
+            source_inventory_status="complete",
+            source_conflict_status="unresolved",
+            source_conflicts=(
+                ReviewInputConflict(
+                    conflict_id="CONFLICT-2",
+                    source_ids=("JIRA-1", "MR-1"),
+                    disposition="unresolved",
+                    summary="The sources disagree.",
+                ),
+            ),
+        )
 
 
 @pytest.mark.parametrize(
