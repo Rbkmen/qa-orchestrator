@@ -213,6 +213,14 @@ that the prompt alone enforces isolation.
 
 **Expected:** Return no finding candidate. Mention a gap only if a specific required behavior is actually unverified; do not invent a risk to fill the section.
 
+### 14. Incomplete neighbor map — `code_explorer`
+
+**Scope:** A changed handler is selected through a string-keyed plugin registry. The registry is partly generated at build time, CodeGraph reports a truncated caller search, and the host cannot obtain the external-consumer map.
+
+**Evidence:** `E1` shows the changed handler; `E2` shows the in-repository registry lookup; `E3` records that generated registry entries are not in the checkout and that caller discovery was truncated; `E4` records that the external-consumer map is unavailable.
+
+**Expected:** Map only the supported local relationship from `E1`–`E2`. Keep the generated and external relationships as explicit omissions or verification gaps, mark impact coverage `partial` or `unknown`, and do not claim that the blast radius is contained or that no external consumers exist. Do not create an implementation finding without evidence of wrong behavior.
+
 ## Deep-review routing checks
 
 These synthetic cases check the host's signal mapping and the orchestrator's fixed rules; they do not call a model or collect run data.

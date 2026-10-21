@@ -145,7 +145,7 @@ class BenchmarkQualityGatePolicy(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     policy_id: str = Field(min_length=1, max_length=128)
-    dataset_kind: Literal["synthetic", "reviewbench_reference", "curated"]
+    dataset_kind: Literal["reviewbench_reference", "curated"]
     dataset_sha256: Sha256Digest
     min_cases: int = Field(ge=1, strict=True)
     min_gold_findings: int = Field(ge=1, strict=True)

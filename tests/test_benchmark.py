@@ -131,8 +131,20 @@ def _quality_result(score, policy):
     return evaluate_quality_policy(score, policy, configuration_id="baseline")
 
 
+def test_named_quality_policy_rejects_synthetic_dataset(benchmark_inputs):
+    score = _score_for_quality_policy(benchmark_inputs)
+    synthetic_policy = {
+        **_quality_policy(score).model_dump(mode="python"),
+        "dataset_kind": "synthetic",
+    }
+
+    with pytest.raises(ValidationError, match="dataset_kind"):
+        BenchmarkQualityGatePolicy.model_validate(synthetic_policy)
+
+
 def _speed_fixture(benchmark_inputs, *, include_schedule=True, schedule_order=None):
     dataset_data, result_data = deepcopy(benchmark_inputs)
+    dataset_data["kind"] = "curated"
     dataset = BenchmarkDataset.model_validate(dataset_data)
     runs = []
     run_order = []
@@ -478,6 +490,7 @@ def test_quality_gate_cli_accepts_required_dataset_identity(tmp_path):
 
 def test_quality_gate_cli_loads_digest_pinned_policy(tmp_path, benchmark_inputs):
     dataset_data, results_data = benchmark_inputs
+    dataset_data["kind"] = "curated"
     score = score_benchmark(
         BenchmarkDataset.model_validate(dataset_data),
         BenchmarkResults.model_validate(results_data),
@@ -1720,6 +1733,7 @@ def test_speed_candidate_is_blocked_when_baseline_fails_quality_policy(benchmark
 
 def _exercise_speed_comparison_cli(tmp_path, benchmark_inputs):
     dataset_data, result_data = benchmark_inputs
+    dataset_data["kind"] = "curated"
     runs = []
     for configuration, times in (("baseline", (100, 110)), ("candidate", (80, 90))):
         for attempt, elapsed_ms in enumerate(times, 1):

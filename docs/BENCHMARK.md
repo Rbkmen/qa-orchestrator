@@ -120,8 +120,10 @@ in trusted CI configuration and pin the exact approved dataset kind and digest.
 The policy also sets minimum case and unique gold-finding coverage, precision
 and recall floors, the high-impact miss limit, and any required evidence,
 location, or stratum floors. A speed policy may set `min_speed_repetitions`;
-without it, the speed eligibility check is blocked. No policy or approved
-corpus digest is checked in here.
+without it, the speed eligibility check is blocked. Named quality policies
+accept only `reviewbench_reference` or `curated` datasets; `synthetic` remains
+available for contract tests and explicitly experimental threshold checks.
+No policy or approved corpus digest is checked in here.
 
 ```sh
 qa-orch benchmark quality-gate --score /path/to/run/score.json \

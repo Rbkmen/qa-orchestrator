@@ -628,6 +628,11 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
 
     original_run = evidence_module.subprocess.run
     stale_index = False
+    index_metadata = {
+        "reindexRecommended": False,
+        "builtWithExtractionVersion": 27,
+        "currentExtractionVersion": 27,
+    }
     codegraph_calls = []
     monkeypatch.setattr(
         evidence_module.shutil,
@@ -654,7 +659,7 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
                             "removed": 0,
                         },
                         "worktreeMismatch": None,
-                        "index": {"state": "complete"},
+                        "index": {"state": "complete", **index_metadata},
                     }
                 ),
                 stderr="",
@@ -757,6 +762,9 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
     assert "event_names_subscribers_and_topics" in {
         item["kind"] for item in coverage["not_systematically_traced"]
     }
+    assert "dynamic_generated_runtime_and_cross_repository_links" in {
+        item["kind"] for item in coverage["not_systematically_traced"]
+    }
     omissions_by_kind = {item["kind"]: item for item in manifest["omissions"]}
     assert omissions_by_kind["symbol_search_path_limit"]["count"] >= 1
     assert omissions_by_kind["symbol_search_path_limit"]["examples"]
@@ -767,6 +775,37 @@ def test_discovery_suggests_pinned_callers_contracts_and_tests(tmp_path, monkeyp
     assert stale_manifest["codegraph"]["status"] == "index_not_current"
     assert stale_manifest["codegraph"]["caller_candidates"] == []
     assert not any(command[1] == "callers" for command in codegraph_calls[previous_graph_calls:])
+
+    stale_index = False
+    valid_index_metadata = dict(index_metadata)
+    for stale_metadata in (
+        {
+            "reindexRecommended": True,
+            "builtWithExtractionVersion": 27,
+            "currentExtractionVersion": 27,
+        },
+        {
+            "reindexRecommended": False,
+            "builtWithExtractionVersion": 26,
+            "currentExtractionVersion": 27,
+        },
+        {
+            "builtWithExtractionVersion": 27,
+            "currentExtractionVersion": 27,
+        },
+    ):
+        index_metadata.clear()
+        index_metadata.update(stale_metadata)
+        previous_graph_calls = len(codegraph_calls)
+        stale_manifest = discover_neighbor_evidence(context, repository, use_codegraph=True)
+        assert stale_manifest["codegraph"]["status"] == "index_not_current"
+        assert stale_manifest["codegraph"]["caller_candidates"] == []
+        assert not any(
+            command[1] in {"callers", "callees"}
+            for command in codegraph_calls[previous_graph_calls:]
+        )
+    index_metadata.update(valid_index_metadata)
+    stale_index = True
 
     context_path = tmp_path / "context.json"
     output_path = tmp_path / "neighbors.json"

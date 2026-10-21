@@ -1434,11 +1434,20 @@ def _codegraph_relationship_suggestions(
     )
     index_data = index_status.get("index")
     index_complete = isinstance(index_data, dict) and index_data.get("state") == "complete"
+    index_extraction_current = (
+        isinstance(index_data, dict)
+        and index_data.get("reindexRecommended") is False
+        and type(index_data.get("builtWithExtractionVersion")) is int
+        and type(index_data.get("currentExtractionVersion")) is int
+        and index_data["builtWithExtractionVersion"]
+        == index_data["currentExtractionVersion"]
+    )
     if (
         not same_project
         or not pending_clean
         or index_status.get("worktreeMismatch", "missing") is not None
         or not index_complete
+        or not index_extraction_current
     ):
         summary["status"] = "index_not_current"
         return summary
