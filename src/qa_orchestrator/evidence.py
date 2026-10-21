@@ -112,6 +112,7 @@ _TS_MODULE_REFERENCE = re.compile(
     r"\b(?:import|export)\s+(?P<bindings>[^;]*?)\s+from\s*['\"](?P<module>[^'\"]+)['\"]",
     re.DOTALL,
 )
+_TS_DECLARATION_SUFFIXES = (".d.ts", ".d.mts", ".d.cts")
 _JS_TEST_MANIFESTS = {
     "package.json",
     "package-lock.json",
@@ -1051,7 +1052,10 @@ def _tracked_typescript_module_paths(
         target = _normalized_relative_module_path(path, module)
     elif module.startswith(("@/", "~/")):
         target = module[2:]
-        if not any(f"{target}{suffix}" in tracked_paths for suffix in (".ts", ".tsx", ".js", ".jsx")):
+        if not any(
+            f"{target}{suffix}" in tracked_paths
+            for suffix in (".ts", ".tsx", ".js", ".jsx", *_TS_DECLARATION_SUFFIXES)
+        ):
             target = f"src/{target}"
     elif module.startswith("src/"):
         target = module
@@ -1059,7 +1063,10 @@ def _tracked_typescript_module_paths(
         return set()
 
     variants = [target]
-    suffixes = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts", ".json")
+    suffixes = (
+        ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts",
+        *_TS_DECLARATION_SUFFIXES, ".json",
+    )
     if PurePosixPath(target).suffix.lower() in suffixes:
         suffix = PurePosixPath(target).suffix
         if suffix in {".js", ".jsx", ".mjs", ".cjs"}:

@@ -1291,6 +1291,24 @@ def test_referenced_module_paths_resolves_typescript_reexports(statement):
     assert referenced == {"src/services/renewal.ts"}
 
 
+@pytest.mark.parametrize(
+    ("module", "tracked_paths"),
+    (
+        ("../contracts/checkout", {"src/contracts/checkout.d.ts"}),
+        ("../contracts/checkout", {"src/contracts/checkout/index.d.ts"}),
+        ("../contracts/checkout", {"src/contracts/checkout.d.mts"}),
+        ("../contracts/checkout", {"src/contracts/checkout.d.cts"}),
+        ("@/contracts", {"contracts.d.ts"}),
+    ),
+)
+def test_tracked_typescript_module_paths_resolves_declaration_files(module, tracked_paths):
+    resolved = evidence_module._tracked_typescript_module_paths(
+        "src/components/checkout.ts", module, tracked_paths
+    )
+
+    assert resolved == tracked_paths
+
+
 def test_discovery_finds_reverse_importers_and_exposes_test_audit_candidates(tmp_path):
     repository = tmp_path / "repo"
     repository.mkdir()
