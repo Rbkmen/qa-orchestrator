@@ -209,6 +209,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
             Field(
                 description=(
                     "Optional immutable repository, base/head, changed-file, diff, and Evidence Packet identity. "
+                    "Required for ordinary_review and widget_review, with an input_manifest using schema v2. "
                     "When supplied, every completed profile must include a structured report whose "
                     "evidence references belong to this packet; completed outcomes require a final report. "
                     "The response may include file-type-based recommended_profiles and stack-matched "
@@ -219,18 +220,31 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ),
         ] = None,
     ) -> QaOrchestrationSession:
-        """Create a QA session; optionally bind it to one immutable review input.
+        """Create a QA session and bind code reviews to one immutable review input.
 
         Every call creates a separate session. Use prepare_qa_orchestration for a stateless profile
         checklist. `task_type` narrows the bundle shortlist; the host still selects the review route.
-        For an auditable code review, pass `review_context` with the exact source and evidence packet
-        identifiers. The server stores the identifiers and submitted report fields, not the raw diff or full Evidence Packet.
+        Code review task types require `review_context` with the exact source and Evidence Packet
+        identifiers plus an input manifest schema v2. The server stores identifiers and submitted
+        report fields, not the raw diff or full Evidence Packet.
 
         - Sessions expire after the configured TTL (1800 seconds by default).
         - Capacity is 100 sessions by default and can be configured.
         - Expired sessions are purged and retained terminal sessions may be evicted. If capacity can
           only be freed by removing an active session, the call returns a `session limit` error.
         """
+        if task_type in {"ordinary_review", "widget_review"}:
+            if review_context is None:
+                raise ValueError(
+                    "ordinary_review and widget_review require a bound review_context"
+                )
+            if (
+                review_context.input_manifest is None
+                or review_context.input_manifest.schema_version != 2
+            ):
+                raise ValueError(
+                    "code review requires review_context.input_manifest schema_version=2"
+                )
         return service.start_qa_orchestration(task_type, review_context)
 
     @mcp.tool(title="Record QA step result", annotations=STATE_TOOL_ANNOTATIONS)

@@ -561,6 +561,10 @@ def render_final_report(
                 f"{source_counts['incomplete_required']} required incomplete, "
                 f"{source_counts['incomplete_optional']} optional incomplete."
             ),
+            "- **Source inventory assessment:** "
+            + _text(input_summary["source_inventory_status"] or "not recorded (legacy manifest)"),
+            "- **Description conflict assessment:** "
+            + _text(input_summary["source_conflict_status"] or "not recorded (legacy manifest)"),
         )
     )
     if input_summary["incomplete_sources"]:
@@ -573,6 +577,23 @@ def render_final_report(
             )
     else:
         lines.append("- **Incomplete sources:** none")
+    if input_summary["source_conflicts"]:
+        lines.append("- **Description conflicts:**")
+        for conflict in input_summary["source_conflicts"]:
+            source_refs = ", ".join(_code(source_id) for source_id in conflict["source_ids"])
+            criterion_refs = ", ".join(_text(ref) for ref in conflict["criterion_refs"])
+            details = [
+                _text(conflict["disposition"]),
+                f"sources: {source_refs}",
+                _text(conflict["summary"]),
+            ]
+            if criterion_refs:
+                details.append(f"criteria: {criterion_refs}")
+            if conflict["resolution_source_id"]:
+                details.append(f"resolved by: {_code(conflict['resolution_source_id'])}")
+            if conflict["resolution_summary"]:
+                details.append(_text(conflict["resolution_summary"]))
+            lines.append(f"  - {_code(conflict['conflict_id'])}: " + "; ".join(details))
     if input_summary["missing_criterion_refs"]:
         missing_refs = ", ".join(
             _text(reference) for reference in input_summary["missing_criterion_refs"]

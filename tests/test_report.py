@@ -23,6 +23,8 @@ from qa_orchestrator.contracts import (
     ReviewDiffHunk,
     ReviewFindingLocation,
     ReviewFindingSource,
+    ReviewInputConflict,
+    ReviewInputManifest,
     ReviewInputSource,
     ReviewNote,
     ReviewVerificationRecord,
@@ -971,6 +973,80 @@ def test_report_renders_incomplete_required_input_as_partial(bound_review_contex
     assert "JIRA-1" in rendered
     assert "pagination incomplete" in rendered
     assert "extraction partial" in rendered
+
+
+def test_manifest_v2_unknown_inventory_and_conflict_assessment_block_completion(
+    bound_review_context,
+):
+    context = _context_with_input_sources(
+        bound_review_context,
+        (_input_source("MR-1"),),
+    )
+    manifest = ReviewInputManifest(
+        schema_version=2,
+        sources=context.input_manifest.sources,
+        source_inventory_status="unknown",
+        source_conflict_status="unknown",
+    )
+    context = context.model_copy(update={"input_manifest": manifest})
+
+    summary = evidence_module.input_manifest_completeness(context)
+    rendered = render_final_report(
+        FinalReviewReport(
+            summary="The source inventory has not been reconciled.",
+            profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        ),
+        context=context,
+    )
+
+    assert summary["status"] == "unknown"
+    assert "source inventory is unknown" in summary["status_reason"]
+    assert "description conflict assessment is unknown" in summary["status_reason"]
+    assert "Source inventory assessment:** unknown" in rendered
+    assert "Description conflict assessment:** unknown" in rendered
+    assert evidence_module.review_completion_gaps(
+        context,
+        FinalReviewReport(
+            summary="Incomplete source inventory.",
+            profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        ),
+    )
+
+
+def test_unresolved_description_conflict_is_rendered_and_blocks_completion(
+    bound_review_context,
+):
+    context = _context_with_input_sources(
+        bound_review_context,
+        (_input_source("JIRA-1"), _input_source("MR-1", kind="merge_request")),
+    )
+    conflict = ReviewInputConflict(
+        conflict_id="CONFLICT-1",
+        source_ids=("JIRA-1", "MR-1"),
+        disposition="unresolved",
+        summary="The descriptions specify different retry behavior.",
+    )
+    manifest = ReviewInputManifest(
+        schema_version=2,
+        sources=context.input_manifest.sources,
+        source_inventory_status="complete",
+        source_conflict_status="unresolved",
+        source_conflicts=(conflict,),
+    )
+    context = context.model_copy(update={"input_manifest": manifest})
+    report = FinalReviewReport(
+        summary="A material source conflict remains.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+    )
+
+    summary = evidence_module.input_manifest_completeness(context)
+    rendered = render_final_report(report, context=context)
+
+    assert summary["status"] == "partial"
+    assert "CONFLICT-1" in summary["status_reason"]
+    assert "CONFLICT-1" in rendered
+    assert "unresolved" in rendered
+    assert any("input manifest is partial" in gap for gap in evidence_module.review_completion_gaps(context, report))
 
 
 def test_api_scope_requires_contract_and_consumer_map(bound_review_context):

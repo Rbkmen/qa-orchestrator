@@ -238,15 +238,67 @@ class ReviewInputSource(BaseModel):
         return self
 
 
+class ReviewInputConflict(BaseModel):
+    """Concise host-recorded conflict between declared review sources."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    conflict_id: EvidenceRefId
+    source_ids: tuple[EvidenceRefId, ...] = Field(min_length=2, max_length=10)
+    criterion_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=100)
+    disposition: Literal["resolved", "unresolved"]
+    resolution_source_id: EvidenceRefId | None = None
+    summary: str = Field(min_length=1, max_length=1000)
+    resolution_summary: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("summary", "resolution_summary")
+    @classmethod
+    def nonblank_conflict_text(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("source conflict text must not be blank")
+        return value.strip() if value is not None else None
+
+    @model_validator(mode="after")
+    def validate_conflict_resolution(self) -> "ReviewInputConflict":
+        if len(set(self.source_ids)) != len(self.source_ids):
+            raise ValueError("source conflict source IDs must be unique")
+        if len(set(self.criterion_refs)) != len(self.criterion_refs):
+            raise ValueError("source conflict criterion refs must be unique")
+        if self.disposition == "resolved":
+            if (
+                self.resolution_source_id not in self.source_ids
+                or self.resolution_summary is None
+            ):
+                raise ValueError("resolved source conflicts need an authoritative source and rationale")
+        elif self.resolution_source_id is not None or self.resolution_summary is not None:
+            raise ValueError("unresolved source conflicts must not claim a resolution")
+        return self
+
+
 class ReviewInputManifest(BaseModel):
     """Bounded metadata-only inventory of sources declared for a review."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    schema_version: Literal[1, 2] = 1
     sources: tuple[ReviewInputSource, ...] = Field(default=(), max_length=100)
+    source_inventory_status: Literal["complete", "partial", "unknown"] | None = None
+    source_conflict_status: Literal["clear", "resolved", "unresolved", "unknown"] | None = None
+    source_conflicts: tuple[ReviewInputConflict, ...] = Field(default=(), max_length=100)
 
     @model_validator(mode="after")
     def validate_unique_sources_and_criteria(self) -> "ReviewInputManifest":
+        if self.schema_version == 1 and (
+            self.source_inventory_status is not None
+            or self.source_conflict_status is not None
+            or self.source_conflicts
+        ):
+            raise ValueError("source inventory and conflict fields require manifest schema v2")
+        if self.schema_version == 2 and (
+            self.source_inventory_status is None or self.source_conflict_status is None
+        ):
+            raise ValueError("manifest schema v2 requires inventory and conflict statuses")
+
         source_ids = [source.source_id for source in self.sources]
         if len(set(source_ids)) != len(source_ids):
             raise ValueError("input manifest source IDs must be unique")
@@ -258,6 +310,25 @@ class ReviewInputManifest(BaseModel):
         ]
         if len(set(criterion_refs)) != len(criterion_refs):
             raise ValueError("input manifest criterion refs must be unique")
+        conflict_ids = [conflict.conflict_id for conflict in self.source_conflicts]
+        if len(set(conflict_ids)) != len(conflict_ids):
+            raise ValueError("input manifest conflict IDs must be unique")
+        known_source_ids = set(source_ids)
+        known_criterion_refs = set(criterion_refs)
+        for conflict in self.source_conflicts:
+            if set(conflict.source_ids) - known_source_ids:
+                raise ValueError("source conflict references an undeclared input source")
+            if set(conflict.criterion_refs) - known_criterion_refs:
+                raise ValueError("source conflict references an undeclared criterion")
+        unresolved = any(conflict.disposition == "unresolved" for conflict in self.source_conflicts)
+        if self.source_conflict_status == "clear" and self.source_conflicts:
+            raise ValueError("clear source conflict status must not include conflicts")
+        if self.source_conflict_status == "resolved" and (
+            not self.source_conflicts or unresolved
+        ):
+            raise ValueError("resolved source conflict status needs only resolved conflicts")
+        if self.source_conflict_status == "unresolved" and not unresolved:
+            raise ValueError("unresolved source conflict status needs an unresolved conflict")
         return self
 
 

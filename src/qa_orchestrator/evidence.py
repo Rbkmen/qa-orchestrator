@@ -586,6 +586,32 @@ def input_manifest_completeness(context: ReviewContext | None) -> dict[str, obje
     }
     missing_criterion_refs = sorted(declared_criteria - registered_criteria)
     missing_required_criterion_refs = sorted(required_criteria - registered_criteria)
+    source_inventory_status = (
+        manifest.source_inventory_status if manifest is not None and manifest.schema_version == 2 else None
+    )
+    source_conflict_status = (
+        manifest.source_conflict_status if manifest is not None and manifest.schema_version == 2 else None
+    )
+    source_conflicts = (
+        [conflict.model_dump(mode="json") for conflict in manifest.source_conflicts]
+        if manifest is not None and manifest.schema_version == 2
+        else []
+    )
+    assessment_reasons = []
+    if manifest is not None and manifest.schema_version == 2:
+        if source_inventory_status != "complete":
+            assessment_reasons.append(f"source inventory is {source_inventory_status}")
+        if source_conflict_status == "unknown":
+            assessment_reasons.append("description conflict assessment is unknown")
+        elif source_conflict_status == "unresolved":
+            unresolved_ids = [
+                conflict["conflict_id"]
+                for conflict in source_conflicts
+                if conflict["disposition"] == "unresolved"
+            ]
+            assessment_reasons.append(
+                "description conflicts remain unresolved: " + ", ".join(unresolved_ids)
+            )
 
     if context is None:
         status = "unknown"
@@ -612,6 +638,13 @@ def input_manifest_completeness(context: ReviewContext | None) -> dict[str, obje
     elif required_incomplete or missing_required_criterion_refs or unlisted_criteria:
         status = "partial"
         status_reason = "one or more required sources or criteria are incomplete or unlisted"
+    elif assessment_reasons:
+        status = (
+            "partial"
+            if source_inventory_status == "partial" or source_conflict_status == "unresolved"
+            else "unknown"
+        )
+        status_reason = "; ".join(assessment_reasons)
     else:
         status = "complete"
         status_reason = "all required sources and declared criteria are accounted for"
@@ -623,6 +656,9 @@ def input_manifest_completeness(context: ReviewContext | None) -> dict[str, obje
         "scope_categories": scope_categories,
         "scope_required_source_kinds": scope_required_source_kinds,
         "missing_scope_source_kinds": missing_scope_source_kinds,
+        "source_inventory_status": source_inventory_status,
+        "source_conflict_status": source_conflict_status,
+        "source_conflicts": source_conflicts,
         "source_counts": {
             "declared": len(sources),
             "required": len(required_sources),
