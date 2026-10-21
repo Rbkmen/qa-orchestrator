@@ -120,6 +120,18 @@ def candidate(line=2, evidence_ref="S1"):
     )
 
 
+def strict_context_with_registry(context, definitions, repository):
+    context_data = context.model_dump(mode="python")
+    manifest = dict(context_data["input_manifest"])
+    manifest.update(
+        schema_version=2,
+        source_inventory_status="complete",
+        source_conflict_status="clear",
+    )
+    context_data["input_manifest"] = manifest
+    return register_evidence(ReviewContext.model_validate(context_data), definitions, repository)
+
+
 def test_profile_input_receipt_requires_matching_packet_and_written_prompt(
     bound_review_context,
     make_profile_review_report,
@@ -265,6 +277,59 @@ def test_schema_v2_findings_require_registered_source_evidence(pinned_evidence):
         legacy_context,
         (candidate().model_copy(update={"source_locations": ()}),),
     )
+    validate_registered_locations(
+        legacy_context,
+        (candidate().model_copy(update={"change_origin": "introduced"}),),
+    )
+    validate_registered_locations(
+        legacy_context,
+        (candidate().model_copy(update={"change_origin": "pre_existing"}),),
+    )
+
+
+def test_schema_v2_introduced_origin_requires_bound_diff_evidence(pinned_evidence):
+    repository, _, context, definitions = pinned_evidence
+    strict_context = strict_context_with_registry(context, definitions, repository)
+    introduced = candidate().model_copy(update={"change_origin": "introduced"})
+
+    with pytest.raises(ValueError, match="introduced finding requires bound diff evidence"):
+        validate_registered_locations(strict_context, (introduced,))
+
+    with_diff = introduced.model_copy(update={"evidence_refs": ("S1", "D1")})
+    validate_registered_locations(strict_context, (with_diff,))
+
+
+def test_schema_v2_preexisting_origin_requires_base_source_at_finding_location(
+    pinned_evidence,
+):
+    repository, _, context, definitions = pinned_evidence
+    context_data = context.model_dump(mode="python")
+    context_data["evidence_refs"] = ("S1", "D1", "B1")
+    base_source = {
+        "evidence_ref": "B1",
+        "kind": "source",
+        "revision": context.base_sha,
+        "path": "src/api.py",
+        "start_line": 1,
+        "end_line": 1,
+    }
+    strict_context = strict_context_with_registry(
+        ReviewContext.model_validate(context_data), (*definitions, base_source), repository
+    )
+    preexisting = candidate().model_copy(
+        update={"change_origin": "pre_existing", "evidence_refs": ("S1", "B1")}
+    )
+
+    with pytest.raises(
+        ValueError, match="pre-existing finding requires matching base source evidence"
+    ):
+        validate_registered_locations(strict_context, (preexisting,))
+
+    base_source.update(start_line=2, end_line=2)
+    strict_context = strict_context_with_registry(
+        ReviewContext.model_validate(context_data), (*definitions, base_source), repository
+    )
+    validate_registered_locations(strict_context, (preexisting,))
 
 
 def test_neighbor_discovery_uses_codegraph_by_default(monkeypatch, pinned_evidence):

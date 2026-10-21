@@ -424,39 +424,64 @@ def validate_registered_locations(
         return
     registry = {entry.evidence_ref: entry for entry in context.evidence_registry}
     for candidate in candidates:
+        cited_entries = [
+            registry[ref] for ref in candidate.evidence_refs if ref in registry
+        ]
         if strict_bound_review:
             if not candidate.source_locations:
                 raise ValueError("strict review findings require source locations")
             if set(candidate.evidence_refs) - set(registry):
                 raise ValueError("strict review finding cites unregistered evidence refs")
+            if candidate.change_origin == "introduced" and not any(
+                entry.kind == "diff"
+                and entry.revision == context.head_sha
+                and entry.sha256 == context.diff_sha256
+                for entry in cited_entries
+            ):
+                raise ValueError("introduced finding requires bound diff evidence")
         source_entries = [
-            registry[ref]
-            for ref in candidate.evidence_refs
-            if ref in registry
-            and registry[ref].kind == "source"
-            and registry[ref].revision == context.head_sha
+            entry
+            for entry in cited_entries
+            if entry.kind == "source"
+            and entry.revision == context.head_sha
             and (
-                registry[ref].source_text_available is True
+                entry.source_text_available is True
                 if strict_bound_review
-                else registry[ref].source_text_available is not False
+                else entry.source_text_available is not False
             )
         ]
+        base_source_entries = [
+            entry
+            for entry in cited_entries
+            if entry.kind == "source"
+            and entry.revision == context.base_sha
+            and entry.source_text_available is True
+        ]
+        def supports_location(entry: EvidenceRecord, location) -> bool:
+            return entry.path == location.path and (
+                entry.start_line is None
+                or (
+                    location.start_line >= entry.start_line
+                    and (location.end_line or location.start_line)
+                    <= (entry.end_line or entry.start_line)
+                )
+            )
+
         for location in candidate.source_locations:
             if not any(
-                entry.path == location.path
-                and (
-                    entry.start_line is None
-                    or (
-                        location.start_line >= entry.start_line
-                        and (location.end_line or location.start_line)
-                        <= (entry.end_line or entry.start_line)
-                    )
-                )
-                for entry in source_entries
+                supports_location(entry, location) for entry in source_entries
             ):
                 raise ValueError(
                     "finding location is not supported by registered head source evidence"
                 )
+            if (
+                strict_bound_review
+                and candidate.change_origin == "pre_existing"
+                and not any(
+                    supports_location(entry, location) for entry in base_source_entries
+                )
+            ):
+                raise ValueError("pre-existing finding requires matching base source evidence")
 
 
 def validate_context_selection(context: ReviewContext, report: ProfileReviewReport) -> None:
