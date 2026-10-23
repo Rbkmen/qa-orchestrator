@@ -1,0 +1,280 @@
+{
+  "format": "reviewbench-gold-reconciliation-v1",
+  "reviewbench_commit": "12e9d1aadbe7ddf4a480c6bd4ffb6ae37c7bcb67",
+  "dataset_sha256": "5428d96846e97be55e0c3ae8dd2ba317ac3808b45b53b552a7f4b4794552ee25",
+  "official_test_manifest_sha256": "0f277447878a0b02f587c0b40a76a74985d9d1db3cb212d9dfbc97b1d1270f60",
+  "dataset_case_count": 25,
+  "manifest_case_count": 25,
+  "case_ids_match_manifest": true,
+  "official_full_gold_findings": 565,
+  "official_tp_count": 352,
+  "official_fp_count": 213,
+  "dataset_gold_count": 352,
+  "dataset_gold_semantics": "TP-only subset",
+  "exact_tp_tuple_fields": [
+    "path/file",
+    "start_line",
+    "end_line",
+    "description/message",
+    "severity",
+    "category",
+    "scope",
+    "difficulty",
+    "context_required"
+  ],
+  "tp_mismatch_count": 0,
+  "tp_exact_match": true,
+  "full_gold_file_set_sha256": "8e2803fe2c6644b06ed5e28e8e8bf6a9fabf4fcd9386e1c792fa71aa24328989",
+  "per_case": [
+    {
+      "case_id": "PierreJanineh_TechDebtMCP_135-16a54f0f",
+      "gold_file_sha256": "75c71c49222d6bb597701dcd0bceb5df734be1918769f792dcf694f18556d438",
+      "official_total": 19,
+      "official_tp": 9,
+      "official_fp": 10,
+      "dataset_tp": 9,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "simnaut_emdash_2-41d75006",
+      "gold_file_sha256": "2eaee297debde29bb623e2d895bcb7d5c85652310db938544ab0c8af310a923f",
+      "official_total": 17,
+      "official_tp": 6,
+      "official_fp": 11,
+      "dataset_tp": 6,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "konturio_disaster-ninja-fe_1230-d169e9da",
+      "gold_file_sha256": "f64d1655345d8984f86d776ce72451e63cfaf8c63fcb5a41bcdb73615cc9eadf",
+      "official_total": 18,
+      "official_tp": 13,
+      "official_fp": 5,
+      "dataset_tp": 13,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "cmik_apilix_12-0c34439a",
+      "gold_file_sha256": "0600da10bc56952d316f71b1f2cc41926190fadc07e9a72e28c6a8a1ef9de509",
+      "official_total": 42,
+      "official_tp": 36,
+      "official_fp": 6,
+      "dataset_tp": 36,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "AA-Factory_aafactory-prototype_17-a1978cb7",
+      "gold_file_sha256": "ae659d056f8ef9f43f81133bce6cc679f719e98979551e97d46d870c17efa60c",
+      "official_total": 17,
+      "official_tp": 9,
+      "official_fp": 8,
+      "dataset_tp": 9,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "DisciplinedSoftware_Codebase-Conversion_1-4b46d68c",
+      "gold_file_sha256": "c1c6474435d7f214cac73ba38a4acdf45759d359bf3a1c1c8f3c4ce7a0bfb00c",
+      "official_total": 54,
+      "official_tp": 31,
+      "official_fp": 23,
+      "dataset_tp": 31,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "brianc_node-postgres_3650-b922f0dd",
+      "gold_file_sha256": "dd94751733c1779a6006ee1cabef100097b12d9d7725f04bc767684b15c09c16",
+      "official_total": 26,
+      "official_tp": 11,
+      "official_fp": 15,
+      "dataset_tp": 11,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "PaulStSmith_figlet-comment-generator_32-1d0b6642",
+      "gold_file_sha256": "756208738f353a1bfe27ac7f179ffa4ae0de1762eb610a5a5aea9b61380bac24",
+      "official_total": 22,
+      "official_tp": 9,
+      "official_fp": 13,
+      "dataset_tp": 9,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "brexhq_CrabTrap_15-5ef0884c",
+      "gold_file_sha256": "730d5c1b18b56ee4afba7ea67d483e85545f831323e116b1eddb9b0ee4a903a2",
+      "official_total": 25,
+      "official_tp": 16,
+      "official_fp": 9,
+      "dataset_tp": 16,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "k1LoW_gh-copilot-review_9-f9828193",
+      "gold_file_sha256": "514a3c56c0af31172ba1f435c98668ad4e7e64fa23b3142c39c1028e8ee28a80",
+      "official_total": 12,
+      "official_tp": 7,
+      "official_fp": 5,
+      "dataset_tp": 7,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "scotthamilton77_agents-config_1-1fc78970",
+      "gold_file_sha256": "16a3b1817c4f41a7989238654b24c34bd85eaec086c15ae86fe3f9f7756a3c30",
+      "official_total": 37,
+      "official_tp": 25,
+      "official_fp": 12,
+      "dataset_tp": 25,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "ardevd_jadx-collaboration_3-853179dc",
+      "gold_file_sha256": "41616088d2f2633b0025b4bc0b45a6e2c90315bcbd662ccc9636e95db3ec69fe",
+      "official_total": 14,
+      "official_tp": 9,
+      "official_fp": 5,
+      "dataset_tp": 9,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "AY2526S2-CS2103T-W14-3_tp_152-e0a9ce03",
+      "gold_file_sha256": "f8c1fcc76bc318b8f110cc46fd3869a2f201d2b6faf91e27f6429b5f540f70ef",
+      "official_total": 33,
+      "official_tp": 14,
+      "official_fp": 19,
+      "dataset_tp": 14,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "vanyastaff_nebula_224-d5ba86dd",
+      "gold_file_sha256": "dae3aa61062c7c8d11bcbc8c316f22334c4b991e317da8c4a8192b95fe75276f",
+      "official_total": 12,
+      "official_tp": 9,
+      "official_fp": 3,
+      "dataset_tp": 9,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "NCATSTranslator_translator-ingests_336-efb31e9c",
+      "gold_file_sha256": "1a665b0c06c03f7fcc40efcc2b97453a99fcc9ae46bdbc03326307c28e0825ee",
+      "official_total": 20,
+      "official_tp": 17,
+      "official_fp": 3,
+      "dataset_tp": 17,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "mheuss_chronicle_14-04ac4c02",
+      "gold_file_sha256": "fb4a77f988ee05caf20bd81e64a10bbcd0e1e950e60759479fb8b28833cf19c6",
+      "official_total": 18,
+      "official_tp": 10,
+      "official_fp": 8,
+      "dataset_tp": 10,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "superhighfives_pika_200-b227aff0",
+      "gold_file_sha256": "09abcc2b5f987f3c26158c58286653b76ec4225d467fd192143d76652d999103",
+      "official_total": 21,
+      "official_tp": 19,
+      "official_fp": 2,
+      "dataset_tp": 19,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "gagneurlab_PROTRIDER_10-b462b109",
+      "gold_file_sha256": "984d51d1f3a8ba6b6e5884ad5d61a0d5d30a271867536b16f6387fa8726ab6c7",
+      "official_total": 29,
+      "official_tp": 21,
+      "official_fp": 8,
+      "dataset_tp": 21,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "allan-mobley-jr_gimmes_468-e1477f8b",
+      "gold_file_sha256": "1552af5ae4cb65d2f1edab601dd7a58182b778bad60017b74e56adc27ed39a9d",
+      "official_total": 10,
+      "official_tp": 6,
+      "official_fp": 4,
+      "dataset_tp": 6,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "superyyrrzz_ForgeMap_106-2f3977ed",
+      "gold_file_sha256": "5e7b4a441713f40d850b075e008de90f7a5575a285f9cb0494b9a4f23dd9087e",
+      "official_total": 19,
+      "official_tp": 15,
+      "official_fp": 4,
+      "dataset_tp": 15,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "renedierking_LANdalf_88-bc1698f4",
+      "gold_file_sha256": "527ab78b8d3e9c41378716113be7c590d8e8c2a53d0bc89230cf39548580a368",
+      "official_total": 10,
+      "official_tp": 6,
+      "official_fp": 4,
+      "dataset_tp": 6,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "scottlz0310_Mcp-Docker_29-e7705d26",
+      "gold_file_sha256": "b5903ab6cd17b42adee270affab71aec94432923b3a3dcb508d2baa4d69bb624",
+      "official_total": 36,
+      "official_tp": 22,
+      "official_fp": 14,
+      "dataset_tp": 22,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "wirechat_wirechat_183-6e3156e7",
+      "gold_file_sha256": "6f5d428c233fc7ba2b110716b5c74ad627dfb67d70ecf30b73d736ac7749c227",
+      "official_total": 19,
+      "official_tp": 12,
+      "official_fp": 7,
+      "dataset_tp": 12,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "sdsykes_fastimage_165-8fc7cd32",
+      "gold_file_sha256": "c8b8ec35d969cabeed47f2b8ce48e3e42b7cccdcf7dcf72e4403a0fdb87a2707",
+      "official_total": 28,
+      "official_tp": 14,
+      "official_fp": 14,
+      "dataset_tp": 14,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    },
+    {
+      "case_id": "Marvell-Consulting_statswales-frontend_626-30ba27a5",
+      "gold_file_sha256": "55cbf9e498ee82722fcc10a006fb901c1d7a2c20867a353ebf4f9f1335686d00",
+      "official_total": 7,
+      "official_tp": 6,
+      "official_fp": 1,
+      "dataset_tp": 6,
+      "tp_mismatches": 0,
+      "gold_complete": true
+    }
+  ]
+}

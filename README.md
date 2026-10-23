@@ -146,7 +146,7 @@ Narrow routing, concurrent groups, the clean-profile synthesis shortcut, checkpo
 
 Benchmark tools score pinned runs using explicit adjudications; they do not launch models or decide matches. The explicit-threshold quality gate is experimental. A named policy pins the dataset kind and digest, case/gold coverage and quality thresholds; `blocked` means its evidence is incomplete or mismatched, while `failed` means measured quality misses a threshold. No approved production policy ships in this repository.
 
-Speed comparisons report p95 and sample counts, keep missing queue measurements unknown, and assess recorded run order. Interleaving must alternate configurations; randomized order is reported as host-declared, not independently verified. `compare` is exploratory without `--quality-policy`; a gated candidate must meet the same pinned policy as its baseline and the policy's minimum repetition count. These tools do not prove adjudicator correctness or fresh independent model execution. See [Benchmark](docs/BENCHMARK.md) and [Profile Evaluation](docs/PROFILE_EVALUATION.md).
+Speed comparisons report p95 and sample counts, keep missing queue measurements unknown, and assess recorded run order. Interleaving must alternate configurations; randomized order is reported as host-declared, not independently verified. `compare` is exploratory without `--quality-policy`; a gated candidate must meet the same pinned policy as its baseline and the policy's minimum repetition count. These tools do not prove adjudicator correctness or fresh independent model execution. See [Benchmark](docs/BENCHMARK.md), [Profile Evaluation](docs/PROFILE_EVALUATION.md), and the [audited ReviewBench baseline](docs/REVIEWBENCH_BASELINE.md).
 
 ## MCP tools
 
@@ -174,6 +174,7 @@ Reads do not extend TTL. Deletion neither finalizes a review nor cancels host ex
 | `qa-orch config show` / `reload` | Inspect/validate the saved policy |
 | `qa-orch evidence discover` | Suggest pinned declarations, callers/callees, direct importers, contracts, tests, and bounded test-audit signals; reports traced relations and bounded omissions; `--bound-context` binds the exact candidate set and diff hunk inventory |
 | `qa-orch evidence build` / `verify` | Register/verify source and diff |
+| `qa-orch evidence check-links` | Explicit, host-allowlisted reachability check for external evidence URLs; does not verify external content hashes |
 | `qa-orch evidence pack` / `chunks` | Exact context packets/source chunks |
 | `qa-orch repo profile` / `audit-tests` | Profile tracked project/test/CI metadata and report source-anchored test-suite review candidates |
 | `qa-orch rules` | Bind explicit review rules |
