@@ -457,25 +457,47 @@ class HostReviewAdapter:
                 "profile report claims review of paths outside the bound change: " + examples
             )
         unreported_paths = sorted(bound_paths - reviewed_paths)
-        if not unreported_paths:
-            return report
-        examples = ", ".join(
-            path if len(path) <= 160 else path[:157] + "..."
-            for path in unreported_paths[:5]
+        reviewed_hunks = set(report.reviewed_diff_hunk_indexes)
+        unreported_hunks = (
+            sorted(set(range(len(context.diff_hunks))) - reviewed_hunks)
+            if context.diff_hunk_inventory_status == "complete"
+            else []
         )
+        if not unreported_paths and not unreported_hunks:
+            return report
+        gap_details = []
+        if unreported_paths:
+            path_examples = ", ".join(
+                path if len(path) <= 160 else path[:157] + "..."
+                for path in unreported_paths[:5]
+            )
+            gap_details.append(
+                f"The profile did not explicitly attest inspection of {len(unreported_paths)} "
+                f"changed path(s), including {path_examples}. Coverage for those paths is "
+                "unverified."
+            )
+        if unreported_hunks:
+            hunk_examples = ", ".join(str(index) for index in unreported_hunks[:10])
+            if len(unreported_hunks) > 10:
+                hunk_examples += ", ..."
+            gap_details.append(
+                f"The profile did not explicitly attest inspection of {len(unreported_hunks)} "
+                f"diff hunk(s), including indexes {hunk_examples}. Coverage for those hunks is "
+                "unverified."
+            )
         gap = ReviewNote(
             text=(
-                f"The profile did not explicitly attest inspection of {len(unreported_paths)} "
-                f"changed path(s), including {examples}. Coverage for those paths is "
-                "unverified; review them before treating this profile as complete."
+                " ".join(gap_details)
+                + " Review the omitted material before treating this profile as complete."
             )
         )
         gaps = list(report.coverage_gaps)
-        if gap in gaps:
+        if gap not in gaps:
+            if len(gaps) >= 100:
+                raise ValueError("profile report has no room for host-generated coverage gaps")
+            gaps.append(gap)
+        if len(gaps) == len(report.coverage_gaps):
             return report
-        if len(gaps) >= 100:
-            raise ValueError("profile report has no room for host-generated coverage gaps")
-        gaps.append(gap)
         return ProfileReviewReport.model_validate(
             {**report.model_dump(mode="python"), "coverage_gaps": tuple(gaps)}
         )

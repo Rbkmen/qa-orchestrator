@@ -503,6 +503,25 @@ def test_renderer_orders_findings_and_includes_traceability():
     assert "## Unverified" in rendered
 
 
+def test_report_labels_pr_exacerbated_findings():
+    report = FinalReviewReport(
+        summary="Reviewed the API change.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        finding_candidates=(
+            _finding(
+                "F-01",
+                severity="medium",
+                title="Existing issue worsened by this PR",
+                change_origin="exacerbated_by_pr",
+            ),
+        ),
+    )
+
+    rendered = render_final_report(report)
+
+    assert "Change origin:** существовал до PR; PR усилил дефект" in rendered
+
+
 def test_report_cli_writes_markdown(tmp_path):
     source = tmp_path / "report.json"
     output = tmp_path / "report.md"

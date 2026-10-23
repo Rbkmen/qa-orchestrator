@@ -10,6 +10,7 @@ import qa_orchestrator.evidence as evidence_module
 from qa_orchestrator.contracts import (
     EvidenceRecord,
     FinalReviewReport,
+    ImpactCoverageOmission,
     ProfileAttemptMetrics,
     ProfileContextSelection,
     ProfileExecutionMetrics,
@@ -35,6 +36,444 @@ from qa_orchestrator.evidence import (
     verify_evidence,
 )
 from qa_orchestrator.orchestration import DeepReviewSignals, OrchestrationError, QaOrchestrator
+
+
+def test_added_diff_relationship_terms_capture_types_and_domain_fields():
+    diff = b"""diff --git a/src/consumer/services/api.ts b/src/consumer/services/api.ts
+index 0000000..1111111 100644
+--- a/src/consumer/services/api.ts
++++ b/src/consumer/services/api.ts
+@@ -20,2 +20,3 @@
+-    const query = new URLSearchParams({ format, lang: language });
++    const query = new URLSearchParams({ format });
++    return this.fetch({ query, lang: language as Locale, volume_24h: market.volume_24h, _options });
+"""
+
+    terms = evidence_module._added_diff_relationship_terms(
+        diff, {"Locale", "URLSearchParams"}
+    )
+
+    assert "Locale" in terms
+    assert "volume_24h" in terms
+    assert "URLSearchParams" in terms
+    assert "language" not in terms
+    assert "market" not in terms
+    assert "_options" not in terms
+
+
+def test_added_diff_relationship_terms_still_ignore_test_file_identifiers():
+    diff = b"""diff --git a/tests/api.test.ts b/tests/api.test.ts
+index 0000000..1111111 100644
+--- a/tests/api.test.ts
++++ b/tests/api.test.ts
+@@ -20,1 +20,2 @@
++    const volume_24h = market.volume_24h as Locale;
+"""
+
+    assert evidence_module._added_diff_relationship_terms(diff, {"Locale"}) == ()
+
+    e2e_diff = b"""diff --git a/tests-e2e/consumer/download-helper.ts b/tests-e2e/consumer/download-helper.ts
+index 0000000..1111111 100644
+--- a/tests-e2e/consumer/download-helper.ts
++++ b/tests-e2e/consumer/download-helper.ts
+@@ -20,1 +20,2 @@
++    const volume_24h = market.volume_24h as Locale;
+"""
+    assert evidence_module._added_diff_relationship_terms(e2e_diff, {"Locale"}) == ()
+
+
+def test_neighbor_categories_recognize_qualified_test_directories():
+    assert _neighbor_categories("tests-e2e/consumer/helpers/download.ts") == ("test",)
+    assert "test" in _neighbor_categories("test-integration/api/checkout.ts")
+
+
+def test_discovery_adds_bounded_neighbor_ranges_for_added_diff_anchors(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args])
+
+    git("init", "--quiet")
+    changed_path = "src/services/download.ts"
+    neighbor_path = "src/controllers/download.ts"
+    changed_file = repository / changed_path
+    neighbor_file = repository / neighbor_path
+    changed_file.parent.mkdir(parents=True)
+    neighbor_file.parent.mkdir(parents=True)
+    changed_file.write_text(
+        "export function download(language: string) {\n  return language;\n}\n",
+        encoding="utf-8",
+    )
+    controller_lines = [
+        "import { Locale } from '../enums/locale';",
+        "export function getDownload(req, service) {",
+        "  const download_language = (req.query.download_language?.toString() || req.language) as Locale;",
+        *[f"  // controller setup {index}" for index in range(1, 17)],
+        "  return service.download(download_language);",
+        "}",
+        *[f"// unrelated controller section {index}" for index in range(1_000)],
+    ]
+    neighbor_file.write_text("\n".join(controller_lines) + "\n", encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").decode().strip()
+
+    changed_file.write_text(
+        "export function download(language: string) {\n"
+        "  return client.download(language as Locale);\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    git("add", changed_path)
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "head")
+    head = git("rev-parse", "HEAD").decode().strip()
+    diff = git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head, "--")
+    context = ReviewContext(
+        repository="github.com/example/repo",
+        base_sha=base,
+        head_sha=head,
+        diff_sha256=hashlib.sha256(diff).hexdigest(),
+        evidence_packet_sha256=hashlib.sha256(b"packet").hexdigest(),
+        changed_files=(changed_path,),
+        evidence_refs=("D1", "S1"),
+    )
+    context = register_evidence(
+        context,
+        (
+            EvidenceRecord(
+                evidence_ref="D1",
+                kind="diff",
+                revision=head,
+                sha256=hashlib.sha256(diff).hexdigest(),
+            ).model_dump(mode="python"),
+            EvidenceRecord(
+                evidence_ref="S1",
+                kind="source",
+                revision=head,
+                path=changed_path,
+                start_line=1,
+                end_line=3,
+                sha256=hashlib.sha256(changed_file.read_bytes()).hexdigest(),
+            ).model_dump(mode="python"),
+        ),
+        repository,
+    )
+
+    discovery = discover_neighbor_evidence(context, repository, use_codegraph=False)
+    ranges = [
+        candidate
+        for candidate in discovery["candidate_records"]
+        if candidate["path"] == neighbor_path
+        and candidate.get("direct_diff_anchor_context_range")
+    ]
+
+    assert ranges
+    candidate = ranges[0]
+    assert candidate["record"]["start_line"] <= 3 <= candidate["record"]["end_line"]
+    assert candidate["record"]["end_line"] - candidate["record"]["start_line"] < 30
+    assert "Locale" in candidate["relationship_anchors"]
+    expected_source = git("show", f"{head}:{neighbor_path}").decode().splitlines()
+    expected_excerpt = "\n".join(
+        expected_source[candidate["record"]["start_line"] - 1 : candidate["record"]["end_line"]]
+    ) + "\n"
+    assert "service.download(download_language)" in expected_excerpt
+    assert hashlib.sha256(expected_excerpt.encode()).hexdigest() == candidate["record"]["sha256"]
+
+
+@pytest.mark.parametrize(
+    ("padding_lines", "trailing_lines", "includes_handler_boundary"),
+    ((120, 60, True), (160, 0, True), (240, 0, False)),
+)
+def test_direct_controller_anchor_range_includes_enclosing_handler_boundary(
+    tmp_path, padding_lines, trailing_lines, includes_handler_boundary
+):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args])
+
+    git("init", "--quiet")
+    changed_path = "src/services/download.ts"
+    controller_path = "src/consumer/controllers/download.ts"
+    changed_file = repository / changed_path
+    controller_file = repository / controller_path
+    changed_file.parent.mkdir(parents=True)
+    controller_file.parent.mkdir(parents=True)
+    changed_file.write_text(
+        "export const download = (language: string) => language;\n",
+        encoding="utf-8",
+    )
+    controller_lines = ["export const getDownload = async (req) => {"]
+    controller_lines.extend(
+        f"  // padding {index:04d} {'x' * 120}" for index in range(padding_lines)
+    )
+    controller_lines.extend(
+        (
+            "  const normalized = values.map((value) => {",
+            "    return value;",
+            "  });",
+            "  const download_language = req.query.download_language as Locale;",
+            "  return req.conapi.downloadPublishedData(download_language);",
+        )
+    )
+    controller_lines.extend(
+        f"  // trailing handler statement {index}" for index in range(trailing_lines)
+    )
+    controller_lines.extend(
+        (
+            "};",
+            *[f"// unrelated controller section {index}" for index in range(30)],
+            "export const getOther = () => {",
+            "  return 'outside matched handler';",
+            "};",
+        )
+    )
+    controller_file.write_text("\n".join(controller_lines) + "\n", encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").decode().strip()
+
+    changed_file.write_text(
+        "export const download = (language: string) => client.fetch(language as Locale);\n",
+        encoding="utf-8",
+    )
+    git("add", changed_path)
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "head")
+    head = git("rev-parse", "HEAD").decode().strip()
+    diff = git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head, "--")
+    context = ReviewContext(
+        repository="github.com/example/repo",
+        base_sha=base,
+        head_sha=head,
+        diff_sha256=hashlib.sha256(diff).hexdigest(),
+        evidence_packet_sha256=hashlib.sha256(b"packet").hexdigest(),
+        changed_files=(changed_path,),
+        evidence_refs=("D1", "S1"),
+    )
+    context = register_evidence(
+        context,
+        (
+            EvidenceRecord(
+                evidence_ref="D1",
+                kind="diff",
+                revision=head,
+                sha256=hashlib.sha256(diff).hexdigest(),
+            ).model_dump(mode="python"),
+            EvidenceRecord(
+                evidence_ref="S1",
+                kind="source",
+                revision=head,
+                path=changed_path,
+                start_line=1,
+                end_line=1,
+                sha256=hashlib.sha256(changed_file.read_bytes()).hexdigest(),
+            ).model_dump(mode="python"),
+        ),
+        repository,
+    )
+
+    discovery = discover_neighbor_evidence(context, repository, use_codegraph=False)
+    candidate = next(
+        item
+        for item in discovery["candidate_records"]
+        if item["path"] == controller_path
+        and item.get("direct_diff_anchor_context_range")
+    )
+
+    if includes_handler_boundary:
+        assert candidate["record"]["start_line"] == 1
+        assert candidate["direct_controller_handler_context_range"] is True
+    else:
+        assert candidate["record"]["start_line"] > 1
+        assert candidate["direct_controller_handler_context_range"] is False
+        assert any(
+            omission["kind"] == "controller_handler_context_limit"
+            and controller_path in omission["examples"]
+            for omission in discovery["omissions"]
+        )
+    assert (
+        candidate["record"]["end_line"] - candidate["record"]["start_line"] + 1
+        <= 200
+    )
+    excerpt = "\n".join(
+        controller_file.read_text(encoding="utf-8").splitlines()[
+            candidate["record"]["start_line"] - 1 : candidate["record"]["end_line"]
+        ]
+    ) + "\n"
+    assert ("export const getDownload" in excerpt) is includes_handler_boundary
+    assert "req.query.download_language as Locale" in excerpt
+    assert "downloadPublishedData(download_language)" in excerpt
+    if trailing_lines:
+        assert f"trailing handler statement {trailing_lines - 1}" in excerpt
+    assert "outside matched handler" not in excerpt
+    assert len(excerpt.encode()) <= 48_000
+    assert hashlib.sha256(excerpt.encode()).hexdigest() == candidate["record"]["sha256"]
+
+
+def test_discovery_pairs_direct_anchor_controllers_with_conventional_routes(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args])
+
+    git("init", "--quiet")
+    changed_path = "src/services/download.ts"
+    controller_path = "src/consumer/controllers/consumer.ts"
+    route_path = "src/consumer/routes/consumer.ts"
+    middleware_path = "src/consumer/middleware/fetch-dataset.ts"
+    helper_path = "src/shared/utils/download-zebra-revision.ts"
+    unrelated_helper_path = "src/shared/utils/download-audit.ts"
+    type_helper_path = "src/shared/utils/download-options.ts"
+    validator_path = "src/shared/validators/index.ts"
+    changed_file = repository / changed_path
+    controller_file = repository / controller_path
+    route_file = repository / route_path
+    middleware_file = repository / middleware_path
+    helper_file = repository / helper_path
+    unrelated_helper_file = repository / unrelated_helper_path
+    type_helper_file = repository / type_helper_path
+    validator_file = repository / validator_path
+    for path in (
+        changed_file,
+        controller_file,
+        route_file,
+        middleware_file,
+        helper_file,
+        unrelated_helper_file,
+        type_helper_file,
+        validator_file,
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    changed_file.write_text("export const download = (language: string) => language;\n", encoding="utf-8")
+    controller_file.write_text(
+        "import { getDownloadZebraRevision } from '../../shared/utils/download-zebra-revision';\n"
+        "import { recordDownloadAudit } from '../../shared/utils/download-audit';\n"
+        "import type { DownloadOptions } from '../../shared/utils/download-options';\n"
+        "import { downloadLanguageValidator } from '../../shared/validators';\n"
+        "export const download = (req: DownloadOptions) => {\n"
+        "  const validator = downloadLanguageValidator();\n"
+        "  const language = req.query.download_language as Locale;\n"
+        + "\n".join(f"  // handler continuation {index}" for index in range(24))
+        + "\n"
+        "  return req.api.download(getDownloadZebraRevision(language), validator);\n"
+        "};\n"
+        + "\n".join(f"// unrelated section {index}" for index in range(25))
+        + "\nexport const auditDownload = () => recordDownloadAudit();\n",
+        encoding="utf-8",
+    )
+    route_file.write_text(
+        "import { fetchPublishedDataset } from '../middleware/fetch-dataset';\n"
+        "import { download } from '../controllers/consumer';\n"
+        "router.get('/:datasetId/download/:filterId', fetchPublishedDataset, download);\n",
+        encoding="utf-8",
+    )
+    middleware_file.write_text("export const fetchPublishedDataset = (_req, _res, next) => next();\n", encoding="utf-8")
+    helper_file.write_text("export const getDownloadZebraRevision = (lang: Locale) => `file-${lang}`;\n", encoding="utf-8")
+    unrelated_helper_file.write_text("export const recordDownloadAudit = () => true;\n", encoding="utf-8")
+    type_helper_file.write_text("export interface DownloadOptions { query: Record<string, unknown> }\n", encoding="utf-8")
+    validator_file.write_text("export const downloadLanguageValidator = () => Locale;\n", encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").decode().strip()
+
+    changed_file.write_text(
+        "export const download = (language: string) => client.fetch(language as Locale);\n",
+        encoding="utf-8",
+    )
+    git("add", changed_path)
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "head")
+    head = git("rev-parse", "HEAD").decode().strip()
+    diff = git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head, "--")
+    context = ReviewContext(
+        repository="github.com/example/repo",
+        base_sha=base,
+        head_sha=head,
+        diff_sha256=hashlib.sha256(diff).hexdigest(),
+        evidence_packet_sha256=hashlib.sha256(b"packet").hexdigest(),
+        changed_files=(changed_path,),
+        evidence_refs=("D1", "S1"),
+    )
+    context = register_evidence(
+        context,
+        (
+            EvidenceRecord(
+                evidence_ref="D1",
+                kind="diff",
+                revision=head,
+                sha256=hashlib.sha256(diff).hexdigest(),
+            ).model_dump(mode="python"),
+            EvidenceRecord(
+                evidence_ref="S1",
+                kind="source",
+                revision=head,
+                path=changed_path,
+                start_line=1,
+                end_line=1,
+                sha256=hashlib.sha256(changed_file.read_bytes()).hexdigest(),
+            ).model_dump(mode="python"),
+        ),
+        repository,
+    )
+
+    discovery = discover_neighbor_evidence(context, repository, use_codegraph=False)
+    route_candidate = next(
+        candidate
+        for candidate in discovery["candidate_records"]
+        if candidate["path"] == route_path
+    )
+
+    assert "paired_controller_route" in route_candidate["reasons"]
+    for imported_path in (middleware_path, helper_path, unrelated_helper_path, type_helper_path, validator_path):
+        imported_candidate = next(
+            candidate
+            for candidate in discovery["candidate_records"]
+            if candidate["path"] == imported_path
+        )
+        assert "direct_controller_import" in imported_candidate["reasons"]
+    relevant_import = next(
+        candidate
+        for candidate in discovery["candidate_records"]
+        if candidate["path"] == helper_path
+    )
+    unrelated_import = next(
+        candidate
+        for candidate in discovery["candidate_records"]
+        if candidate["path"] == unrelated_helper_path
+    )
+    assert relevant_import["direct_controller_handler_import_references"] == [
+        {
+            "controller_path": controller_path,
+            "symbols": ["getDownloadZebraRevision"],
+            "called_symbols": ["getDownloadZebraRevision"],
+        }
+    ]
+    assert "direct_controller_handler_import_call" in relevant_import["reasons"]
+    assert "direct_controller_handler_import_call_matches_changed_anchor" in relevant_import["reasons"]
+    assert "direct_controller_handler_import_reference" in relevant_import["reasons"]
+    assert "direct_controller_handler_import_reference" not in unrelated_import["reasons"]
+    type_import = next(
+        candidate
+        for candidate in discovery["candidate_records"]
+        if candidate["path"] == type_helper_path
+    )
+    assert type_import["direct_controller_handler_import_references"] == [
+        {
+            "controller_path": controller_path,
+            "symbols": ["DownloadOptions"],
+            "called_symbols": [],
+        }
+    ]
+    assert "direct_controller_handler_import_reference" in type_import["reasons"]
+    assert "direct_controller_handler_import_call" not in type_import["reasons"]
+    candidate_paths = [candidate["path"] for candidate in discovery["candidate_records"]]
+    assert candidate_paths.index(validator_path) < candidate_paths.index(helper_path)
+    assert candidate_paths.index(route_path) < candidate_paths.index(helper_path)
+    assert candidate_paths.index(middleware_path) < candidate_paths.index(helper_path)
+    assert candidate_paths.index(helper_path) < candidate_paths.index(type_helper_path)
+    assert candidate_paths.index(helper_path) < candidate_paths.index(unrelated_helper_path)
 
 
 def test_typescript_module_alias_resolves_to_tracked_source():
@@ -584,6 +1023,53 @@ def test_schema_v2_preexisting_origin_requires_base_source_at_finding_location(
         ReviewContext.model_validate(context_data), (*definitions, base_source), repository
     )
     validate_registered_locations(strict_context, (preexisting,))
+
+
+def test_schema_v2_exacerbated_origin_requires_base_and_diff_evidence(pinned_evidence):
+    repository, _, context, definitions = pinned_evidence
+    context_data = context.model_dump(mode="python")
+    context_data["evidence_refs"] = ("S1", "D1", "B1")
+    base_source = {
+        "evidence_ref": "B1",
+        "kind": "source",
+        "revision": context.base_sha,
+        "path": "src/api.py",
+        "start_line": 1,
+        "end_line": 1,
+    }
+    strict_context = strict_context_with_registry(
+        ReviewContext.model_validate(context_data), (*definitions, base_source), repository
+    )
+
+    exacerbated = ReviewFindingCandidate.model_validate(
+        {
+            **candidate().model_dump(mode="python"),
+            "change_origin": "exacerbated_by_pr",
+            "evidence_refs": ("S1", "B1"),
+        }
+    )
+    with pytest.raises(
+        ValueError, match="exacerbated finding requires bound diff evidence"
+    ):
+        validate_registered_locations(strict_context, (exacerbated,))
+
+    with_diff_only = exacerbated.model_copy(update={"evidence_refs": ("S1", "D1")})
+    with pytest.raises(
+        ValueError, match="exacerbated finding requires matching base source evidence"
+    ):
+        validate_registered_locations(strict_context, (with_diff_only,))
+
+    with_both = exacerbated.model_copy(update={"evidence_refs": ("S1", "D1", "B1")})
+    with pytest.raises(
+        ValueError, match="exacerbated finding requires matching base source evidence"
+    ):
+        validate_registered_locations(strict_context, (with_both,))
+
+    base_source.update(start_line=2, end_line=2)
+    strict_context = strict_context_with_registry(
+        ReviewContext.model_validate(context_data), (*definitions, base_source), repository
+    )
+    validate_registered_locations(strict_context, (with_both,))
 
 
 def test_neighbor_discovery_uses_codegraph_by_default(monkeypatch, pinned_evidence):
@@ -1547,6 +2033,69 @@ def test_discovery_reports_candidates_omitted_by_result_limit(tmp_path):
         bind_neighbor_discovery(context, inconsistent_omission)
 
 
+def test_bound_discovery_omissions_must_match_impact_ledger(
+    pinned_evidence, make_impact_coverage
+):
+    repository, _, context, _ = pinned_evidence
+    discovery = discover_neighbor_evidence(context, repository, use_codegraph=False)
+    assert discovery["omissions"] == []
+
+    empty_bound_context = bind_neighbor_discovery(context, discovery)
+    assert empty_bound_context.neighbor_discovery_omissions_sha256 is not None
+
+    legacy_discovery = dict(discovery)
+    for field in (
+        "omissions",
+        "candidate_limit",
+        "candidate_results_considered",
+        "candidate_results_omitted_by_limit",
+    ):
+        legacy_discovery.pop(field)
+    legacy_discovery["discovery_sha256"] = neighbor_discovery_sha256(legacy_discovery)
+    legacy_bound_context = bind_neighbor_discovery(context, legacy_discovery)
+    assert legacy_bound_context.neighbor_discovery_omissions_sha256 is None
+
+    discovery["omissions"] = [
+        {
+            "kind": "symbol_search_path_limit",
+            "reason": "Only ranked paths were searched.",
+            "count": 1,
+            "examples": ["src/caller.py"],
+            "limit": 32,
+        }
+    ]
+    discovery["discovery_sha256"] = neighbor_discovery_sha256(discovery)
+    bound_context = bind_neighbor_discovery(context, discovery)
+    assert bound_context.neighbor_discovery_omissions_sha256 is not None
+
+    ledger_without_omission = make_impact_coverage(bound_context)
+    report = FinalReviewReport(
+        summary="Reviewed the returned candidates.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        impact_coverage=ledger_without_omission,
+    )
+    with pytest.raises(
+        ValueError,
+        match="impact coverage omissions do not match bound neighbor discovery",
+    ):
+        evidence_module.validate_impact_coverage_context(report, bound_context)
+
+    matching_ledger = ledger_without_omission.model_copy(
+        update={
+            "omissions": (
+                ImpactCoverageOmission(
+                    kind="symbol_search_path_limit",
+                    count=1,
+                    limit=32,
+                    examples=("src/caller.py",),
+                ),
+            )
+        }
+    )
+    matching_report = report.model_copy(update={"impact_coverage": matching_ledger})
+    evidence_module.validate_impact_coverage_context(matching_report, bound_context)
+
+
 def test_discovery_follows_test_imports_and_suggests_dependency_manifest(tmp_path):
     repository = tmp_path / "repo"
     repository.mkdir()
@@ -1621,6 +2170,91 @@ def test_discovery_follows_test_imports_and_suggests_dependency_manifest(tmp_pat
     assert by_path["src/fetching.py"]["categories"] == ["declaration"]
     assert "pyproject.toml" in by_path
     assert by_path["pyproject.toml"]["categories"] == ["dependency"]
+
+
+def test_discovery_suggests_scoped_test_runner_config_and_ci_workflow(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args])
+
+    git("init", "--quiet")
+    files = {
+        ".github/workflows/node-test.yml": (
+            "name: Node tests\n"
+            "on: [push]\n"
+            "jobs:\n"
+            "  test:\n"
+            "    steps:\n"
+            "      - run: npm run test:e2e\n"
+        ),
+        ".github/workflows/playwright.yml": (
+            "name: Playwright CI\n"
+            "on: [pull_request]\n"
+            "jobs:\n"
+            "  e2e:\n"
+            "    steps:\n"
+            "      - run: npx playwright test\n"
+        ),
+        ".github/workflows/test-deploy.yml": (
+            "name: Test deploy\n"
+            "on: [push]\n"
+            "jobs:\n"
+            "  deploy:\n"
+            "    steps:\n"
+            "      - run: npm run deploy\n"
+        ),
+        "playwright.config.ts": (
+            "import { defineConfig } from '@playwright/test';\n"
+            "export default defineConfig({ testDir: './tests-e2e' });\n"
+        ),
+        "apps/other/playwright.config.ts": "export default { testDir: './tests' };\n",
+        "tests-e2e/publish/download.spec.ts": (
+            "import { test, expect } from '@playwright/test';\n"
+            "test('downloads a dataset', async ({ page }) => {\n"
+            "  await page.goto('/');\n"
+            "  await expect(page).toHaveTitle(/dataset/);\n"
+            "});\n"
+        ),
+    }
+    for path, content in files.items():
+        target = repository / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").decode().strip()
+
+    changed = repository / "tests-e2e/publish/download.spec.ts"
+    changed.write_text(files["tests-e2e/publish/download.spec.ts"].replace("page.goto('/')", "page.goto('/datasets')"), encoding="utf-8")
+    git("add", "tests-e2e/publish/download.spec.ts")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "head")
+    head = git("rev-parse", "HEAD").decode().strip()
+    diff = git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head, "--")
+    context = ReviewContext(
+        repository="github.com/example/repo",
+        base_sha=base,
+        head_sha=head,
+        diff_sha256=hashlib.sha256(diff).hexdigest(),
+        evidence_packet_sha256=hashlib.sha256(b"packet").hexdigest(),
+        changed_files=("tests-e2e/publish/download.spec.ts",),
+        evidence_refs=("S1", "D1"),
+    )
+
+    manifest = discover_neighbor_evidence(context, repository, use_codegraph=False)
+    by_path = {entry["path"]: entry for entry in manifest["candidate_records"]}
+
+    for path in (
+        "playwright.config.ts",
+        ".github/workflows/node-test.yml",
+        ".github/workflows/playwright.yml",
+    ):
+        assert path in by_path
+        assert "test_runner_config" in by_path[path]["categories"]
+        assert "test_runner_configuration" in by_path[path]["reasons"]
+    assert "apps/other/playwright.config.ts" not in by_path
+    assert ".github/workflows/test-deploy.yml" not in by_path
 
 
 def test_discovery_searches_local_module_import_paths_without_token_overlap(tmp_path):

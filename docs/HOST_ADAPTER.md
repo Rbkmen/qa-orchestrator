@@ -42,11 +42,11 @@ Add `verification_records` for test, CI and runtime checks when available. Each 
 
 For structured packets, the CLI executor records how many changed paths have source excerpts in the packet and how many remain in the profile's selected subset. These are host-side coverage indicators, not a completeness score: review the diff and scenario context, and report missing callers or contracts as coverage gaps. Legacy text packets do not carry these counts.
 
-Each profile report also carries `reviewed_changed_paths`, an executor attestation listing bound changed paths it inspected, including paths with no findings. The host rejects paths outside the pinned diff and adds a `coverage_gap` for every changed path not listed. This makes omissions visible but cannot independently prove that the declared inspection occurred.
+Each profile report also carries `reviewed_changed_paths`, an executor attestation listing bound changed paths it inspected, including paths with no findings. The host rejects paths outside the pinned diff and adds a `coverage_gap` for every changed path not listed. When the bound diff-hunk inventory is complete, it also adds a `coverage_gap` for every hunk index the profile did not attest. Partial inventories do not imply a known set of missing hunks. These attestations make omissions visible but cannot independently prove that the declared inspection occurred.
 
 ## Findings and speed
 
-Final findings support a `blocker` severity and a `change_origin` value (`introduced`, `pre_existing`, or `unknown`). `next_step` can carry a targeted correction or verification. Render a saved structured report as Markdown with evidence IDs resolved through the bound context when available:
+Final findings support a `blocker` severity and a `change_origin` value (`introduced`, `exacerbated_by_pr`, `pre_existing`, or `unknown`). `exacerbated_by_pr` requires cited base-source evidence for the same finding location and cited bound diff evidence. `next_step` can carry a targeted correction or verification. Render a saved structured report as Markdown with evidence IDs resolved through the bound context when available:
 
 ```sh
 qa-orch report render --input final-report.json --context bound-context.json --output review.md

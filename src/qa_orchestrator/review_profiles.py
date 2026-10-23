@@ -21,7 +21,7 @@ COMMON_CONSTRAINTS = (
     "For each new defect candidate, provide failure_condition and flip_condition, expected_behavior from the requirement/contract, and actual_behavior predicted from source under the stated condition. Do not call actual_behavior runtime-observed unless runtime evidence exists. Name the affected consumer or contract in affected_area when supported. If counterevidence is unavailable, retain that verification gap; do not invent a check or a verdict.",
     "Review material requirements and MR claims as behavior scenarios, not only changed lines. Use Scope to name the expected observable result and evidence checked; start from the authoritative task/contract, not an assumed interpretation of the diff. Trace relevant unchanged callers or consumers only as far as needed to verify that scenario.",
     "Within the profile's role, trace relevant input/state producer -> validation, predicates, defaults and normalization -> real invocation/update trigger -> consumers -> affected outputs and side effects. Compare relevant layers by accepted inputs and boundaries; compare initial execution with later updates and vary scenario-relevant inputs independently. State whether evidence is source, test, or runtime; helper tests alone do not establish real entry-point or integration coverage.",
-    "Resolve each concrete failure hypothesis as a supported candidate, refuted with counterevidence, or unverified with its trigger and missing check; carry material unresolved scenarios into synthesis. Compare base/head when available and state whether a relevant defect is introduced, pre-existing, or of unknown origin. Preserve relevant pre-existing defects; keep unrelated defects outside scope and preserve this profile's output boundary.",
+    "Resolve each concrete failure hypothesis as a supported candidate, refuted with counterevidence, or unverified with its trigger and missing check; carry material unresolved scenarios into synthesis. Compare base/head when available and state whether a relevant defect is introduced, pre-existing, exacerbated by this PR, or of unknown origin. Use exacerbated_by_pr only when cited base source shows the defect before the PR and cited bound diff plus head source show how the PR makes it worse. Preserve relevant pre-existing defects; keep unrelated defects outside scope and preserve this profile's output boundary.",
     "Before concluding that impact is contained, trace relevant changed symbols to inbound callers and outbound dependencies, then to consumers, tests, contracts, schemas, configuration, and event or queue boundaries where applicable. Prefer a current repository call graph plus bounded symbol search; cite material links by exact evidence refs and relation. A missing, stale, unavailable, or truncated search, dynamic dispatch, generated code, or an external consumer map must remain an explicit limit; no matches do not prove no dependency.",
     "For each confirmed defect, show the causal chain from triggering input and state through the changed predicate or transition and applicable guards to the affected consumer, output, or side effect. Cite head-source evidence for the chain; keep a candidate unverified when a material link or expected behavior is inferred.",
     "Keep possible defects separate from coverage gaps; leave confirmation and final decisions to the host.",
@@ -57,6 +57,42 @@ REVIEW_PROFILES: Mapping[ReviewAgent, ReviewProfileDefinition] = MappingProxyTyp
             display_name="Code Reviewer",
             focus=(
                 "Inspect the changed surface for concrete failure modes and contract breaks. "
+                "For CSS or theme changes that affect text, links, placeholders, controls, or code, "
+                "trace the effective foreground/background colors through variables, inheritance, "
+                "and theme overrides, then calculate the WCAG contrast ratio. Apply 4.5:1 to normal "
+                "text and 3:1 only to large text (at least 18pt regular or 14pt bold); include "
+                "placeholder text. Report a contrast defect only when the selector, active theme, "
+                "effective color pair, text size, and below-threshold ratio are supported by evidence. "
+                "Build a compact matrix across all distinct text roles and themes; include body links, "
+                "inline code, headings, emphasized/table text, controls/placeholders, navbar, and footer, "
+                "and continue after finding the first failing pair. Treat this as an explicit completeness "
+                "check: for every listed role/theme pair, record pass, finding, or an unverified reason "
+                "in Scope or Unverified; do not silently omit a role when its consumer is evidenced. "
+                "Keep distinct text roles separate when their affected consumer or needed correction differs, "
+                "even if they share a color token. Group states of the same role with the same correction "
+                "(for example light/dark or default/hover) into one candidate and list each pair and ratio; "
+                "do not emit a separate candidate only for a second state. Cite every affected selector and "
+                "consumer's source location. When pinned template evidence confirms "
+                "a selector's consumer, missing generated HTML or runtime screenshots alone do not block "
+                "a source-complete contrast finding; retain runtime rendering as a separate verification gap. "
+                "For inline text links, check each theme and state. When a link is distinguished from "
+                "surrounding static text only by color, with no persistent non-color cue in the default state, "
+                "calculate link-to-neighbor contrast separately from link-to-background contrast; use W3C "
+                "G183's at least 3:1 against surrounding static text as a sufficient technique for SC 1.4.1, "
+                "not the only possible way to conform. A hover/focus-only cue does not establish a cue in the "
+                "default state. Cite both effective colors, selector, consumer, and visible cue; keep unresolved "
+                "combinations unverified, and apply SC 1.4.3 text-to-background thresholds independently. "
+                "If a material selector, cascade, or effective color remains unresolved, keep that case "
+                "unverified instead of guessing. Do not report hardcoded palette values or `transition: all` "
+                "as defects without a concrete observable failure or material effect. "
+                "For CSS overflow changes, inspect absolutely positioned or pseudo-element decoration inside "
+                "`overflow: auto` or `scroll` containers: trace its containing block and whether it moves with "
+                "scrollable content or stays in the scrollport. Report only when the source-supported scroll "
+                "condition causes a concrete visual loss; a property combination alone is not a defect. "
+                "Review changed tests as executable code too: check API usage against the declared "
+                "test runner and browser environment, and report concrete test failures or assertions "
+                "that pass on wrong results. Keep missing test coverage as a coverage gap unless it "
+                "masks a separately demonstrated behavior defect. "
                 "Use the Evidence Map as context; add caller or dependency detail only when "
                 "needed to check a material scenario or support a candidate, and do not repeat the map. "
                 "Validate calls against declared receiver and action types and established invocation "
@@ -66,7 +102,12 @@ REVIEW_PROFILES: Mapping[ReviewAgent, ReviewProfileDefinition] = MappingProxyTyp
                 "must update dependent responses, caches or events. For API clients, verify pagination "
                 "and cursor termination, detect repeated reads of the same endpoint, compare freshness "
                 "with the current resource identity or version when required, and check that early returns "
-                "do not skip required side effects."
+                "do not skip required side effects. TypeScript type assertions are compile-time only. "
+                "For untrusted query/body/header input cast to a closed enum or union, inspect validators "
+                "on the actual route and trace the value to its typed consumer. When no runtime validator "
+                "runs and an invalid value reaches the typed boundary, report that contract bypass with "
+                "the failure condition and exact propagation; do not infer downstream failure or "
+                "exploitability without evidence."
             ),
             required_sections=("Scope", "Finding Candidates", "Coverage Gaps", "Unverified"),
             escalation_signals=(

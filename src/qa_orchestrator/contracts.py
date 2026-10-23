@@ -400,6 +400,7 @@ class ReviewContext(BaseModel):
     neighbor_discovery_candidate_results_omitted_by_limit: int | None = Field(
         default=None, strict=True, ge=0, le=1000
     )
+    neighbor_discovery_omissions_sha256: Sha256Digest | None = None
     diff_hunks: tuple[ReviewDiffHunk, ...] = Field(
         default=(), max_length=_MAX_REVIEW_DIFF_HUNKS
     )
@@ -442,7 +443,7 @@ class ReviewContext(BaseModel):
     @field_validator(
         "base_sha", "head_sha", "diff_sha256", "evidence_packet_sha256",
         "neighbor_discovery_sha256", "neighbor_discovery_candidate_set_sha256",
-        "diff_hunk_inventory_sha256",
+        "neighbor_discovery_omissions_sha256", "diff_hunk_inventory_sha256",
     )
     @classmethod
     def normalize_hashes(cls, value: str | None) -> str | None:
@@ -472,6 +473,11 @@ class ReviewContext(BaseModel):
             and self.neighbor_discovery_candidate_count is None
         ):
             raise ValueError("neighbor discovery candidate omissions require a bound candidate set")
+        if (
+            self.neighbor_discovery_omissions_sha256 is not None
+            and self.neighbor_discovery_sha256 is None
+        ):
+            raise ValueError("neighbor discovery omissions require a bound discovery digest")
         if self.diff_hunk_inventory_status is None:
             if self.diff_hunk_inventory_count_at_least is not None:
                 raise ValueError("diff hunk inventory count requires an inventory status")
@@ -537,6 +543,8 @@ class ReviewContext(BaseModel):
             payload.pop("neighbor_discovery_candidate_set_sha256", None)
         if self.neighbor_discovery_candidate_results_omitted_by_limit is None:
             payload.pop("neighbor_discovery_candidate_results_omitted_by_limit", None)
+        if self.neighbor_discovery_omissions_sha256 is None:
+            payload.pop("neighbor_discovery_omissions_sha256", None)
         if self.diff_hunk_inventory_status is None:
             payload.pop("diff_hunk_inventory_status", None)
         if self.diff_hunk_inventory_count_at_least is None:
@@ -852,9 +860,14 @@ class ReviewFindingCandidate(BaseModel):
     title: str = Field(min_length=1, max_length=256)
     description: str = Field(min_length=1, max_length=5000)
     confidence: Literal["high", "medium", "low"]
-    change_origin: Literal["introduced", "pre_existing", "unknown"] = Field(
+    change_origin: Literal[
+        "introduced", "exacerbated_by_pr", "pre_existing", "unknown"
+    ] = Field(
         default="unknown",
-        description="Whether the behavior is introduced by the reviewed change, pre-existing, or unknown.",
+        description=(
+            "Whether the defect was introduced by the reviewed change, pre-existing, "
+            "made worse by the PR, or of unknown origin."
+        ),
     )
     verification_gap: str = Field(min_length=1, max_length=2000)
     evidence_refs: tuple[EvidenceRefId, ...] = Field(min_length=1, max_length=32)
@@ -1235,6 +1248,25 @@ class ImpactCoverageOmission(BaseModel):
         ):
             raise ValueError("impact omission examples must be bounded single-line values")
         return values
+
+
+def impact_coverage_omissions_sha256(
+    omissions: Iterable[ImpactCoverageOmission],
+) -> str:
+    """Hash normalized discovery omissions independently of their presentation order."""
+    normalized = [item.model_dump(mode="json") for item in omissions]
+    kinds = [item["kind"] for item in normalized]
+    if len(set(kinds)) != len(kinds):
+        raise ValueError("impact coverage omission kinds must be unique")
+    normalized.sort(key=lambda item: item["kind"])
+    canonical = json.dumps(
+        {"schema_version": 1, "omissions": normalized},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class ImpactCoverageLedger(BaseModel):

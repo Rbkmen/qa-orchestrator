@@ -194,6 +194,26 @@ def test_test_audit_reports_evidence_anchored_candidates_and_ignores_dirty_files
     assert audit["limitations"]
 
 
+def test_test_audit_recognizes_qualified_test_directories(tmp_path):
+    repository = _repository(
+        tmp_path,
+        {
+            "tests-e2e/consumer/download-flow.ts": (
+                'test("download flow", () => { expect(true).toBe(true); });\n'
+            ),
+            "test-integration/api/checkout-flow.ts": (
+                'test("checkout flow", () => { expect(true).toBe(true); });\n'
+            ),
+        },
+    )
+
+    audit = audit_test_suite(repository, use_cache=False)
+
+    assert audit["test_files_total"] == 2
+    assert audit["test_files_scanned"] == 2
+    assert audit["tests_identified"] == 2
+
+
 def test_python_audit_does_not_count_nested_tests_or_assertions_in_helpers(tmp_path):
     repository = _repository(
         tmp_path,

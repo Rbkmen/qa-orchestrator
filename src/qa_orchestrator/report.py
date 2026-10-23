@@ -30,6 +30,7 @@ _SEVERITY_LABELS = {
 }
 _ORIGIN_LABELS = {
     "introduced": "внесён этим изменением",
+    "exacerbated_by_pr": "существовал до PR; PR усилил дефект",
     "pre_existing": "существовал до изменения",
     "unknown": "не установлено",
 }

@@ -15,12 +15,14 @@ from qa_orchestrator.contracts import (
     EvidenceRecord,
     FinalReviewReport,
     ImpactCoverageLedger,
+    ImpactCoverageOmission,
     ProfileReviewReport,
     ReviewContext,
     ReviewCriterionCoverage,
     ReviewDiffHunk,
     ReviewFindingCandidate,
     impact_candidate_set_sha256,
+    impact_coverage_omissions_sha256,
     review_changed_paths_sha256,
     review_diff_hunk_inventory_sha256,
 )
@@ -41,6 +43,16 @@ _DISCOVERY_MAX_RELATIONSHIP_EXPANSION_PATHS = 50
 _DISCOVERY_MAX_RELATIONSHIP_EXPANSION_TERMS = 48
 _DISCOVERY_MAX_CHANGED_FILE_CONTEXT_RANGES = 24
 _DISCOVERY_MAX_CHANGED_FILE_CONTEXT_RANGES_PER_PATH = 6
+_DISCOVERY_MAX_DIRECT_DIFF_ANCHOR_CONTEXT_RANGES = 24
+_DISCOVERY_MAX_DIRECT_DIFF_ANCHOR_CONTEXT_RANGES_PER_PATH = 3
+_DISCOVERY_MAX_DIRECT_DIFF_ANCHOR_MATCH_LINES_PER_PATH = 64
+_DISCOVERY_MIN_SOURCE_BYTES_FOR_DIRECT_DIFF_ANCHOR_RANGE = 16_000
+_DISCOVERY_DIRECT_DIFF_ANCHOR_CONTEXT_BEFORE = 5
+_DISCOVERY_DIRECT_DIFF_ANCHOR_CONTEXT_AFTER = 20
+_DISCOVERY_MAX_CONTROLLER_HANDLER_CONTEXT_LINES = 200
+_DISCOVERY_MAX_CONTROLLER_HANDLER_CONTEXT_BYTES = 48_000
+_DISCOVERY_MAX_CONTROLLER_ROUTE_PAIRS = 24
+_DISCOVERY_MAX_DIRECT_CONTROLLER_IMPORTS = 24
 _RELATIONSHIP_SOURCE_SUFFIXES = {
     ".c", ".cc", ".cpp", ".cs", ".go", ".h", ".hpp", ".java", ".js",
     ".jsx", ".kt", ".php", ".py", ".pyi", ".rb", ".rs", ".scala", ".swift",
@@ -59,6 +71,10 @@ _ADDED_RECEIVER_CALL = re.compile(
 )
 _ADDED_ACTION_LITERAL = re.compile(
     r"\b[A-Za-z_$][A-Za-z0-9_$]*\s*\(\s*(['\"])(?P<name>[A-Za-z_$][A-Za-z0-9_$]{2,127})\1"
+)
+_ADDED_TYPE_REFERENCE = re.compile(
+    r"\b(?:as|satisfies|implements|extends|instanceof)\s+"
+    r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]{2,127})\b"
 )
 _ROUTE_LITERAL = re.compile(r"[`'\"](?P<value>[^`'\"]*/[^`'\"]*)[`'\"]")
 _DISPATCH_CALL = re.compile(
@@ -94,7 +110,8 @@ _RUBY_REQUIRE_REFERENCE = re.compile(
     re.MULTILINE,
 )
 _TEST_PATH = re.compile(
-    r"(^|/)(tests?|specs?)(/|$)|(^|[._-])(test|spec)([._-]|$)", re.IGNORECASE
+    r"(^|/)(tests?|specs?)(?:[-_.][^/]+)?(/|$)|(^|[._-])(test|spec)([._-]|$)",
+    re.IGNORECASE,
 )
 _CONTRACT_PATH = re.compile(
     r"(^|/)(contracts?|schemas?|protocols?|types?|interfaces?|openapi|graphql|proto)(/|$)",
@@ -103,6 +120,15 @@ _CONTRACT_PATH = re.compile(
 _API_PATH = re.compile(
     r"(^|/)(api|routes?|controllers?|endpoints?|graphql|openapi|proto)(/|$)", re.IGNORECASE
 )
+_CONTROLLER_PATH = re.compile(
+    r"^(?P<prefix>.+)/controllers?/(?P<filename>[^/]+)$", re.IGNORECASE
+)
+_CONTROLLER_SOURCE_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".vue"}
+_CONTROLLER_HANDLER_DECLARATION = re.compile(
+    r"^\s*(?:(?:export|default|async)\s+)*(?:function\s+[A-Za-z_$][\w$]*\s*\(|"
+    r"(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=.*=>)"
+)
+_VALIDATOR_PATH = re.compile(r"(^|/)(validation|validations|validator|validators)(/|$)", re.IGNORECASE)
 _DATABASE_PATH = re.compile(
     r"(^|/)(models?|migrations?|database|db|sql|prisma)(/|$)|(^|/)(schema\.(?:rb|sql))$",
     re.IGNORECASE,
@@ -168,6 +194,36 @@ _JS_TEST_MANIFESTS = {
     "pnpm-lock.yaml",
     "yarn.lock",
 }
+_TEST_RUNNER_CONFIG_NAME = re.compile(
+    r"^(?P<runner>playwright|cypress|jest|vitest|mocha|ava|karma)\.config\.[^.]+$",
+    re.IGNORECASE,
+)
+_TEST_RUNNER_IMPORTS = {
+    "playwright": re.compile(r"['\"](?:@playwright/test|playwright)['\"]"),
+    "cypress": re.compile(r"['\"]cypress['\"]"),
+    "jest": re.compile(r"['\"](?:jest|@jest/globals)['\"]"),
+    "vitest": re.compile(r"['\"]vitest['\"]"),
+    "mocha": re.compile(r"['\"]mocha['\"]"),
+    "ava": re.compile(r"['\"]ava['\"]"),
+    "karma": re.compile(r"['\"]karma[^'\"]*['\"]"),
+}
+_CI_WORKFLOW_PATH = re.compile(
+    r"(^|/)\.github/workflows/[^/]+\.ya?ml$|(^|/)\.gitlab-ci\.ya?ml$|"
+    r"(^|/)\.circleci/config\.ya?ml$|(^|/)azure-pipelines\.ya?ml$|"
+    r"(^|/)bitbucket-pipelines\.ya?ml$",
+    re.IGNORECASE,
+)
+_TEST_WORKFLOW_NAME = re.compile(r"(?:test|e2e|ci|check|verify)", re.IGNORECASE)
+_TEST_WORKFLOW_COMMANDS = (
+    re.compile(r"\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test(?:[:_-][\w-]+)?|e2e)\b", re.IGNORECASE),
+    re.compile(r"\b(?:npx|pnpm\s+exec|yarn\s+dlx)\s+(?:playwright|cypress|jest|vitest|mocha|ava)\b", re.IGNORECASE),
+    re.compile(r"\b(?:python(?:3)?\s+-m\s+)?pytest(?:-\d+)?\b", re.IGNORECASE),
+    re.compile(r"\bgo\s+test\b|\bcargo\s+test\b|\bmvn\s+(?:\S+\s+)*test\b|\bgradle\s+(?:\S+\s+)*test\b", re.IGNORECASE),
+)
+_DISCOVERY_MAX_TEST_RUNNER_CONFIG_CANDIDATES = 16
+_DISCOVERY_MAX_TEST_WORKFLOW_SCAN_PATHS = 64
+_DISCOVERY_MAX_TEST_WORKFLOW_SCAN_BYTES = 8_000_000
+_DISCOVERY_MAX_TEST_WORKFLOW_SOURCE_BYTES = 1_000_000
 _TEST_DEPENDENCY_MANIFESTS = {
     ".py": {
         "pyproject.toml",
@@ -396,14 +452,26 @@ def _diff_hunk_inventory(context: ReviewContext, diff: bytes) -> dict[str, objec
 def _added_diff_relationship_terms(
     diff: bytes, referenced_symbols: set[str]
 ) -> tuple[str, ...]:
-    """Return identifiers and action names introduced by added diff lines."""
+    """Return changed calls, type references, and domain fields as search anchors."""
     try:
         lines = diff.decode("utf-8").splitlines()
     except UnicodeDecodeError:
         return ()
     action_terms = []
+    semantic_terms = []
+    semantic_term_set = set()
     call_terms = []
     changed_path_is_test = False
+
+    def add_semantic_term(name: str) -> None:
+        if (
+            name not in _IGNORED_IDENTIFIERS
+            and name not in semantic_term_set
+            and len(semantic_terms) < _DISCOVERY_MAX_SYMBOLS
+        ):
+            semantic_term_set.add(name)
+            semantic_terms.append(name)
+
     for line in lines:
         if line.startswith("+++ b/"):
             changed_path_is_test = bool(_TEST_PATH.search(line[6:]))
@@ -413,6 +481,12 @@ def _added_diff_relationship_terms(
         if changed_path_is_test:
             continue
         added = line[1:]
+        for match in _ADDED_TYPE_REFERENCE.finditer(added):
+            add_semantic_term(match.group("name"))
+        for match in _IDENTIFIER_TOKEN.finditer(added):
+            name = match.group()
+            if "_" in name and len(name) >= 7 and not name.startswith("_"):
+                add_semantic_term(name)
         action_terms.extend(
             match.group("name")
             for match in _ADDED_ACTION_LITERAL.finditer(added)
@@ -437,7 +511,7 @@ def _added_diff_relationship_terms(
             if name not in referenced_symbols and not mixed_case:
                 continue
             call_terms.append(name)
-    return tuple(dict.fromkeys((*action_terms, *call_terms)))
+    return tuple(dict.fromkeys((*action_terms, *semantic_terms, *call_terms)))
 
 
 def _candidate_route_terms(source: bytes) -> tuple[str, ...]:
@@ -642,6 +716,13 @@ def validate_registered_locations(
                 for entry in cited_entries
             ):
                 raise ValueError("introduced finding requires bound diff evidence")
+            if candidate.change_origin == "exacerbated_by_pr" and not any(
+                entry.kind == "diff"
+                and entry.revision == context.head_sha
+                and entry.sha256 == context.diff_sha256
+                for entry in cited_entries
+            ):
+                raise ValueError("exacerbated finding requires bound diff evidence")
         source_entries = [
             entry
             for entry in cited_entries
@@ -679,11 +760,15 @@ def validate_registered_locations(
                 )
             if (
                 strict_bound_review
-                and candidate.change_origin == "pre_existing"
+                and candidate.change_origin in {"pre_existing", "exacerbated_by_pr"}
                 and not any(
                     supports_location(entry, location) for entry in base_source_entries
                 )
             ):
+                if candidate.change_origin == "exacerbated_by_pr":
+                    raise ValueError(
+                        "exacerbated finding requires matching base source evidence"
+                    )
                 raise ValueError("pre-existing finding requires matching base source evidence")
 
 
@@ -972,6 +1057,14 @@ def validate_impact_coverage_context(
         != context.neighbor_discovery_candidate_set_sha256
     ):
         raise ValueError("impact coverage candidates do not exactly match discovery")
+    if (
+        context.neighbor_discovery_omissions_sha256 is not None
+        and impact_coverage_omissions_sha256(ledger.omissions)
+        != context.neighbor_discovery_omissions_sha256
+    ):
+        raise ValueError(
+            "impact coverage omissions do not match bound neighbor discovery"
+        )
     bound_candidate_omissions = context.neighbor_discovery_candidate_results_omitted_by_limit
     if bound_candidate_omissions is not None:
         ledger_candidate_omissions = sum(
@@ -1556,6 +1649,102 @@ def _test_dependency_manifests(changed_paths: set[str], tracked_paths: set[str])
     return manifests
 
 
+def _test_runner_config_paths(
+    changed_paths: set[str],
+    tracked_paths: set[str],
+    changed_sources: Mapping[str, bytes],
+    repository: Path,
+    head_revision: str,
+) -> tuple[list[str], list[str], list[str], int]:
+    """Suggest nearest runner configs and named CI workflows for changed tests."""
+    changed_tests = sorted(path for path in changed_paths if _TEST_PATH.search(path))
+    if not changed_tests:
+        return [], [], [], 0
+
+    configs_by_runner: dict[str, list[str]] = {}
+    for path in tracked_paths:
+        match = _TEST_RUNNER_CONFIG_NAME.fullmatch(PurePosixPath(path).name)
+        if match:
+            configs_by_runner.setdefault(match.group("runner").lower(), []).append(path)
+
+    ranked: dict[str, tuple[int, int, str]] = {}
+    detected_runners_all: set[str] = set()
+    for test_path in changed_tests:
+        source = changed_sources.get(test_path, b"").decode("utf-8", errors="ignore")
+        detected_runners = {
+            runner
+            for runner, expression in _TEST_RUNNER_IMPORTS.items()
+            if expression.search(source)
+        }
+        detected_runners_all.update(detected_runners)
+        runner_names = detected_runners or set(configs_by_runner)
+        test_parent = PurePosixPath(test_path).parent.parts
+        for runner in runner_names:
+            matching_configs = [
+                config
+                for config in configs_by_runner.get(runner, ())
+                if len(PurePosixPath(config).parent.parts) <= len(test_parent)
+                and test_parent[: len(PurePosixPath(config).parent.parts)]
+                == PurePosixPath(config).parent.parts
+            ]
+            if matching_configs:
+                nearest = min(
+                    matching_configs,
+                    key=lambda config: (
+                        -len(PurePosixPath(config).parent.parts),
+                        config,
+                    ),
+                )
+                ranked[nearest] = (
+                    0,
+                    -len(PurePosixPath(nearest).parent.parts),
+                    nearest,
+                )
+
+    workflow_candidates = []
+    for path in sorted(tracked_paths):
+        if not _CI_WORKFLOW_PATH.search(path):
+            continue
+        name = PurePosixPath(path).name
+        runner_named = any(runner in name.lower() for runner in detected_runners_all)
+        if (
+            name.lower() != ".gitlab-ci.yml"
+            and not _TEST_WORKFLOW_NAME.search(name)
+            and not runner_named
+        ):
+            continue
+        workflow_candidates.append(path)
+
+    scan_omitted = workflow_candidates[_DISCOVERY_MAX_TEST_WORKFLOW_SCAN_PATHS:]
+    scanned_bytes = 0
+    workflow_paths = []
+    workflow_paths_scanned = 0
+    for path in workflow_candidates[:_DISCOVERY_MAX_TEST_WORKFLOW_SCAN_PATHS]:
+        workflow_paths_scanned += 1
+        size = int(_git(repository, "cat-file", "-s", f"{head_revision}:{path}"))
+        if (
+            size > _DISCOVERY_MAX_TEST_WORKFLOW_SOURCE_BYTES
+            or scanned_bytes + size > _DISCOVERY_MAX_TEST_WORKFLOW_SCAN_BYTES
+        ):
+            scan_omitted.append(path)
+            continue
+        source = _git(repository, "show", f"{head_revision}:{path}")
+        scanned_bytes += len(source)
+        text = source.decode("utf-8", errors="ignore")
+        if not any(expression.search(text) for expression in _TEST_WORKFLOW_COMMANDS):
+            continue
+        workflow_paths.append(path)
+
+    for path in workflow_paths:
+        name = PurePosixPath(path).name
+        test_named = bool(re.search(r"test|e2e", name, re.IGNORECASE))
+        ranked[path] = (1 if test_named else 2, 0, path)
+
+    ordered = sorted(ranked, key=lambda path: ranked[path])
+    limit = _DISCOVERY_MAX_TEST_RUNNER_CONFIG_CANDIDATES
+    return ordered[:limit], ordered[limit:], scan_omitted, workflow_paths_scanned
+
+
 def neighbor_discovery_sha256(payload: Mapping[str, object]) -> str:
     """Fingerprint a discovery result independently of mapping insertion order."""
     if not isinstance(payload, Mapping) or any(not isinstance(key, str) for key in payload):
@@ -1627,6 +1816,28 @@ def bind_neighbor_discovery(
         "candidate_results_omitted_by_limit",
     )
     bound_candidate_results_omitted = None
+    bound_discovery_omissions = None
+    bound_discovery_omissions_sha256 = None
+    if "omissions" in payload:
+        raw_discovery_omissions = payload["omissions"]
+        if not isinstance(raw_discovery_omissions, list):
+            raise TypeError("neighbor discovery omissions must be a list")
+        bound_discovery_omissions = []
+        for omission in raw_discovery_omissions:
+            if not isinstance(omission, Mapping):
+                raise TypeError("neighbor discovery omission record is invalid")
+            bound_discovery_omissions.append(
+                ImpactCoverageOmission.model_validate(
+                    {
+                        key: omission[key]
+                        for key in ("kind", "count", "limit", "examples")
+                        if key in omission
+                    }
+                )
+            )
+        bound_discovery_omissions_sha256 = impact_coverage_omissions_sha256(
+            tuple(bound_discovery_omissions)
+        )
     if any(field in payload for field in candidate_result_fields):
         if not all(field in payload for field in candidate_result_fields):
             raise ValueError("neighbor discovery candidate result limits are incomplete")
@@ -1644,22 +1855,18 @@ def bind_neighbor_discovery(
             or results_omitted != max(0, results_considered - candidate_limit)
         ):
             raise ValueError("neighbor discovery candidate result limits are inconsistent")
-        raw_omissions = payload.get("omissions")
-        if not isinstance(raw_omissions, list):
+        if bound_discovery_omissions is None:
             raise TypeError("neighbor discovery omissions must be a list")
         result_limit_omissions = [
             omission
-            for omission in raw_omissions
-            if isinstance(omission, Mapping)
-            and omission.get("kind") == "candidate_result_limit"
+            for omission in bound_discovery_omissions
+            if omission.kind == "candidate_result_limit"
         ]
         if results_omitted:
             if (
                 len(result_limit_omissions) != 1
-                or type(result_limit_omissions[0].get("count")) is not int
-                or result_limit_omissions[0].get("count") != results_omitted
-                or type(result_limit_omissions[0].get("limit")) is not int
-                or result_limit_omissions[0].get("limit") != candidate_limit
+                or result_limit_omissions[0].count != results_omitted
+                or result_limit_omissions[0].limit != candidate_limit
             ):
                 raise ValueError(
                     "neighbor discovery candidate result omission does not match its limit"
@@ -1741,6 +1948,7 @@ def bind_neighbor_discovery(
             "neighbor_discovery_candidate_results_omitted_by_limit": (
                 bound_candidate_results_omitted
             ),
+            "neighbor_discovery_omissions_sha256": bound_discovery_omissions_sha256,
             "diff_hunks": [hunk.model_dump(mode="json") for hunk in bound_hunks],
             "diff_hunk_inventory_sha256": bound_hunk_digest,
             "diff_hunk_inventory_status": inventory["status"],
@@ -1753,6 +1961,10 @@ def _neighbor_categories(path: str) -> tuple[str, ...]:
     tags = []
     if _TEST_PATH.search(path):
         tags.append("test")
+    if _TEST_RUNNER_CONFIG_NAME.fullmatch(PurePosixPath(path).name):
+        tags.append("test_runner_config")
+    if _CI_WORKFLOW_PATH.search(path) and _TEST_WORKFLOW_NAME.search(PurePosixPath(path).name):
+        tags.append("test_runner_config")
     if _CONTRACT_PATH.search(path):
         tags.append("contract")
     if _API_PATH.search(path):
@@ -1798,6 +2010,165 @@ def _path_tokens(path: str) -> set[str]:
         for part in re.findall(r"[A-Za-z0-9]+", separated)
         if len(part) >= 3 and part.lower() not in _IGNORED_PATH_TOKENS
     }
+
+
+def _controller_handler_start_line(
+    path: str, source_lines: list[str], anchor_line: int
+) -> int | None:
+    if (
+        not _CONTROLLER_PATH.match(path)
+        or PurePosixPath(path).suffix.lower() not in _CONTROLLER_SOURCE_SUFFIXES
+    ):
+        return None
+    anchor_indent = len(source_lines[anchor_line - 1]) - len(
+        source_lines[anchor_line - 1].lstrip()
+    )
+    earliest_line = max(
+        1,
+        anchor_line - _DISCOVERY_MAX_CONTROLLER_HANDLER_CONTEXT_LINES + 1,
+    )
+    for line_number in range(anchor_line, earliest_line - 1, -1):
+        line = source_lines[line_number - 1]
+        if not _CONTROLLER_HANDLER_DECLARATION.match(line):
+            continue
+        declaration_indent = len(line) - len(line.lstrip())
+        if declaration_indent < anchor_indent:
+            return line_number
+    return None
+
+
+def _controller_handler_range(
+    path: str, source_lines: list[str], anchor_line: int
+) -> tuple[int, int] | None:
+    """Return a bounded, indentation-matched block handler containing an anchor."""
+    start_line = _controller_handler_start_line(path, source_lines, anchor_line)
+    if start_line is None:
+        return None
+    declaration_indent = len(source_lines[start_line - 1]) - len(
+        source_lines[start_line - 1].lstrip()
+    )
+    last_line = min(
+        len(source_lines),
+        start_line + _DISCOVERY_MAX_CONTROLLER_HANDLER_CONTEXT_LINES - 1,
+    )
+    for line_number in range(anchor_line, last_line + 1):
+        line = source_lines[line_number - 1]
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+        if (
+            indent == declaration_indent
+            and re.fullmatch(r"}\s*;?\s*(?://.*)?", stripped)
+        ):
+            return start_line, line_number
+        if (
+            line_number > anchor_line
+            and indent <= declaration_indent
+            and _CONTROLLER_HANDLER_DECLARATION.match(line)
+        ):
+            return None
+    return None
+
+
+def _typescript_import_local_names(bindings: str) -> set[str]:
+    """Return local binding names from a static TypeScript import clause."""
+    clause = bindings.strip()
+    if clause.startswith("type "):
+        clause = clause[5:].strip()
+    names = set()
+    namespace = re.search(r"\*\s+as\s+([A-Za-z_$][A-Za-z0-9_$]*)", clause)
+    if namespace:
+        names.add(namespace.group(1))
+    named_imports = re.search(r"\{(?P<items>[^}]*)\}", clause)
+    if named_imports:
+        for item in named_imports.group("items").split(","):
+            item = re.sub(r"^\s*type\s+", "", item).strip()
+            if not item:
+                continue
+            local_name = re.split(r"\s+as\s+", item)[-1].strip()
+            if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", local_name):
+                names.add(local_name)
+        default_clause = clause[: named_imports.start()].strip().rstrip(",").strip()
+        if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", default_clause):
+            names.add(default_clause)
+    elif not namespace and re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", clause):
+        names.add(clause)
+    return names
+
+
+def _direct_controller_handler_import_references(
+    path: str,
+    source: bytes,
+    tracked_paths: set[str],
+    anchor_terms: Sequence[str],
+) -> dict[str, dict[str, set[str]]]:
+    """Resolve imports referenced in a bounded handler containing a changed anchor."""
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError:
+        return {}
+    lines = text.splitlines()
+    valid_terms = [term for term in anchor_terms if _IDENTIFIER.fullmatch(term)]
+    if not lines or not valid_terms:
+        return {}
+    term_pattern = re.compile(
+        rf"(?<![A-Za-z0-9_$])(?:{'|'.join(re.escape(term) for term in valid_terms)})(?![A-Za-z0-9_$])"
+    )
+    imports_by_path: dict[str, set[str]] = {}
+    for match in _TS_MODULE_REFERENCE.finditer(text):
+        if not match.group(0).lstrip().startswith("import"):
+            continue
+        local_names = _typescript_import_local_names(match.group("bindings"))
+        if not local_names:
+            continue
+        for imported_path in _tracked_typescript_module_paths(
+            path, match.group("module"), tracked_paths
+        ):
+            imports_by_path.setdefault(imported_path, set()).update(local_names)
+    if not imports_by_path:
+        return {}
+
+    references: dict[str, dict[str, set[str]]] = {}
+    for anchor_line, line in enumerate(lines, 1):
+        if not term_pattern.search(line):
+            continue
+        handler_range = _controller_handler_range(path, lines, anchor_line)
+        if handler_range is None:
+            continue
+        handler_start, handler_end = handler_range
+        if (
+            handler_end - handler_start + 1
+            > _DISCOVERY_MAX_CONTROLLER_HANDLER_CONTEXT_LINES
+        ):
+            continue
+        handler_source = "\n".join(lines[handler_start - 1 : handler_end])
+        if len(handler_source.encode("utf-8")) > _DISCOVERY_MAX_CONTROLLER_HANDLER_CONTEXT_BYTES:
+            continue
+        for imported_path, local_names in imports_by_path.items():
+            used_names = {
+                name
+                for name in local_names
+                if re.search(
+                    rf"(?<![A-Za-z0-9_$]){re.escape(name)}(?![A-Za-z0-9_$])",
+                    handler_source,
+                )
+            }
+            if used_names:
+                called_names = {
+                    name
+                    for name in used_names
+                    if re.search(
+                        rf"(?<![A-Za-z0-9_$]){re.escape(name)}\s*"
+                        rf"(?:\.\s*[A-Za-z_$][A-Za-z0-9_$]*\s*)?\(",
+                        handler_source,
+                    )
+                }
+                reference = references.setdefault(
+                    imported_path,
+                    {"symbols": set(), "called_symbols": set()},
+                )
+                reference["symbols"].update(used_names)
+                reference["called_symbols"].update(called_names)
+    return references
 
 
 def _codegraph_relationship_suggestions(
@@ -2144,6 +2515,18 @@ def discover_neighbor_evidence(
     )
     changed_directories = {PurePosixPath(path).parent for path in changed}
     dependency_manifest_paths = _test_dependency_manifests(changed, tracked_set)
+    (
+        test_runner_config_paths,
+        test_runner_config_paths_omitted,
+        test_workflow_scan_omitted,
+        test_workflow_paths_scanned,
+    ) = _test_runner_config_paths(
+        changed,
+        tracked_set,
+        changed_sources,
+        repository,
+        context.head_sha,
+    )
     related_container_config_paths = _related_container_config_paths(changed, tracked_set)
 
     test_paths = set()
@@ -2276,6 +2659,95 @@ def discover_neighbor_evidence(
         except UnicodeDecodeError as exc:
             raise ValueError("changed-anchor paths must be valid UTF-8") from exc
 
+    candidate_source_cache: dict[str, bytes] = {}
+    direct_controller_candidates = tuple(
+        path
+        for path in sorted(direct_anchor_search_paths)
+        if _CONTROLLER_PATH.match(path)
+    )
+    direct_controller_paths = direct_controller_candidates[
+        :_DISCOVERY_MAX_CONTROLLER_ROUTE_PAIRS
+    ]
+    direct_controller_paths_omitted = max(
+        0,
+        len(direct_controller_candidates) - len(direct_controller_paths),
+    )
+    paired_controller_route_candidates = set()
+    for controller_path in direct_controller_paths:
+        match = _CONTROLLER_PATH.match(controller_path)
+        if match is None:
+            continue
+        route_path = f"{match.group('prefix')}/routes/{match.group('filename')}"
+        if route_path in tracked_set and route_path not in changed:
+            paired_controller_route_candidates.add(route_path)
+    paired_controller_route_paths = tuple(
+        sorted(paired_controller_route_candidates)[:_DISCOVERY_MAX_CONTROLLER_ROUTE_PAIRS]
+    )
+    paired_controller_route_paths_omitted = max(
+        0,
+        len(paired_controller_route_candidates) - len(paired_controller_route_paths),
+    )
+    controller_context_paths = set(direct_controller_paths) | set(
+        paired_controller_route_paths
+    )
+    direct_controller_import_candidates = set()
+    direct_controller_import_references_by_path: dict[
+        str, dict[str, dict[str, set[str]]]
+    ] = {}
+    for path in sorted(controller_context_paths):
+        size = int(_git(repository, "cat-file", "-s", f"{context.head_sha}:{path}"))
+        if (
+            size > _DISCOVERY_MAX_SOURCE_BYTES
+            or total_bytes + size > _DISCOVERY_MAX_TOTAL_BYTES
+        ):
+            continue
+        source = _git(repository, "show", f"{context.head_sha}:{path}")
+        candidate_source_cache[path] = source
+        total_bytes += len(source)
+        scanned_sources += 1
+        direct_controller_import_candidates.update(
+            _referenced_module_paths(path, source, tracked_set) - changed
+        )
+        if path in direct_controller_paths:
+            for imported_path, references in _direct_controller_handler_import_references(
+                path, source, tracked_set, changed_diff_terms
+            ).items():
+                controller_references = direct_controller_import_references_by_path.setdefault(
+                    imported_path, {}
+                ).setdefault(
+                    path,
+                    {"symbols": set(), "called_symbols": set()},
+                )
+                for key in ("symbols", "called_symbols"):
+                    controller_references[key].update(references[key])
+    direct_controller_import_candidates -= controller_context_paths
+    direct_controller_import_candidates = {
+        path
+        for path in direct_controller_import_candidates
+        if path in tracked_set
+    }
+    direct_controller_import_paths = tuple(
+        sorted(
+            direct_controller_import_candidates,
+            key=lambda path: (
+                0 if "validator" in path.lower() or "validation" in path.lower() else
+                1 if "/middleware/" in path.lower() else
+                2 if any(
+                    reference["called_symbols"]
+                    for reference in direct_controller_import_references_by_path.get(path, {}).values()
+                ) else
+                3 if path in direct_controller_import_references_by_path else
+                4 if "/utils/" in path.lower() else 5,
+                -len(_path_tokens(path) & changed_path_tokens),
+                path,
+            ),
+        )[:_DISCOVERY_MAX_DIRECT_CONTROLLER_IMPORTS]
+    )
+    direct_controller_import_paths_omitted = max(
+        0,
+        len(direct_controller_import_candidates) - len(direct_controller_import_paths),
+    )
+
     seed_candidate_paths = (
         grep_paths
         | module_name_search_paths
@@ -2283,7 +2755,10 @@ def discover_neighbor_evidence(
         | referenced_module_paths
         | test_paths
         | dependency_manifest_paths
+        | set(test_runner_config_paths)
         | related_container_config_paths
+        | set(paired_controller_route_paths)
+        | set(direct_controller_import_paths)
         | set(codegraph_by_path)
         | set(codegraph_callees_by_path)
     ) - changed
@@ -2315,7 +2790,6 @@ def discover_neighbor_evidence(
     relationship_expansion_term_omitted_examples = []
     relationship_expansion_source_paths_skipped_by_size = []
     relationship_expansion_search_bytes = 0
-    candidate_source_cache: dict[str, bytes] = {}
 
     def expansion_path_priority(path: str) -> tuple:
         categories = _neighbor_categories(path)
@@ -2482,17 +2956,20 @@ def discover_neighbor_evidence(
         seed_candidate_paths | relationship_expansion_paths,
         key=lambda path: (
             0 if path in dependency_manifest_paths else
-            1 if path in related_container_config_paths else
-            2 if path in referenced_module_paths else
-            3 if path in codegraph_by_path or path in codegraph_callees_by_path else
-            4 if path in direct_anchor_search_paths else
-            5 if path in relationship_expansion_paths and set(_neighbor_categories(path)) & _SYSTEM_BOUNDARY_CATEGORIES else
-            6 if path in relationship_expansion_paths else
-            7 if path in module_name_search_paths else
-            8 if path in test_paths else
-            9 if path in grep_paths and set(_neighbor_categories(path)) & _SYSTEM_BOUNDARY_CATEGORIES else
-            10 if path in grep_paths and "test" in _neighbor_categories(path) else
-            11 if path in grep_paths else 12,
+            1 if path in test_runner_config_paths else
+            2 if path in related_container_config_paths else
+            3 if path in referenced_module_paths else
+            4 if path in codegraph_by_path or path in codegraph_callees_by_path else
+            5 if path in direct_anchor_search_paths else
+            6 if path in paired_controller_route_paths else
+            7 if path in direct_controller_import_paths else
+            8 if path in relationship_expansion_paths and set(_neighbor_categories(path)) & _SYSTEM_BOUNDARY_CATEGORIES else
+            9 if path in relationship_expansion_paths else
+            10 if path in module_name_search_paths else
+            11 if path in test_paths else
+            12 if path in grep_paths and set(_neighbor_categories(path)) & _SYSTEM_BOUNDARY_CATEGORIES else
+            13 if path in grep_paths and "test" in _neighbor_categories(path) else
+            14 if path in grep_paths else 15,
             relationship_depth_by_path.get(path, 0),
             -len(_path_tokens(path) & changed_path_tokens),
             path,
@@ -2501,9 +2978,18 @@ def discover_neighbor_evidence(
     candidate_scan_limit = min(_DISCOVERY_MAX_CANDIDATE_SCAN_PATHS, max_candidates * 2)
     candidate_paths = all_candidate_paths[:candidate_scan_limit]
     candidate_paths_skipped_by_size = []
+    direct_diff_anchor_context_range_candidates = []
+    direct_diff_anchor_context_ranges_omitted_by_path = 0
+    direct_diff_anchor_context_range_omitted_examples = []
+    direct_diff_anchor_match_lines_omitted = 0
+    direct_diff_anchor_match_line_omitted_examples = []
+    controller_handler_context_ranges_added = 0
+    controller_handler_context_omitted = 0
+    controller_handler_context_omitted_examples = []
     candidate_match_terms = tuple(
         dict.fromkeys((*ordered_symbols, *changed_diff_terms, *relationship_expansion_terms))
     )
+    changed_diff_term_set = set(changed_diff_terms)
     relationship_anchor_terms = {*changed_diff_terms, *relationship_expansion_terms}
     for path in candidate_paths:
         if path not in tracked_set:
@@ -2533,16 +3019,31 @@ def discover_neighbor_evidence(
             test_audit_by_path[path] = test_audit
             test_audit_files_scanned += 1
         matches_by_symbol: dict[str, list[int]] = {}
+        direct_diff_anchor_lines: dict[int, set[str]] = {}
+        source_lines = source.splitlines(keepends=True)
+        source_text_lines = text.splitlines()
         if candidate_match_terms:
             alternatives = "|".join(re.escape(symbol) for symbol in candidate_match_terms)
             expression = re.compile(
                 rf"(?<![A-Za-z0-9_$])(?P<symbol>{alternatives})(?![A-Za-z0-9_$])"
             )
-            for line_number, line in enumerate(text.splitlines(), 1):
+            for line_number, line in enumerate(source_text_lines, 1):
+                direct_line_terms = set()
                 for match in expression.finditer(line):
-                    lines = matches_by_symbol.setdefault(match.group("symbol"), [])
+                    symbol = match.group("symbol")
+                    lines = matches_by_symbol.setdefault(symbol, [])
                     if (not lines or lines[-1] != line_number) and len(lines) < 9:
                         lines.append(line_number)
+                    if symbol in changed_diff_term_set:
+                        direct_line_terms.add(symbol)
+                if direct_line_terms:
+                    if line_number in direct_diff_anchor_lines:
+                        direct_diff_anchor_lines[line_number].update(direct_line_terms)
+                    elif len(direct_diff_anchor_lines) < _DISCOVERY_MAX_DIRECT_DIFF_ANCHOR_MATCH_LINES_PER_PATH:
+                        direct_diff_anchor_lines[line_number] = direct_line_terms
+                    else:
+                        direct_diff_anchor_match_lines_omitted += 1
+                        direct_diff_anchor_match_line_omitted_examples.append(path)
         matches = [
             {"symbol": symbol, "lines": lines[:8], "more_lines": len(lines) > 8}
             for symbol, lines in sorted(matches_by_symbol.items())
@@ -2573,6 +3074,8 @@ def discover_neighbor_evidence(
                 categories = ["dependency"]
             else:
                 categories.append("dependency")
+        if path in test_runner_config_paths and "test_runner_config" not in categories:
+            categories.append("test_runner_config")
         reasons = []
         if matches:
             reasons.append("symbol_reference")
@@ -2594,8 +3097,37 @@ def discover_neighbor_evidence(
             reasons.append("system_boundary_path_and_symbol_reference")
         if path in dependency_manifest_paths:
             reasons.append("test_dependency_manifest")
+        if path in test_runner_config_paths:
+            reasons.append("test_runner_configuration")
         if path in related_container_config_paths:
             reasons.append("related_deployment_config")
+        if path in paired_controller_route_paths:
+            reasons.append("paired_controller_route")
+        if path in direct_controller_import_paths:
+            reasons.append("direct_controller_import")
+        direct_handler_import_references = [
+            {
+                "controller_path": controller_path,
+                "symbols": sorted(references["symbols"]),
+                "called_symbols": sorted(references["called_symbols"]),
+            }
+            for controller_path, references in sorted(
+                direct_controller_import_references_by_path.get(path, {}).items()
+            )
+        ]
+        if direct_handler_import_references:
+            reasons.append("direct_controller_handler_import_reference")
+        direct_handler_import_call = any(
+            item["called_symbols"] for item in direct_handler_import_references
+        )
+        if direct_handler_import_call:
+            reasons.append("direct_controller_handler_import_call")
+        direct_handler_import_call_matches_changed_anchor = (
+            direct_handler_import_call
+            and bool(set(relationship_anchors) & changed_diff_term_set)
+        )
+        if direct_handler_import_call_matches_changed_anchor:
+            reasons.append("direct_controller_handler_import_call_matches_changed_anchor")
         if path in referenced_module_paths:
             reasons.append("local_module_import")
         if imported_changed_paths:
@@ -2620,12 +3152,152 @@ def discover_neighbor_evidence(
                 "codegraph_callers": codegraph_matches,
                 "codegraph_callees": codegraph_callee_matches,
                 "reasons": reasons,
+                "direct_controller_handler_import_references": direct_handler_import_references,
+                "direct_controller_handler_import_call_matches_changed_anchor": direct_handler_import_call_matches_changed_anchor,
                 "imported_changed_paths": imported_changed_paths,
                 "test_audit_candidates": test_audit["candidates"] if test_audit else [],
                 "size_bytes": len(source),
                 "sha256": hashlib.sha256(source).hexdigest(),
             }
         )
+        if (
+            path not in changed
+            and len(source) >= _DISCOVERY_MIN_SOURCE_BYTES_FOR_DIRECT_DIFF_ANCHOR_RANGE
+            and direct_diff_anchor_lines
+        ):
+            proposed_ranges = []
+            for line_number, terms in sorted(direct_diff_anchor_lines.items()):
+                start = max(
+                    1,
+                    line_number - _DISCOVERY_DIRECT_DIFF_ANCHOR_CONTEXT_BEFORE,
+                )
+                end = min(
+                    len(source_lines),
+                    line_number + _DISCOVERY_DIRECT_DIFF_ANCHOR_CONTEXT_AFTER,
+                )
+                controller_handler_context = False
+                if (
+                    _CONTROLLER_PATH.match(path)
+                    and PurePosixPath(path).suffix.lower()
+                    in _CONTROLLER_SOURCE_SUFFIXES
+                ):
+                    handler_start = _controller_handler_start_line(
+                        path, source_text_lines, line_number
+                    )
+                    if handler_start is None:
+                        controller_handler_context_omitted += 1
+                        controller_handler_context_omitted_examples.append(path)
+                    else:
+                        handler_range = _controller_handler_range(
+                            path, source_text_lines, line_number
+                        )
+                        if handler_range is None:
+                            controller_handler_context_omitted += 1
+                            controller_handler_context_omitted_examples.append(path)
+                            handler_start = None
+                        else:
+                            handler_start, handler_end = handler_range
+                    if handler_start is not None:
+                        handler_range_bytes = b"".join(
+                            source_lines[handler_start - 1 : handler_end]
+                        )
+                        if (
+                            handler_end - handler_start + 1
+                            <= _DISCOVERY_MAX_CONTROLLER_HANDLER_CONTEXT_LINES
+                            and len(handler_range_bytes)
+                            <= _DISCOVERY_MAX_CONTROLLER_HANDLER_CONTEXT_BYTES
+                        ):
+                            controller_handler_context = (
+                                handler_start != start or handler_end != end
+                            )
+                            start = min(start, handler_start)
+                            end = handler_end
+                            if controller_handler_context:
+                                controller_handler_context_ranges_added += 1
+                        else:
+                            controller_handler_context_omitted += 1
+                            controller_handler_context_omitted_examples.append(path)
+                if proposed_ranges and start <= proposed_ranges[-1][1] + 3:
+                    (
+                        previous_start,
+                        previous_end,
+                        previous_terms,
+                        previous_handler_context,
+                    ) = proposed_ranges[-1]
+                    previous_terms.update(terms)
+                    proposed_ranges[-1] = (
+                        previous_start,
+                        max(previous_end, end),
+                        previous_terms,
+                        previous_handler_context or controller_handler_context,
+                    )
+                else:
+                    proposed_ranges.append(
+                        (start, end, set(terms), controller_handler_context)
+                    )
+            direct_diff_anchor_context_ranges_omitted_by_path += max(
+                0,
+                len(proposed_ranges)
+                - _DISCOVERY_MAX_DIRECT_DIFF_ANCHOR_CONTEXT_RANGES_PER_PATH,
+            )
+            direct_diff_anchor_context_range_omitted_examples.extend(
+                [path]
+                * max(
+                    0,
+                    len(proposed_ranges)
+                    - _DISCOVERY_MAX_DIRECT_DIFF_ANCHOR_CONTEXT_RANGES_PER_PATH,
+                )
+            )
+            for start, end, range_terms, handler_context in proposed_ranges[
+                :_DISCOVERY_MAX_DIRECT_DIFF_ANCHOR_CONTEXT_RANGES_PER_PATH
+            ]:
+                range_bytes = b"".join(source_lines[start - 1 : end])
+                if not range_bytes or not range_terms:
+                    continue
+                range_match_lines = {
+                    term: [
+                        line_number
+                        for line_number, terms in direct_diff_anchor_lines.items()
+                        if start <= line_number <= end and term in terms
+                    ]
+                    for term in range_terms
+                }
+                direct_diff_anchor_context_range_candidates.append(
+                    {
+                        "path": path,
+                        "categories": list(_neighbor_categories(path)),
+                        "matched_symbols": [
+                            {
+                                "symbol": term,
+                                "lines": range_match_lines[term][:8],
+                                "more_lines": len(range_match_lines[term]) > 8,
+                            }
+                            for term in sorted(range_terms)
+                        ],
+                        "relationship_depth": relationship_depth_by_path.get(path, 0),
+                        "relationship_anchors": sorted(range_terms),
+                        "dispatched_action_anchors": [],
+                        "direct_relationship_anchor": path in direct_anchor_search_paths,
+                        "direct_diff_anchor_context_range": True,
+                        "direct_controller_handler_context_range": handler_context,
+                        "codegraph_callers": [],
+                        "codegraph_callees": [],
+                        "reasons": [
+                            "direct_changed_diff_anchor_range",
+                            *(
+                                ["direct_controller_handler_context"]
+                                if handler_context
+                                else []
+                            ),
+                        ],
+                        "imported_changed_paths": [],
+                        "test_audit_candidates": [],
+                        "size_bytes": len(range_bytes),
+                        "sha256": hashlib.sha256(range_bytes).hexdigest(),
+                        "start_line": start,
+                        "end_line": end,
+                    }
+                )
 
     changed_file_context_ranges_added = 0
     changed_file_context_ranges_omitted = 0
@@ -2745,6 +3417,38 @@ def discover_neighbor_evidence(
             )
             changed_file_context_ranges_added += 1
 
+    def direct_context_range_priority(item: dict) -> tuple:
+        categories = set(item["categories"])
+        return (
+            0 if item.get("direct_controller_handler_context_range") else
+            1 if categories & _SYSTEM_BOUNDARY_CATEGORIES else
+            2 if item["direct_relationship_anchor"] else 3,
+            -len(item["relationship_anchors"]),
+            item["size_bytes"],
+            item["path"],
+            item["start_line"],
+        )
+
+    direct_diff_anchor_context_range_candidates.sort(key=direct_context_range_priority)
+    direct_diff_anchor_context_range_limit = min(
+        _DISCOVERY_MAX_DIRECT_DIFF_ANCHOR_CONTEXT_RANGES,
+        max_candidates,
+    )
+    direct_diff_anchor_context_ranges_omitted = (
+        direct_diff_anchor_context_ranges_omitted_by_path
+        + max(0, len(direct_diff_anchor_context_range_candidates) - direct_diff_anchor_context_range_limit)
+    )
+    direct_diff_anchor_context_range_omitted_examples.extend(
+        item["path"]
+        for item in direct_diff_anchor_context_range_candidates[
+            direct_diff_anchor_context_range_limit:
+        ]
+    )
+    direct_diff_anchor_context_ranges = direct_diff_anchor_context_range_candidates[
+        :direct_diff_anchor_context_range_limit
+    ]
+    candidates.extend(direct_diff_anchor_context_ranges)
+
     def candidate_priority(item: dict) -> tuple:
         categories = set(item["categories"])
         is_code_source = _relationship_expandable_source(item["path"])
@@ -2753,23 +3457,33 @@ def discover_neighbor_evidence(
         has_dispatched_action = bool(item.get("dispatched_action_anchors"))
         priority = (
             0 if "dependency" in categories else
-            1 if is_code_source and item.get("changed_file_context_range") else
-            2 if "related_deployment_config" in item["reasons"] else
-            3 if is_code_source and has_dispatched_action else
-            4 if is_code_source and is_local_import and item["direct_relationship_anchor"] else
-            5 if is_code_source and has_action_anchor else
-            6 if is_code_source and is_local_import else
-            7 if is_code_source and _COMMAND_ENTRYPOINT_PATH.search(item["path"]) else
-            8 if is_code_source and item["direct_relationship_anchor"] else
-            9 if is_code_source and categories & _SYSTEM_BOUNDARY_CATEGORIES else
-            10 if is_code_source and item["relationship_depth"] > 0 else
-            11 if is_code_source and "declaration" in categories else
-            12 if "test" in categories else
-            13 if is_code_source else
-            14 if is_local_import else
-            15 if item["direct_relationship_anchor"] else
-            16 if item["relationship_depth"] > 0 else
-            17 if "declaration" in categories else 18
+            1 if "test_runner_config" in categories else
+            2 if is_code_source and item.get("changed_file_context_range") else
+            3 if "related_deployment_config" in item["reasons"] else
+            4 if is_code_source and has_dispatched_action else
+            5 if is_code_source and is_local_import and item["direct_relationship_anchor"] else
+            6 if is_code_source and has_action_anchor else
+            7 if is_code_source and is_local_import else
+            8 if is_code_source and _COMMAND_ENTRYPOINT_PATH.search(item["path"]) else
+            9 if is_code_source and "direct_controller_import" in item["reasons"] and _VALIDATOR_PATH.search(item["path"]) else
+            10 if is_code_source and item.get("direct_controller_handler_context_range") else
+            11 if is_code_source and item.get("direct_diff_anchor_context_range") else
+            12 if is_code_source and "paired_controller_route" in item["reasons"] else
+            13 if is_code_source and "direct_controller_import" in item["reasons"] and "/middleware/" in item["path"].lower() else
+            14 if is_code_source and item.get("direct_controller_handler_import_call_matches_changed_anchor") else
+            15 if is_code_source and "direct_controller_handler_import_call" in item["reasons"] else
+            16 if is_code_source and "direct_controller_handler_import_reference" in item["reasons"] else
+            17 if is_code_source and "direct_controller_import" in item["reasons"] else
+            18 if is_code_source and item["direct_relationship_anchor"] else
+            19 if is_code_source and categories & _SYSTEM_BOUNDARY_CATEGORIES else
+            20 if is_code_source and item["relationship_depth"] > 0 else
+            21 if is_code_source and "declaration" in categories else
+            22 if "test" in categories else
+            23 if is_code_source else
+            24 if is_local_import else
+            25 if item["direct_relationship_anchor"] else
+            26 if item["relationship_depth"] > 0 else
+            27 if "declaration" in categories else 28
         )
         return (
             priority,
@@ -2809,7 +3523,8 @@ def discover_neighbor_evidence(
         )
         used_refs.add(record.evidence_ref)
         next_id += 1
-        test_audit_evidence_refs_by_path[candidate["path"]] = record.evidence_ref
+        if not candidate.get("direct_diff_anchor_context_range"):
+            test_audit_evidence_refs_by_path[candidate["path"]] = record.evidence_ref
         candidate["test_audit_candidates"] = [
             {**audit_candidate, "evidence_ref": record.evidence_ref}
             for audit_candidate in candidate["test_audit_candidates"]
@@ -2839,12 +3554,20 @@ def discover_neighbor_evidence(
         "symbol_search_source_size_limit": "A selected symbol-search source exceeded a byte cap.",
         "candidate_path_limit": "Only the highest-ranked candidate paths are opened and read.",
         "candidate_result_limit": "Eligible evidence candidates exceeded the maximum records included in the discovery packet.",
+        "test_runner_config_limit": "Only the highest-ranked bounded runner configs and CI workflows are suggested for changed tests.",
+        "test_workflow_scan_limit": "Only a bounded number and byte size of likely CI workflow files are inspected for test commands.",
         "candidate_source_size_limit": "A candidate source exceeded a per-file or total-source byte cap.",
         "module_search_term_limit": "Only the configured number of module-name and symbol terms are searched.",
         "relationship_expansion_frontier_limit": "Only the highest-ranked candidate sources are expanded at each bounded depth.",
         "relationship_expansion_term_limit": "Only the configured number of route and symbol anchors are searched per expansion round.",
         "relationship_expansion_source_size_limit": "Candidate sources exceeded a per-file or total-source byte cap before relationship expansion.",
         "changed_file_context_range_limit": "Only a bounded number of additional source ranges are attached from changed files.",
+        "direct_diff_anchor_context_range_limit": "Only a bounded number of compact neighbor source ranges are attached around exact added-diff anchors.",
+        "direct_diff_anchor_match_line_limit": "Only a bounded number of exact added-diff anchor matches are retained per neighbor source file.",
+        "controller_handler_context_limit": "A controller handler declaration was not included because no bounded JavaScript or TypeScript handler boundary was found within the line and byte limits.",
+        "direct_controller_context_limit": "Only a bounded number of directly matched controller files are paired with route registries and import dependencies.",
+        "controller_route_pair_limit": "Only a bounded number of conventional route files paired with directly matched controllers are included.",
+        "direct_controller_import_limit": "Only a bounded number of static imports from directly matched controllers and their paired routes are included.",
         "codegraph_symbol_query_limit": "Only the configured number of changed symbols receive CodeGraph queries.",
     }
 
@@ -2898,6 +3621,18 @@ def discover_neighbor_evidence(
         max_candidates,
     )
     add_omission(
+        "test_runner_config_limit",
+        len(test_runner_config_paths_omitted),
+        test_runner_config_paths_omitted,
+        _DISCOVERY_MAX_TEST_RUNNER_CONFIG_CANDIDATES,
+    )
+    add_omission(
+        "test_workflow_scan_limit",
+        len(test_workflow_scan_omitted),
+        test_workflow_scan_omitted,
+        _DISCOVERY_MAX_TEST_WORKFLOW_SCAN_PATHS,
+    )
+    add_omission(
         "candidate_source_size_limit",
         len(candidate_paths_skipped_by_size),
         candidate_paths_skipped_by_size,
@@ -2934,6 +3669,44 @@ def discover_neighbor_evidence(
         _DISCOVERY_MAX_CHANGED_FILE_CONTEXT_RANGES,
     )
     add_omission(
+        "direct_diff_anchor_context_range_limit",
+        direct_diff_anchor_context_ranges_omitted,
+        direct_diff_anchor_context_range_omitted_examples,
+        _DISCOVERY_MAX_DIRECT_DIFF_ANCHOR_CONTEXT_RANGES,
+    )
+    add_omission(
+        "direct_diff_anchor_match_line_limit",
+        direct_diff_anchor_match_lines_omitted,
+        direct_diff_anchor_match_line_omitted_examples,
+        _DISCOVERY_MAX_DIRECT_DIFF_ANCHOR_MATCH_LINES_PER_PATH,
+    )
+    add_omission(
+        "controller_handler_context_limit",
+        controller_handler_context_omitted,
+        controller_handler_context_omitted_examples,
+        _DISCOVERY_MAX_CONTROLLER_HANDLER_CONTEXT_LINES,
+    )
+    add_omission(
+        "controller_route_pair_limit",
+        paired_controller_route_paths_omitted,
+        sorted(paired_controller_route_candidates)[
+            _DISCOVERY_MAX_CONTROLLER_ROUTE_PAIRS:
+        ],
+        _DISCOVERY_MAX_CONTROLLER_ROUTE_PAIRS,
+    )
+    add_omission(
+        "direct_controller_context_limit",
+        direct_controller_paths_omitted,
+        list(direct_controller_candidates[_DISCOVERY_MAX_CONTROLLER_ROUTE_PAIRS:]),
+        _DISCOVERY_MAX_CONTROLLER_ROUTE_PAIRS,
+    )
+    add_omission(
+        "direct_controller_import_limit",
+        direct_controller_import_paths_omitted,
+        sorted(direct_controller_import_candidates - set(direct_controller_import_paths)),
+        _DISCOVERY_MAX_DIRECT_CONTROLLER_IMPORTS,
+    )
+    add_omission(
         "codegraph_symbol_query_limit",
         codegraph["symbols_omitted_by_limit"],
         codegraph["omitted_symbol_examples"],
@@ -2957,7 +3730,16 @@ def discover_neighbor_evidence(
         },
         {
             "kind": "tests_and_test_dependencies",
-            "method": "path conventions, selected test audits, and ancestor manifests",
+            "method": "path conventions, selected test audits, ancestor manifests, and bounded runner configs",
+            "exhaustive": False,
+        },
+        {
+            "kind": "test_runner_configuration",
+            "candidate_paths": test_runner_config_paths,
+            "candidate_paths_omitted_by_limit": len(test_runner_config_paths_omitted),
+            "workflow_paths_scanned": test_workflow_paths_scanned,
+            "workflow_paths_omitted_by_scan_limit": len(test_workflow_scan_omitted),
+            "workflow_scan_bytes_limit": _DISCOVERY_MAX_TEST_WORKFLOW_SCAN_BYTES,
             "exhaustive": False,
         },
         {
@@ -2971,6 +3753,34 @@ def discover_neighbor_evidence(
         {
             "kind": "matched_ranges_in_changed_files",
             "range_count": changed_file_context_ranges_added,
+            "exhaustive": False,
+        },
+        {
+            "kind": "neighbor_ranges_around_added_diff_anchors",
+            "range_count": sum(
+                bool(item.get("direct_diff_anchor_context_range")) for item in records
+            ),
+            "exhaustive": False,
+        },
+        {
+            "kind": "direct_controller_handler_context",
+            "range_count": sum(
+                bool(item.get("direct_controller_handler_context_range"))
+                for item in records
+            ),
+            "omitted_anchor_count": controller_handler_context_omitted,
+            "max_lines": _DISCOVERY_MAX_CONTROLLER_HANDLER_CONTEXT_LINES,
+            "max_bytes": _DISCOVERY_MAX_CONTROLLER_HANDLER_CONTEXT_BYTES,
+            "exhaustive": False,
+        },
+        {
+            "kind": "conventional_controller_route_pairs",
+            "path_count": len(paired_controller_route_paths),
+            "exhaustive": False,
+        },
+        {
+            "kind": "direct_controller_imports",
+            "path_count": len(direct_controller_import_paths),
             "exhaustive": False,
         },
         {
@@ -3054,6 +3864,13 @@ def discover_neighbor_evidence(
             "candidate_sources_read": relationship_expansion_sources_read,
             "candidate_sources_omitted_by_limit": relationship_expansion_frontier_omitted,
             "candidate_sources_omitted_by_size": len(relationship_expansion_source_paths_skipped_by_size),
+            "direct_diff_anchor_context_ranges_added": sum(
+                bool(item.get("direct_diff_anchor_context_range")) for item in records
+            ),
+            "direct_controller_handler_context_ranges_added": sum(
+                bool(item.get("direct_controller_handler_context_range"))
+                for item in records
+            ),
             "max_terms_per_round": _DISCOVERY_MAX_RELATIONSHIP_EXPANSION_TERMS,
             "terms_searched": relationship_expansion_terms,
             "terms_omitted_by_limit": relationship_expansion_terms_omitted,
@@ -3067,6 +3884,10 @@ def discover_neighbor_evidence(
         "changed_sources_skipped_symbol_scan": changed_sources_skipped_symbol_scan,
         "changed_sources_skipped_symbol_scan_examples": changed_sources_skipped_symbol_scan_paths[:_DISCOVERY_MAX_OMISSION_EXAMPLES],
         "candidate_records": records,
+        "direct_diff_anchor_context_ranges_added": sum(
+            bool(item.get("direct_diff_anchor_context_range")) for item in records
+        ),
+        "direct_diff_anchor_context_ranges_omitted": direct_diff_anchor_context_ranges_omitted,
         "candidate_manifest": candidate_manifest,
         "candidate_count": len(candidate_manifest),
         "candidate_results_considered": candidate_results_considered,

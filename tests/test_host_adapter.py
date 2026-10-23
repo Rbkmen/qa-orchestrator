@@ -9,7 +9,10 @@ from qa_orchestrator.contracts import (
     ProfileExecutionMetrics,
     ProfileReviewReport,
     ReviewAgent,
+    ReviewContext,
+    ReviewDiffHunk,
     ReviewVerificationRecord,
+    review_diff_hunk_inventory_sha256,
 )
 from qa_orchestrator.host import HostExecutionPolicy, HostReviewAdapter, RetryableProfileError
 from qa_orchestrator.orchestration import (
@@ -103,6 +106,99 @@ def test_host_rejects_hunk_attestation_outside_bound_diff(bound_review_context):
         HostReviewAdapter._validate_report(
             bound_review_context, ReviewAgent.PYTHON_REVIEWER, invalid
         )
+
+
+def test_host_reports_unattested_hunks_when_inventory_is_complete(bound_review_context):
+    hunks = (
+        ReviewDiffHunk(
+            index=0,
+            changed_path_index=0,
+            old_start=1,
+            old_count=1,
+            new_start=1,
+            new_count=1,
+            header="@@ -1,1 +1,1 @@",
+            sha256="a" * 64,
+        ),
+        ReviewDiffHunk(
+            index=1,
+            changed_path_index=0,
+            old_start=3,
+            old_count=1,
+            new_start=3,
+            new_count=1,
+            header="@@ -3,1 +3,1 @@",
+            sha256="b" * 64,
+        ),
+    )
+    context = ReviewContext.model_validate(
+        {
+            **bound_review_context.model_dump(mode="python"),
+            "diff_hunks": hunks,
+            "diff_hunk_inventory_sha256": review_diff_hunk_inventory_sha256(
+                bound_review_context.diff_sha256, hunks
+            ),
+            "diff_hunk_inventory_status": "complete",
+            "diff_hunk_inventory_count_at_least": len(hunks),
+        }
+    )
+    incomplete = ProfileReviewReport(
+        profile=ReviewAgent.PYTHON_REVIEWER,
+        scope="Reviewed changed paths but omitted hunk attestations.",
+        reviewed_changed_paths=context.changed_files,
+    )
+
+    augmented = HostReviewAdapter._with_changed_path_coverage_gaps(context, incomplete)
+
+    assert any(
+        "2 diff hunk(s)" in gap.text and "0, 1" in gap.text
+        for gap in augmented.coverage_gaps
+    )
+    complete = incomplete.model_copy(update={"reviewed_diff_hunk_indexes": (0, 1)})
+    fully_attested = HostReviewAdapter._with_changed_path_coverage_gaps(context, complete)
+    assert not any("diff hunk(s)" in gap.text for gap in fully_attested.coverage_gaps)
+    missing_both = incomplete.model_copy(update={"reviewed_changed_paths": ()})
+    combined = HostReviewAdapter._with_changed_path_coverage_gaps(context, missing_both)
+    host_gaps = [
+        gap
+        for gap in combined.coverage_gaps
+        if "changed path(s)" in gap.text and "diff hunk(s)" in gap.text
+    ]
+    assert len(host_gaps) == 1
+
+
+def test_host_does_not_add_hunk_gap_for_partial_inventory(bound_review_context):
+    hunk = ReviewDiffHunk(
+        index=0,
+        changed_path_index=0,
+        old_start=1,
+        old_count=1,
+        new_start=1,
+        new_count=1,
+        header="@@ -1,1 +1,1 @@",
+        sha256="a" * 64,
+    )
+    context = ReviewContext.model_validate(
+        {
+            **bound_review_context.model_dump(mode="python"),
+            "diff_hunks": (hunk,),
+            "diff_hunk_inventory_sha256": review_diff_hunk_inventory_sha256(
+                bound_review_context.diff_sha256, (hunk,)
+            ),
+            "diff_hunk_inventory_status": "partial",
+            "diff_hunk_inventory_count_at_least": 2,
+        }
+    )
+    reviewed = ProfileReviewReport(
+        profile=ReviewAgent.PYTHON_REVIEWER,
+        scope="Reviewed the indexed hunk.",
+        reviewed_changed_paths=context.changed_files,
+        reviewed_diff_hunk_indexes=(0,),
+    )
+
+    augmented = HostReviewAdapter._with_changed_path_coverage_gaps(context, reviewed)
+
+    assert not any("diff hunk(s)" in gap.text for gap in augmented.coverage_gaps)
 
 
 async def test_finish_review_exports_markdown_with_the_accepted_outcome(

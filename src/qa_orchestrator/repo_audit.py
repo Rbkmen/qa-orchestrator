@@ -28,7 +28,10 @@ _MAX_AUDIT_SOURCE_BYTES = 32_000_000
 _MAX_REPORTED_TEST_PATHS = 500
 _MAX_CANDIDATES = 500
 
-_TEST_PATH = re.compile(r"(^|/)(tests?|specs?)(/|$)|(^|[._-])(test|spec)([._-]|$)", re.IGNORECASE)
+_TEST_PATH = re.compile(
+    r"(^|/)(tests?|specs?)(?:[-_.][^/]+)?(/|$)|(^|[._-])(test|spec)([._-]|$)",
+    re.IGNORECASE,
+)
 _CAMEL_CASE_TEST_FILE = re.compile(
     r"(^|/)(Test|Tests|Spec|Specs)[^/]*\.[^/]+$|(?:Test|Tests|Spec|Specs)\.[^/]+$"
 )
