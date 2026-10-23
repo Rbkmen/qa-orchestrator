@@ -49,7 +49,10 @@ prompt=sys.stdin.read()""")
 async def test_executor_rejects_forbidden_findings_despite_schema(
     executor_input, review_finding_candidate, profile,
 ):
-    from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.codex_executor import (
+        CodexProfileExecutor,
+        RetryableProfileOutputError,
+    )
 
     packet, job, script = executor_input
     job = replace(job, profile=profile, route=build_review_route(profile))
@@ -57,7 +60,7 @@ async def test_executor_rejects_forbidden_findings_despite_schema(
     findings = json.dumps([review_finding_candidate.model_dump(mode="json")])
     source = source.replace("'finding_candidates':[]", f"'finding_candidates':json.loads({findings!r})")
     script.write_text(source)
-    with pytest.raises(ValueError, match="CLI reviewer returned an invalid report") as error:
+    with pytest.raises(RetryableProfileOutputError, match="CLI reviewer returned an invalid report") as error:
         await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(job)
     assert f"{profile} cannot report implementation findings" in str(error.value.__cause__)
 
@@ -68,7 +71,7 @@ def test_executor_schema_change_invalidates_previous_identity(executor_input):
     packet, _, _ = executor_input
     executor = CodexProfileExecutor(packet)
     old_identity = hashlib.sha256(json.dumps({
-        "implementation": "codex-packet-executor-v10",
+        "implementation": "codex-packet-executor-v13",
         "command": executor.command,
         "max_context_bytes": executor.max_context_bytes,
         "model": executor.model,
@@ -83,6 +86,55 @@ def test_default_context_budget_matches_the_total_prompt_ceiling(executor_input)
     packet, _, _ = executor_input
 
     assert CodexProfileExecutor(packet).max_context_bytes == MAX_EXECUTOR_PROMPT_BYTES
+
+
+def test_secondary_review_profiles_receive_source_evidence_from_the_bundle():
+    from qa_orchestrator.codex_executor import _profile_context_override_refs
+    from qa_orchestrator.context_pack import ContextFragment, ContextPacket
+    from qa_orchestrator.contracts import EvidenceRecord
+
+    def source(ref, path, profiles):
+        text = f"source:{ref}"
+        return ContextFragment(
+            record=EvidenceRecord(
+                evidence_ref=ref,
+                kind="source",
+                revision="1" * 40,
+                path=path,
+                sha256=hashlib.sha256(text.encode()).hexdigest(),
+                source_text_available=True,
+            ),
+            text=text,
+            required=False,
+            profiles=profiles,
+        )
+
+    packet = ContextPacket(
+        fragments=(
+            source("S1", "src/service.py", (ReviewAgent.CODE_REVIEWER,)),
+            source("N1", "src/dependency.py", (ReviewAgent.CODE_REVIEWER,)),
+            source("S2", "src/unrelated.py", (ReviewAgent.SECURITY_REVIEWER,)),
+        )
+    )
+    bundle = (
+        ReviewAgent.CODE_EXPLORER,
+        ReviewAgent.CODE_REVIEWER,
+        ReviewAgent.PR_TEST_ANALYZER,
+        ReviewAgent.OMISSION_AUDITOR,
+    )
+
+    assert _profile_context_override_refs(
+        packet, ReviewAgent.CODE_EXPLORER, {"src/service.py"}, bundle
+    ) == ("N1", "S1")
+    assert _profile_context_override_refs(
+        packet, ReviewAgent.PR_TEST_ANALYZER, {"src/service.py"}, bundle
+    ) == ("S1",)
+    assert _profile_context_override_refs(
+        packet, ReviewAgent.OMISSION_AUDITOR, {"src/service.py"}, bundle
+    ) == ("N1", "S1")
+    assert _profile_context_override_refs(
+        packet, ReviewAgent.CODE_REVIEWER, {"src/service.py"}, bundle
+    ) == ()
 
 
 @pytest.fixture
@@ -123,9 +175,16 @@ async def test_executor_launches_readonly_and_validates_actual_process_output(ex
     assert result.execution_metrics.output_tokens == 5
 
 
-async def test_executor_prompts_for_and_accepts_bound_diff_hunk_attestations(executor_input):
+@pytest.mark.parametrize("partial_inventory", (False, True))
+async def test_executor_prompts_for_and_accepts_bound_diff_hunk_attestations(
+    executor_input, partial_inventory
+):
     from qa_orchestrator.codex_executor import CodexProfileExecutor
-    from qa_orchestrator.contracts import ReviewDiffHunk, review_diff_hunk_inventory_sha256
+    from qa_orchestrator.contracts import (
+        ReviewDiffHunk,
+        impact_candidate_set_sha256,
+        review_diff_hunk_inventory_sha256,
+    )
 
     packet, job, script = executor_input
     context = job.session.review_context
@@ -140,27 +199,54 @@ async def test_executor_prompts_for_and_accepts_bound_diff_hunk_attestations(exe
         header="@@ -1 +1 @@",
         sha256="a" * 64,
     )
-    context = context.model_copy(
-        update={
-            "diff_hunks": (hunk,),
-            "diff_hunk_inventory_sha256": review_diff_hunk_inventory_sha256(
-                context.diff_sha256, (hunk,)
-            ),
-        }
-    )
+    context_payload = {
+        **context.model_dump(mode="python"),
+        "diff_hunks": (hunk,),
+        "diff_hunk_inventory_sha256": review_diff_hunk_inventory_sha256(
+            context.diff_sha256, (hunk,)
+        ),
+        "neighbor_discovery_sha256": "b" * 64,
+        "neighbor_discovery_candidate_count": 0,
+        "neighbor_discovery_candidate_set_sha256": impact_candidate_set_sha256(()),
+        "neighbor_discovery_candidate_results_omitted_by_limit": 2,
+    }
+    if partial_inventory:
+        context_payload.update(
+            {
+                "diff_hunk_inventory_status": "partial",
+                "diff_hunk_inventory_count_at_least": 501,
+            }
+        )
+    context = type(context).model_validate(context_payload)
     job = replace(
         job,
         session=job.session.model_copy(update={"review_context": context}),
     )
-    source = script.read_text(encoding="utf-8").replace(
-        "prompt=sys.stdin.read()",
+    extra_partial_assertion = (
+        "assert '\"diff_hunk_indexed_prefix_count\":1' in prompt\n"
+        "assert '\"diff_hunks\":' not in prompt\n"
+        "assert 'Report every unindexed remainder as a coverage gap' in prompt\n"
+        if partial_inventory
+        else ""
+    )
+    hunk_order_assertion = (
+        "assert 'first 1 hunk in exact diff order' in prompt\n"
+        if partial_inventory
+        else "assert 'indexes follow the hunk order in the exact bound diff' in prompt\n"
+    )
+    prompt_assertions = (
         "schema=json.loads(pathlib.Path(a[a.index('--output-schema')+1]).read_text())\n"
         "assert schema['properties']['reviewed_diff_hunk_indexes']['type']=='array'\n"
         "assert 'reviewed_diff_hunk_indexes' in schema['required']\n"
         "prompt=sys.stdin.read()\n"
         "assert 'Diff-hunk accounting' in prompt\n"
-        "assert 'indexes follow the hunk order in the exact bound diff' in prompt\n"
-        "assert 'reviewed_diff_hunk_indexes' in prompt",
+        "assert 'Neighbor discovery result limit omitted 2 eligible candidates' in prompt\n"
+        + hunk_order_assertion
+        + extra_partial_assertion
+        + "assert 'reviewed_diff_hunk_indexes' in prompt"
+    )
+    source = script.read_text(encoding="utf-8").replace(
+        "prompt=sys.stdin.read()", prompt_assertions,
     ).replace(
         "'reviewed_changed_paths':['src/service.py']",
         "'reviewed_changed_paths':['src/service.py'], 'reviewed_diff_hunk_indexes':[0]",

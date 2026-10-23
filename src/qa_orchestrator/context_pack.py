@@ -95,14 +95,29 @@ class PackedContext:
     budget_omitted_refs: tuple[str, ...]
 
 
-def select_context(packet: ContextPacket, profile: ReviewAgent, *, max_bytes: int) -> PackedContext:
+def select_context(
+    packet: ContextPacket,
+    profile: ReviewAgent,
+    *,
+    max_bytes: int,
+    profile_override_refs: tuple[str, ...] = (),
+) -> PackedContext:
     if not 1 <= max_bytes <= 2_000_000:
         raise ValueError("context byte budget outside supported bounds")
     profile = ReviewAgent(profile)
+    override_refs = set(profile_override_refs)
+    packet_refs = {fragment.record.evidence_ref for fragment in packet.fragments}
+    if override_refs - packet_refs:
+        raise ValueError("profile override refs must belong to the context packet")
     groups = {}
     omitted, budget_omitted = [], []
     for fragment in sorted(packet.fragments, key=lambda f: f.record.evidence_ref):
-        if not fragment.required and fragment.profiles and profile not in fragment.profiles:
+        if (
+            not fragment.required
+            and fragment.profiles
+            and profile not in fragment.profiles
+            and fragment.record.evidence_ref not in override_refs
+        ):
             omitted.append(fragment.record.evidence_ref)
             continue
         identity = fragment.record.model_dump(exclude={"evidence_ref"})
@@ -111,7 +126,7 @@ def select_context(packet: ContextPacket, profile: ReviewAgent, *, max_bytes: in
     ordered = sorted(
         groups.values(),
         key=lambda fs: (
-            not any(f.required for f in fs),
+            not any(f.required or f.record.evidence_ref in override_refs for f in fs),
             -max(f.priority for f in fs),
             fs[0].record.evidence_ref,
         ),

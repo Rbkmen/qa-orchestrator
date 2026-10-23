@@ -36,11 +36,44 @@ _DISCOVERY_MAX_SYMBOL_SEARCH_PATHS = 32
 _DISCOVERY_MAX_SYMBOL_SEARCH_BYTES = 16_000_000
 _DISCOVERY_MAX_MODULE_SEARCH_TERMS = 48
 _DISCOVERY_MAX_MODULE_SEARCH_BYTES = 32_000_000
+_DISCOVERY_MAX_RELATIONSHIP_EXPANSION_ROUNDS = 2
+_DISCOVERY_MAX_RELATIONSHIP_EXPANSION_PATHS = 50
+_DISCOVERY_MAX_RELATIONSHIP_EXPANSION_TERMS = 48
+_DISCOVERY_MAX_CHANGED_FILE_CONTEXT_RANGES = 24
+_DISCOVERY_MAX_CHANGED_FILE_CONTEXT_RANGES_PER_PATH = 6
+_RELATIONSHIP_SOURCE_SUFFIXES = {
+    ".c", ".cc", ".cpp", ".cs", ".go", ".h", ".hpp", ".java", ".js",
+    ".jsx", ".kt", ".php", ".py", ".pyi", ".rb", ".rs", ".scala", ".swift",
+    ".ts", ".tsx", ".vue",
+}
 _DISCOVERY_SYMBOL_SEARCH_BATCH_SIZE = 32
 _DISCOVERY_MAX_OMISSION_EXAMPLES = 20
 _CODEGRAPH_MAX_SYMBOL_QUERIES = 24
 _CODEGRAPH_MAX_RELATION_CANDIDATES = 100
 _IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]{2,127}$")
+_IDENTIFIER_TOKEN = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]{2,127}")
+_ADDED_CALL = re.compile(r"\b(?P<name>[A-Za-z_$][A-Za-z0-9_$]{2,127})\s*\(")
+_ADDED_RECEIVER_CALL = re.compile(
+    r"\b(?P<receiver>[A-Za-z_$][A-Za-z0-9_$]{2,127})\s*\.\s*"
+    r"[A-Za-z_$][A-Za-z0-9_$]*\s*\("
+)
+_ADDED_ACTION_LITERAL = re.compile(
+    r"\b[A-Za-z_$][A-Za-z0-9_$]*\s*\(\s*(['\"])(?P<name>[A-Za-z_$][A-Za-z0-9_$]{2,127})\1"
+)
+_ROUTE_LITERAL = re.compile(r"[`'\"](?P<value>[^`'\"]*/[^`'\"]*)[`'\"]")
+_DISPATCH_CALL = re.compile(
+    r"\bdispatch\s*\((?P<arguments>[^;]{0,512}?)\)", re.DOTALL
+)
+_ACTION_ARGUMENT_TERMS = {
+    "activate", "add", "clear", "close", "create", "deactivate", "delete",
+    "disable", "enable", "hide", "mount", "open", "refresh", "remove", "reset",
+    "show", "start", "stop", "toggle", "unmount", "update",
+}
+_COMMON_CALL_ANCHORS = {
+    "afterEach", "beforeEach", "catch", "describe", "dispatch", "filter", "forEach",
+    "it", "map", "mock", "reduce", "spyOn", "then", "toHaveBeenCalled",
+    "toHaveBeenCalledTimes", "toHaveBeenCalledWith",
+}
 _IGNORED_IDENTIFIERS = {
     "call", "get", "init", "main", "run", "set", "test", "toString", "valueOf",
 }
@@ -89,11 +122,18 @@ _AUTHORIZATION_PATH = re.compile(
 )
 _DEPLOYMENT_PATH = re.compile(
     r"(^|/)(deploy|deployments?|helm|charts?|k8s|kubernetes|terraform|infrastructure|infra)(/|$)"
-    r"|(^|/)(?:Dockerfile(?:\..*)?|docker-compose(?:\.[^.]+)?\.ya?ml)$",
+    r"|(^|/)(?:Dockerfile(?:\..*)?|(?:docker-)?compose(?:\.[^.]+)?\.ya?ml)$",
     re.IGNORECASE,
+)
+_DOCKERFILE_PATH = re.compile(r"(^|/)Dockerfile(?:\.[^/]+)?$", re.IGNORECASE)
+_COMPOSE_CONFIG_PATH = re.compile(
+    r"(^|/)(?:docker-)?compose(?:\.[^/]+)?\.ya?ml$", re.IGNORECASE
 )
 _SERVICE_BOUNDARY_PATH = re.compile(
     r"(^|/)(services?|clients?|integrations?|adapters?)(/|$)", re.IGNORECASE
+)
+_COMMAND_ENTRYPOINT_PATH = re.compile(
+    r"(^|/)cmd/[^/]+/main\.[A-Za-z0-9]+$", re.IGNORECASE
 )
 _SYSTEM_BOUNDARY_CATEGORIES = frozenset(
     {
@@ -255,7 +295,7 @@ _DIFF_HUNK_HEADER = re.compile(
 def _parse_diff_hunks(
     context: ReviewContext,
     diff: bytes,
-) -> tuple[ReviewDiffHunk, ...]:
+) -> tuple[tuple[ReviewDiffHunk, ...], int]:
     path_indexes = {path: index for index, path in enumerate(context.changed_files)}
     lines = diff.splitlines(keepends=True)
     hunks = []
@@ -292,9 +332,9 @@ def _parse_diff_hunks(
                 (b"@@ ", b"diff --git ")
             ):
                 end += 1
-            hunk_bytes = b"".join(lines[index:end])
             if len(hunks) >= _DISCOVERY_MAX_DIFF_HUNKS:
-                raise OverflowError("diff hunk inventory exceeds its configured limit")
+                return tuple(hunks), _DISCOVERY_MAX_DIFF_HUNKS + 1
+            hunk_bytes = b"".join(lines[index:end])
             old_start = int(match.group("old_start"))
             old_count = int(match.group("old_count") or b"1")
             new_start = int(match.group("new_start"))
@@ -319,21 +359,12 @@ def _parse_diff_hunks(
             index = end
             continue
         index += 1
-    return tuple(hunks)
+    return tuple(hunks), len(hunks)
 
 
 def _diff_hunk_inventory(context: ReviewContext, diff: bytes) -> dict[str, object]:
     try:
-        hunks = _parse_diff_hunks(context, diff)
-    except OverflowError:
-        return {
-            "status": "partial",
-            "max_hunks": _DISCOVERY_MAX_DIFF_HUNKS,
-            "count_at_least": _DISCOVERY_MAX_DIFF_HUNKS + 1,
-            "hunks": [],
-            "inventory_sha256": None,
-            "reason": "diff_hunk_limit_reached",
-        }
+        hunks, count_at_least = _parse_diff_hunks(context, diff)
     except (UnicodeDecodeError, ValueError):
         return {
             "status": "partial",
@@ -343,15 +374,178 @@ def _diff_hunk_inventory(context: ReviewContext, diff: bytes) -> dict[str, objec
             "inventory_sha256": None,
             "reason": "diff_hunk_parse_failed",
         }
+    inventory_sha256 = review_diff_hunk_inventory_sha256(context.diff_sha256, hunks)
+    if count_at_least > len(hunks):
+        return {
+            "status": "partial",
+            "max_hunks": _DISCOVERY_MAX_DIFF_HUNKS,
+            "count_at_least": count_at_least,
+            "hunks": [hunk.model_dump(mode="json") for hunk in hunks],
+            "inventory_sha256": inventory_sha256,
+            "reason": "diff_hunk_limit_reached",
+        }
     return {
         "status": "complete",
         "max_hunks": _DISCOVERY_MAX_DIFF_HUNKS,
-        "count": len(hunks),
+        "count": count_at_least,
         "hunks": [hunk.model_dump(mode="json") for hunk in hunks],
-        "inventory_sha256": review_diff_hunk_inventory_sha256(
-            context.diff_sha256, hunks
-        ),
+        "inventory_sha256": inventory_sha256,
     }
+
+
+def _added_diff_relationship_terms(
+    diff: bytes, referenced_symbols: set[str]
+) -> tuple[str, ...]:
+    """Return identifiers and action names introduced by added diff lines."""
+    try:
+        lines = diff.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        return ()
+    action_terms = []
+    call_terms = []
+    changed_path_is_test = False
+    for line in lines:
+        if line.startswith("+++ b/"):
+            changed_path_is_test = bool(_TEST_PATH.search(line[6:]))
+            continue
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        if changed_path_is_test:
+            continue
+        added = line[1:]
+        action_terms.extend(
+            match.group("name")
+            for match in _ADDED_ACTION_LITERAL.finditer(added)
+            if match.group("name").lower() in _ACTION_ARGUMENT_TERMS
+        )
+        for match in _ADDED_RECEIVER_CALL.finditer(added):
+            receiver = match.group("receiver")
+            mixed_case = any(char.isupper() for char in receiver[1:]) and any(
+                char.islower() for char in receiver
+            )
+            if mixed_case:
+                call_terms.append(receiver)
+        for match in _ADDED_CALL.finditer(added):
+            name = match.group("name")
+            if name in _IGNORED_IDENTIFIERS or name in _COMMON_CALL_ANCHORS:
+                continue
+            if re.search(r"\b(?:function|def|class|interface|type)\s+$", added[:match.start()]):
+                continue
+            mixed_case = any(char.isupper() for char in name[1:]) and any(
+                char.islower() for char in name
+            )
+            if name not in referenced_symbols and not mixed_case:
+                continue
+            call_terms.append(name)
+    return tuple(dict.fromkeys((*action_terms, *call_terms)))
+
+
+def _candidate_route_terms(source: bytes) -> tuple[str, ...]:
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError:
+        return ()
+    route_terms = []
+    for match in _ROUTE_LITERAL.finditer(text):
+        value = match.group("value")
+        if not value.startswith("/") or value.startswith("//"):
+            continue
+        route = value.split("${", 1)[0]
+        route_terms.extend(_IDENTIFIER_TOKEN.findall(route))
+    return tuple(dict.fromkeys(route_terms))
+
+
+def _candidate_route_terms_near_anchors(
+    source: bytes, anchors: Sequence[str], *, line_distance: int = 1
+) -> tuple[str, ...]:
+    """Extract route segments only where a route is near a directly matched anchor."""
+    if not anchors:
+        return ()
+    try:
+        lines = source.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        return ()
+    anchor_lines = [
+        line_number
+        for line_number, line in enumerate(lines, start=1)
+        if _matching_relationship_terms(line.encode("utf-8"), anchors)
+    ]
+    route_terms = []
+    for line_number, line in enumerate(lines, start=1):
+        if not any(abs(line_number - anchor_line) <= line_distance for anchor_line in anchor_lines):
+            continue
+        for match in _ROUTE_LITERAL.finditer(line):
+            value = match.group("value")
+            if not value.startswith("/") or value.startswith("//"):
+                continue
+            route = value.split("${", 1)[0]
+            route_terms.extend(_IDENTIFIER_TOKEN.findall(route))
+    return tuple(dict.fromkeys(route_terms))
+
+
+def _candidate_relationship_terms(source: bytes) -> tuple[str, ...]:
+    """Extract bounded route and cross-file symbol anchors from a discovered source."""
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError:
+        return ()
+
+    route_terms = _candidate_route_terms(source)
+
+    symbol_terms = []
+    for name in _IDENTIFIER_TOKEN.findall(text):
+        if name.lower() in _ACTION_ARGUMENT_TERMS:
+            symbol_terms.append(name)
+            continue
+        mixed_case = any(char.isupper() for char in name[1:]) and any(
+            char.islower() for char in name
+        )
+        snake_case = "_" in name and len(name) >= 7
+        if name in _IGNORED_IDENTIFIERS or not (mixed_case or snake_case):
+            continue
+        symbol_terms.append(name)
+    return tuple(dict.fromkeys((*route_terms, *symbol_terms)))
+
+
+def _matching_relationship_terms(source: bytes, terms: Sequence[str]) -> set[str]:
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError:
+        return set()
+    return {
+        term
+        for term in terms
+        if re.search(
+            rf"(?<![A-Za-z0-9_$]){re.escape(term)}(?![A-Za-z0-9_$])",
+            text,
+        )
+    }
+
+
+def _dispatched_action_anchors(source: bytes, terms: Sequence[str]) -> tuple[str, ...]:
+    actions = tuple(term for term in terms if term.lower() in _ACTION_ARGUMENT_TERMS)
+    if not actions:
+        return ()
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError:
+        return ()
+    dispatched = set()
+    for match in _DISPATCH_CALL.finditer(text):
+        arguments = match.group("arguments")
+        dispatched.update(
+            action
+            for action in actions
+            if re.search(rf"\.\s*{re.escape(action)}\s*\(", arguments)
+        )
+    return tuple(action for action in actions if action in dispatched)
+
+
+def _relationship_expandable_source(path: str) -> bool:
+    return (
+        PurePosixPath(path).suffix.lower() in _RELATIONSHIP_SOURCE_SUFFIXES
+        and not _TEST_PATH.search(path)
+    )
 
 
 def _source_bytes(entry: EvidenceRecord, repository: Path) -> bytes:
@@ -778,6 +972,17 @@ def validate_impact_coverage_context(
         != context.neighbor_discovery_candidate_set_sha256
     ):
         raise ValueError("impact coverage candidates do not exactly match discovery")
+    bound_candidate_omissions = context.neighbor_discovery_candidate_results_omitted_by_limit
+    if bound_candidate_omissions is not None:
+        ledger_candidate_omissions = sum(
+            omission.count
+            for omission in ledger.omissions
+            if omission.kind == "candidate_result_limit"
+        )
+        if ledger_candidate_omissions != bound_candidate_omissions:
+            raise ValueError(
+                "impact coverage omissions do not match the bound candidate result limit"
+            )
     impact_refs = {
         ref
         for candidate in ledger.candidates
@@ -837,10 +1042,29 @@ def review_completion_gaps(
         status = impact_coverage_status(report.impact_coverage)
         if status != "closed":
             gaps.append(f"impact coverage status is {status}")
+    omitted_candidates = context.neighbor_discovery_candidate_results_omitted_by_limit
+    if omitted_candidates:
+        label = "candidate" if omitted_candidates == 1 else "candidates"
+        gaps.append(
+            f"neighbor discovery result limit omitted {omitted_candidates} eligible {label}; "
+            "rerun discovery with a higher limit before claiming complete impact coverage"
+        )
+    if context.diff_hunk_inventory_status == "partial":
+        if context.diff_hunk_inventory_count_at_least is None:
+            gaps.append(
+                "diff hunk inventory is partial because parsing failed; no indexed hunks are available"
+            )
+        else:
+            gaps.append(
+                "diff hunk inventory is partial: at least "
+                f"{context.diff_hunk_inventory_count_at_least} hunks exist, but only "
+                f"{len(context.diff_hunks)} are indexed"
+            )
     coverage = report.coverage_ledger
     if not (allow_legacy_missing_hunk_ledger and coverage is None):
         if context.diff_hunk_inventory_sha256 is None:
-            gaps.append("complete diff hunk inventory is not bound to the review")
+            if context.diff_hunk_inventory_status != "partial":
+                gaps.append("complete diff hunk inventory is not bound to the review")
         elif (
             coverage is None
             or coverage.diff_hunk_inventory_sha256 != context.diff_hunk_inventory_sha256
@@ -1057,7 +1281,7 @@ def _tracked_typescript_module_paths(
     path: str, module: str, tracked_paths: set[str]
 ) -> set[str]:
     if module.startswith("."):
-        target = _normalized_relative_module_path(path, module)
+        targets = [_normalized_relative_module_path(path, module)]
     elif module.startswith(("@/", "~/")):
         target = module[2:]
         if not any(
@@ -1065,25 +1289,42 @@ def _tracked_typescript_module_paths(
             for suffix in (".ts", ".tsx", ".js", ".jsx", *_TS_DECLARATION_SUFFIXES)
         ):
             target = f"src/{target}"
+        targets = [target]
+    elif module.startswith("~") and "/" in module[1:]:
+        # Common tsconfig paths map `~name/*` to `src/name/*`; accept only tracked files.
+        alias_target = module[1:]
+        targets = [
+            f"src/{alias_target}",
+            f"web/src/{alias_target}",
+            alias_target,
+        ]
     elif module.startswith("src/"):
-        target = module
+        targets = [module]
     else:
         return set()
 
-    variants = [target]
     suffixes = (
         ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts",
         *_TS_DECLARATION_SUFFIXES, ".json",
     )
-    if PurePosixPath(target).suffix.lower() in suffixes:
-        suffix = PurePosixPath(target).suffix
-        if suffix in {".js", ".jsx", ".mjs", ".cjs"}:
-            stem = target[: -len(suffix)]
-            variants.extend(f"{stem}{replacement}" for replacement in (".ts", ".tsx", ".mts", ".cts"))
-    else:
-        variants.extend(f"{target}{suffix}" for suffix in suffixes)
-    variants.extend(f"{target}/index{suffix}" for suffix in suffixes if suffix != ".json")
-    return {candidate for candidate in variants if candidate in tracked_paths}
+    resolved = set()
+    for target in targets:
+        variants = [target]
+        if PurePosixPath(target).suffix.lower() in suffixes:
+            suffix = PurePosixPath(target).suffix
+            if suffix in {".js", ".jsx", ".mjs", ".cjs"}:
+                stem = target[: -len(suffix)]
+                variants.extend(
+                    f"{stem}{replacement}"
+                    for replacement in (".ts", ".tsx", ".mts", ".cts")
+                )
+        else:
+            variants.extend(f"{target}{suffix}" for suffix in suffixes)
+        variants.extend(
+            f"{target}/index{suffix}" for suffix in suffixes if suffix != ".json"
+        )
+        resolved.update(candidate for candidate in variants if candidate in tracked_paths)
+    return resolved
 
 
 def _tracked_ruby_module_paths(
@@ -1380,11 +1621,60 @@ def bind_neighbor_discovery(
         or payload.get("candidate_set_sha256") != candidate_digest
     ):
         raise ValueError("neighbor discovery candidate set digest is invalid")
+    candidate_result_fields = (
+        "candidate_limit",
+        "candidate_results_considered",
+        "candidate_results_omitted_by_limit",
+    )
+    bound_candidate_results_omitted = None
+    if any(field in payload for field in candidate_result_fields):
+        if not all(field in payload for field in candidate_result_fields):
+            raise ValueError("neighbor discovery candidate result limits are incomplete")
+        candidate_limit = payload["candidate_limit"]
+        results_considered = payload["candidate_results_considered"]
+        results_omitted = payload["candidate_results_omitted_by_limit"]
+        if (
+            type(candidate_limit) is not int
+            or candidate_limit < 0
+            or type(results_considered) is not int
+            or results_considered < 0
+            or type(results_omitted) is not int
+            or results_omitted < 0
+            or len(candidate_manifest) != min(results_considered, candidate_limit)
+            or results_omitted != max(0, results_considered - candidate_limit)
+        ):
+            raise ValueError("neighbor discovery candidate result limits are inconsistent")
+        raw_omissions = payload.get("omissions")
+        if not isinstance(raw_omissions, list):
+            raise TypeError("neighbor discovery omissions must be a list")
+        result_limit_omissions = [
+            omission
+            for omission in raw_omissions
+            if isinstance(omission, Mapping)
+            and omission.get("kind") == "candidate_result_limit"
+        ]
+        if results_omitted:
+            if (
+                len(result_limit_omissions) != 1
+                or type(result_limit_omissions[0].get("count")) is not int
+                or result_limit_omissions[0].get("count") != results_omitted
+                or type(result_limit_omissions[0].get("limit")) is not int
+                or result_limit_omissions[0].get("limit") != candidate_limit
+            ):
+                raise ValueError(
+                    "neighbor discovery candidate result omission does not match its limit"
+                )
+        elif result_limit_omissions:
+            raise ValueError(
+                "neighbor discovery candidate result omission is unexpected"
+            )
+        bound_candidate_results_omitted = results_omitted
     inventory = payload.get("diff_hunk_inventory")
     if not isinstance(inventory, Mapping):
         raise TypeError("neighbor discovery diff hunk inventory must be an object")
     bound_hunks: tuple[ReviewDiffHunk, ...] = ()
     bound_hunk_digest = None
+    bound_hunk_count_at_least = None
     if inventory.get("status") == "complete":
         raw_hunks = inventory.get("hunks")
         if not isinstance(raw_hunks, list) or type(inventory.get("count")) is not int:
@@ -1401,9 +1691,45 @@ def bind_neighbor_discovery(
         )
         if inventory.get("inventory_sha256") != bound_hunk_digest:
             raise ValueError("diff hunk inventory digest is invalid")
+        bound_hunk_count_at_least = len(bound_hunks)
     elif inventory.get("status") == "partial":
-        if inventory.get("hunks") != [] or inventory.get("inventory_sha256") is not None:
-            raise ValueError("partial diff hunk inventory must not claim complete hunks")
+        raw_hunks = inventory.get("hunks")
+        raw_count_at_least = inventory.get("count_at_least")
+        reason = inventory.get("reason")
+        if not isinstance(raw_hunks, list) or reason not in {
+            "diff_hunk_limit_reached",
+            "diff_hunk_parse_failed",
+        }:
+            raise ValueError("partial diff hunk inventory is malformed")
+        if raw_count_at_least is not None and (
+            type(raw_count_at_least) is not int or raw_count_at_least < 1
+        ):
+            raise ValueError("partial diff hunk count is invalid")
+        if raw_hunks:
+            if (
+                reason != "diff_hunk_limit_reached"
+                or inventory.get("max_hunks") != _DISCOVERY_MAX_DIFF_HUNKS
+                or len(raw_hunks) != _DISCOVERY_MAX_DIFF_HUNKS
+                or type(raw_count_at_least) is not int
+                or raw_count_at_least <= len(raw_hunks)
+            ):
+                raise ValueError("partial diff hunk prefix has inconsistent limits")
+            bound_hunks = tuple(ReviewDiffHunk.model_validate(item) for item in raw_hunks)
+            bound_hunk_digest = review_diff_hunk_inventory_sha256(
+                context.diff_sha256, bound_hunks
+            )
+            if inventory.get("inventory_sha256") != bound_hunk_digest:
+                raise ValueError("partial diff hunk prefix digest is invalid")
+        elif inventory.get("inventory_sha256") is not None:
+            raise ValueError("empty partial diff hunk inventory cannot have an index digest")
+        if reason == "diff_hunk_parse_failed" and raw_count_at_least is not None:
+            raise ValueError("unparsed diff hunk inventory cannot claim a count")
+        if reason == "diff_hunk_limit_reached" and (
+            type(raw_count_at_least) is not int
+            or raw_count_at_least <= _DISCOVERY_MAX_DIFF_HUNKS
+        ):
+            raise ValueError("limited diff hunk inventory count is inconsistent")
+        bound_hunk_count_at_least = raw_count_at_least
     else:
         raise ValueError("neighbor discovery diff hunk inventory status is invalid")
     return ReviewContext.model_validate(
@@ -1412,8 +1738,13 @@ def bind_neighbor_discovery(
             "neighbor_discovery_sha256": payload["discovery_sha256"],
             "neighbor_discovery_candidate_count": len(candidate_manifest),
             "neighbor_discovery_candidate_set_sha256": candidate_digest,
+            "neighbor_discovery_candidate_results_omitted_by_limit": (
+                bound_candidate_results_omitted
+            ),
             "diff_hunks": [hunk.model_dump(mode="json") for hunk in bound_hunks],
             "diff_hunk_inventory_sha256": bound_hunk_digest,
+            "diff_hunk_inventory_status": inventory["status"],
+            "diff_hunk_inventory_count_at_least": bound_hunk_count_at_least,
         }
     )
 
@@ -1438,9 +1769,25 @@ def _neighbor_categories(path: str) -> tuple[str, ...]:
         tags.append("authorization")
     if _DEPLOYMENT_PATH.search(path):
         tags.append("deployment")
-    if _SERVICE_BOUNDARY_PATH.search(path):
+    if _SERVICE_BOUNDARY_PATH.search(path) or _COMMAND_ENTRYPOINT_PATH.search(path):
         tags.append("service_boundary")
     return tuple(tags or ("caller",))
+
+
+def _related_container_config_paths(
+    changed_paths: set[str], tracked_paths: set[str]
+) -> set[str]:
+    """Pair changed container build files with tracked Compose runtime configuration."""
+    changed_dockerfile = any(_DOCKERFILE_PATH.search(path) for path in changed_paths)
+    changed_compose = any(_COMPOSE_CONFIG_PATH.search(path) for path in changed_paths)
+    if not changed_dockerfile and not changed_compose:
+        return set()
+    return {
+        path
+        for path in tracked_paths - changed_paths
+        if (changed_dockerfile and _COMPOSE_CONFIG_PATH.search(path))
+        or (changed_compose and _DOCKERFILE_PATH.search(path))
+    }
 
 
 def _path_tokens(path: str) -> set[str]:
@@ -1709,6 +2056,7 @@ def discover_neighbor_evidence(
     defined_symbols_by_path: dict[str, set[str]] = {}
     referenced_symbols: set[str] = set()
     referenced_module_paths: set[str] = set()
+    changed_sources: dict[str, bytes] = {}
     total_bytes = 0
     scanned_sources = 0
     skipped_by_limits = 0
@@ -1724,6 +2072,7 @@ def discover_neighbor_evidence(
             changed_source_paths_skipped_by_size.append(path)
             continue
         source = _git(repository, "show", f"{context.head_sha}:{path}")
+        changed_sources[path] = source
         total_bytes += len(source)
         scanned_sources += 1
         if collect_changed_symbols:
@@ -1758,7 +2107,19 @@ def discover_neighbor_evidence(
             name = PurePosixPath(path).parent.name
         if _IDENTIFIER.fullmatch(name) and name.lower() not in _IGNORED_IDENTIFIERS:
             module_names.append(name)
-    all_module_search_terms = tuple(dict.fromkeys((*module_names, *ordered_symbols)))
+    changed_diff_terms = _added_diff_relationship_terms(
+        pinned_diff, set(ordered_referenced_symbols)
+    )
+    all_module_search_terms = tuple(
+        dict.fromkeys(
+            (
+                *changed_diff_terms,
+                *module_names,
+                *ordered_referenced_symbols,
+                *ordered_defined_symbols,
+            )
+        )
+    )
     module_search_terms = all_module_search_terms[:_DISCOVERY_MAX_MODULE_SEARCH_TERMS]
     codegraph = _codegraph_relationship_suggestions(
         repository,
@@ -1783,6 +2144,7 @@ def discover_neighbor_evidence(
     )
     changed_directories = {PurePosixPath(path).parent for path in changed}
     dependency_manifest_paths = _test_dependency_manifests(changed, tracked_set)
+    related_container_config_paths = _related_container_config_paths(changed, tracked_set)
 
     test_paths = set()
     ranked_symbol_paths = []
@@ -1790,22 +2152,33 @@ def discover_neighbor_evidence(
         path_tokens = _path_tokens(path)
         if _TEST_PATH.search(path) and (path_tokens & changed_path_tokens):
             test_paths.add(path)
-        if path in changed or (not ordered_symbols and path not in referenced_module_paths):
+        if path in changed or (
+            not ordered_symbols
+            and path not in referenced_module_paths
+            and path not in related_container_config_paths
+        ):
             continue
         changed_matches = path_tokens & changed_path_tokens
         symbol_matches = path_tokens & symbol_path_tokens
         same_directory = PurePosixPath(path).parent in changed_directories
-        if not (path in referenced_module_paths or changed_matches or symbol_matches or same_directory):
+        if not (
+            path in referenced_module_paths
+            or path in related_container_config_paths
+            or changed_matches
+            or symbol_matches
+            or same_directory
+        ):
             continue
         categories = _neighbor_categories(path)
         priority = (
             0 if path in referenced_module_paths else
-            1 if path in codegraph_by_path or path in codegraph_callees_by_path else
-            2 if "test" in categories and changed_matches else
-            3 if set(categories) & _SYSTEM_BOUNDARY_CATEGORIES
+            1 if path in related_container_config_paths else
+            2 if path in codegraph_by_path or path in codegraph_callees_by_path else
+            3 if "test" in categories and changed_matches else
+            4 if set(categories) & _SYSTEM_BOUNDARY_CATEGORIES
             and (changed_matches or symbol_matches) else
-            4 if symbol_matches else
-            5 if same_directory else 6
+            5 if symbol_matches else
+            6 if same_directory else 7
         )
         ranked_symbol_paths.append(
             (priority, -len(symbol_matches), -len(changed_matches), path)
@@ -1881,47 +2254,274 @@ def discover_neighbor_evidence(
         except UnicodeDecodeError as exc:
             raise ValueError("module-name search paths must be valid UTF-8") from exc
 
+    direct_anchor_search_paths: set[str] = set()
+    direct_anchor_search_bytes = 0
+    if changed_diff_terms:
+        command = ["git", "-C", str(repository), "grep", "-I", "-F", "-w", "-l", "-z", "-i"]
+        for term in changed_diff_terms:
+            command.extend(("-e", term))
+        command.extend((context.head_sha, "--"))
+        result = subprocess.run(command, capture_output=True, check=False)
+        if result.returncode not in {0, 1}:
+            raise ValueError("pinned changed-anchor search failed")
+        direct_anchor_search_bytes = len(result.stdout)
+        if direct_anchor_search_bytes > _DISCOVERY_MAX_MODULE_SEARCH_BYTES:
+            raise ValueError("changed-anchor search result exceeds the output limit")
+        try:
+            direct_anchor_search_paths.update(
+                part.decode("utf-8").split(":", 1)[-1]
+                for part in result.stdout.split(b"\0")
+                if part
+            )
+        except UnicodeDecodeError as exc:
+            raise ValueError("changed-anchor paths must be valid UTF-8") from exc
+
+    seed_candidate_paths = (
+        grep_paths
+        | module_name_search_paths
+        | direct_anchor_search_paths
+        | referenced_module_paths
+        | test_paths
+        | dependency_manifest_paths
+        | related_container_config_paths
+        | set(codegraph_by_path)
+        | set(codegraph_callees_by_path)
+    ) - changed
+    relationship_depth_by_path = {path: 0 for path in seed_candidate_paths}
+    changed_file_relationship_terms_by_path: dict[str, set[str]] = {}
+    changed_file_route_terms_by_path: dict[str, set[str]] = {}
+    relationship_route_anchor_terms: set[str] = set()
+    for path in direct_anchor_search_paths & changed:
+        source = changed_sources.get(path)
+        if source is not None:
+            matched_terms = _matching_relationship_terms(source, changed_diff_terms)
+            if matched_terms:
+                changed_file_relationship_terms_by_path[path] = matched_terms
+                relationship_depth_by_path[path] = 0
+                local_route_terms = set(
+                    _candidate_route_terms_near_anchors(source, tuple(matched_terms))
+                )
+                if local_route_terms:
+                    changed_file_route_terms_by_path[path] = local_route_terms
+                    relationship_route_anchor_terms.update(local_route_terms)
+    relationship_expansion_paths: set[str] = set()
+    relationship_expansion_terms: list[str] = []
+    relationship_expansion_terms_searched: set[str] = set(module_search_terms)
+    relationship_expansion_sources_considered = 0
+    relationship_expansion_sources_read = 0
+    relationship_expansion_frontier_omitted = 0
+    relationship_expansion_frontier_omitted_examples = []
+    relationship_expansion_terms_omitted = 0
+    relationship_expansion_term_omitted_examples = []
+    relationship_expansion_source_paths_skipped_by_size = []
+    relationship_expansion_search_bytes = 0
+    candidate_source_cache: dict[str, bytes] = {}
+
+    def expansion_path_priority(path: str) -> tuple:
+        categories = _neighbor_categories(path)
+        path_overlap = len(_path_tokens(path) & changed_path_tokens)
+        return (
+            0 if path in changed_sources else
+            1 if path in direct_anchor_search_paths else
+            2 if path in referenced_module_paths else
+            3 if path in codegraph_by_path or path in codegraph_callees_by_path else
+            4 if set(categories) & _SYSTEM_BOUNDARY_CATEGORIES else
+            5 if path_overlap else
+            6 if path in module_name_search_paths else
+            7 if path in test_paths else 8,
+            -path_overlap,
+            path,
+        )
+
+    expansion_seed_paths = (
+        direct_anchor_search_paths
+        | referenced_module_paths
+        | set(codegraph_by_path)
+        | set(codegraph_callees_by_path)
+    )
+    expansion_seed_paths = {
+        path for path in expansion_seed_paths if _relationship_expandable_source(path)
+    }
+    frontier = sorted(expansion_seed_paths, key=expansion_path_priority)
+    expanded_source_paths: set[str] = set(frontier)
+    expansion_path_limit = min(
+        _DISCOVERY_MAX_RELATIONSHIP_EXPANSION_PATHS,
+        max(1, max_candidates),
+    )
+    for expansion_depth in range(1, _DISCOVERY_MAX_RELATIONSHIP_EXPANSION_ROUNDS + 1):
+        relationship_expansion_sources_considered += len(frontier)
+        relationship_expansion_frontier_omitted += max(0, len(frontier) - expansion_path_limit)
+        relationship_expansion_frontier_omitted_examples.extend(
+            frontier[expansion_path_limit:]
+        )
+        expansion_sources = frontier[:expansion_path_limit]
+        source_terms_for_round = []
+        route_term_sources: dict[str, set[str]] = {}
+        for path in expansion_sources:
+            if path in changed_sources:
+                source = changed_sources[path]
+            elif path not in candidate_source_cache:
+                size = int(_git(repository, "cat-file", "-s", f"{context.head_sha}:{path}"))
+                if (
+                    size > _DISCOVERY_MAX_SOURCE_BYTES
+                    or total_bytes + symbol_search_bytes + size > _DISCOVERY_MAX_TOTAL_BYTES
+                ):
+                    skipped_by_limits += 1
+                    relationship_expansion_source_paths_skipped_by_size.append(path)
+                    continue
+                candidate_source_cache[path] = _git(
+                    repository, "show", f"{context.head_sha}:{path}"
+                )
+                total_bytes += len(candidate_source_cache[path])
+                scanned_sources += 1
+                source = candidate_source_cache[path]
+            else:
+                source = candidate_source_cache[path]
+            relationship_expansion_sources_read += 1
+            source_terms_for_round.append(
+                (path, _candidate_relationship_terms(source)[
+                    :_DISCOVERY_MAX_RELATIONSHIP_EXPANSION_TERMS
+                ])
+            )
+            for term in _candidate_route_terms(source):
+                route_term_sources.setdefault(term, set()).add(path)
+        shared_route_terms = sorted(
+            (
+                term
+                for term, paths in route_term_sources.items()
+                if len(term) >= 4 and len(paths) > 1
+            ),
+            key=lambda term: (
+                -len(route_term_sources[term]),
+                -sum(path in changed_sources for path in route_term_sources[term]),
+                term,
+            ),
+        )
+        round_robin_terms = []
+        for term_index in range(
+            max((len(terms) for _, terms in source_terms_for_round), default=0)
+        ):
+            for _, source_terms in source_terms_for_round:
+                if term_index < len(source_terms):
+                    round_robin_terms.append(source_terms[term_index])
+        deduplicated_terms = tuple(
+            dict.fromkeys((*shared_route_terms, *round_robin_terms))
+        )
+        new_terms = tuple(
+            term
+            for term in deduplicated_terms
+            if term not in relationship_expansion_terms_searched
+        )
+        terms = new_terms[:_DISCOVERY_MAX_RELATIONSHIP_EXPANSION_TERMS]
+        relationship_expansion_terms_omitted += max(0, len(new_terms) - len(terms))
+        relationship_expansion_term_omitted_examples.extend(
+            new_terms[_DISCOVERY_MAX_RELATIONSHIP_EXPANSION_TERMS:]
+        )
+        relationship_expansion_terms.extend(terms)
+        relationship_expansion_terms_searched.update(terms)
+        if not terms:
+            frontier = []
+            continue
+
+        command = ["git", "-C", str(repository), "grep", "-I", "-F", "-w", "-l", "-z", "-i"]
+        for term in terms:
+            command.extend(("-e", term))
+        command.extend((context.head_sha, "--"))
+        result = subprocess.run(command, capture_output=True, check=False)
+        if result.returncode not in {0, 1}:
+            raise ValueError("pinned relationship expansion search failed")
+        relationship_expansion_search_bytes += len(result.stdout)
+        if relationship_expansion_search_bytes > _DISCOVERY_MAX_MODULE_SEARCH_BYTES:
+            raise ValueError("relationship expansion result exceeds the output limit")
+        try:
+            found_paths = {
+                part.decode("utf-8").split(":", 1)[-1]
+                for part in result.stdout.split(b"\0")
+                if part
+            }
+        except UnicodeDecodeError as exc:
+            raise ValueError("relationship expansion paths must be valid UTF-8") from exc
+        frontier = []
+        for path in sorted(found_paths):
+            if not _relationship_expandable_source(path):
+                continue
+            if path in changed:
+                source = changed_sources.get(path)
+                if source is None:
+                    continue
+                matched_terms = _matching_relationship_terms(source, terms)
+                if matched_terms:
+                    changed_file_relationship_terms_by_path.setdefault(path, set()).update(
+                        matched_terms
+                    )
+                    matched_route_terms = matched_terms & relationship_route_anchor_terms
+                    if matched_route_terms:
+                        changed_file_route_terms_by_path.setdefault(path, set()).update(
+                            matched_route_terms
+                        )
+                if not matched_terms or path in expanded_source_paths:
+                    continue
+                relationship_depth_by_path[path] = min(
+                    expansion_depth, relationship_depth_by_path.get(path, expansion_depth)
+                )
+                expanded_source_paths.add(path)
+                frontier.append(path)
+                continue
+            if path in expanded_source_paths:
+                continue
+            relationship_depth_by_path[path] = min(
+                expansion_depth, relationship_depth_by_path.get(path, expansion_depth)
+            )
+            relationship_expansion_paths.add(path)
+            expanded_source_paths.add(path)
+            frontier.append(path)
+        frontier.sort(key=expansion_path_priority)
+
     candidates = []
     all_candidate_paths = sorted(
-        (
-            grep_paths
-            | module_name_search_paths
-            | referenced_module_paths
-            | test_paths
-            | dependency_manifest_paths
-            | set(codegraph_by_path)
-            | set(codegraph_callees_by_path)
-        )
-        - changed,
+        seed_candidate_paths | relationship_expansion_paths,
         key=lambda path: (
             0 if path in dependency_manifest_paths else
-            1 if path in referenced_module_paths else
-            2 if path in codegraph_by_path or path in codegraph_callees_by_path else
-            3 if path in module_name_search_paths else
-            4 if path in test_paths else
-            5 if path in grep_paths and "test" in _neighbor_categories(path) else
-            6 if path in grep_paths and set(_neighbor_categories(path)) & _SYSTEM_BOUNDARY_CATEGORIES else
-            7 if path in grep_paths else 8,
+            1 if path in related_container_config_paths else
+            2 if path in referenced_module_paths else
+            3 if path in codegraph_by_path or path in codegraph_callees_by_path else
+            4 if path in direct_anchor_search_paths else
+            5 if path in relationship_expansion_paths and set(_neighbor_categories(path)) & _SYSTEM_BOUNDARY_CATEGORIES else
+            6 if path in relationship_expansion_paths else
+            7 if path in module_name_search_paths else
+            8 if path in test_paths else
+            9 if path in grep_paths and set(_neighbor_categories(path)) & _SYSTEM_BOUNDARY_CATEGORIES else
+            10 if path in grep_paths and "test" in _neighbor_categories(path) else
+            11 if path in grep_paths else 12,
+            relationship_depth_by_path.get(path, 0),
+            -len(_path_tokens(path) & changed_path_tokens),
             path,
         ),
     )
     candidate_scan_limit = min(_DISCOVERY_MAX_CANDIDATE_SCAN_PATHS, max_candidates * 2)
     candidate_paths = all_candidate_paths[:candidate_scan_limit]
     candidate_paths_skipped_by_size = []
+    candidate_match_terms = tuple(
+        dict.fromkeys((*ordered_symbols, *changed_diff_terms, *relationship_expansion_terms))
+    )
+    relationship_anchor_terms = {*changed_diff_terms, *relationship_expansion_terms}
     for path in candidate_paths:
         if path not in tracked_set:
             continue
-        size = int(_git(repository, "cat-file", "-s", f"{context.head_sha}:{path}"))
-        if (
-            size > _DISCOVERY_MAX_SOURCE_BYTES
-            or total_bytes + symbol_search_bytes + size > _DISCOVERY_MAX_TOTAL_BYTES
-        ):
-            skipped_by_limits += 1
-            candidate_paths_skipped_by_size.append(path)
-            continue
-        source = _git(repository, "show", f"{context.head_sha}:{path}")
-        total_bytes += len(source)
-        scanned_sources += 1
+        if path in candidate_source_cache:
+            source = candidate_source_cache[path]
+        else:
+            size = int(_git(repository, "cat-file", "-s", f"{context.head_sha}:{path}"))
+            if (
+                size > _DISCOVERY_MAX_SOURCE_BYTES
+                or total_bytes + symbol_search_bytes + size > _DISCOVERY_MAX_TOTAL_BYTES
+            ):
+                skipped_by_limits += 1
+                candidate_paths_skipped_by_size.append(path)
+                continue
+            source = _git(repository, "show", f"{context.head_sha}:{path}")
+            total_bytes += len(source)
+            scanned_sources += 1
         try:
             text = source.decode("utf-8")
         except UnicodeDecodeError:
@@ -1933,8 +2533,8 @@ def discover_neighbor_evidence(
             test_audit_by_path[path] = test_audit
             test_audit_files_scanned += 1
         matches_by_symbol: dict[str, list[int]] = {}
-        if ordered_symbols:
-            alternatives = "|".join(re.escape(symbol) for symbol in ordered_symbols)
+        if candidate_match_terms:
+            alternatives = "|".join(re.escape(symbol) for symbol in candidate_match_terms)
             expression = re.compile(
                 rf"(?<![A-Za-z0-9_$])(?P<symbol>{alternatives})(?![A-Za-z0-9_$])"
             )
@@ -1947,6 +2547,10 @@ def discover_neighbor_evidence(
             {"symbol": symbol, "lines": lines[:8], "more_lines": len(lines) > 8}
             for symbol, lines in sorted(matches_by_symbol.items())
         ]
+        relationship_anchors = sorted(set(matches_by_symbol) & relationship_anchor_terms)
+        dispatched_action_anchors = _dispatched_action_anchors(
+            source, relationship_anchors
+        )
         categories = list(_neighbor_categories(path))
         codegraph_matches = codegraph_by_path.get(path, [])
         codegraph_callee_matches = codegraph_callees_by_path.get(path, [])
@@ -1972,6 +2576,10 @@ def discover_neighbor_evidence(
         reasons = []
         if matches:
             reasons.append("symbol_reference")
+        if relationship_anchors:
+            reasons.append("relationship_expansion_anchor")
+        if dispatched_action_anchors:
+            reasons.append("dispatched_action_reference")
         if codegraph_matches:
             reasons.append("codegraph_caller_edge")
         if codegraph_callee_matches:
@@ -1986,6 +2594,8 @@ def discover_neighbor_evidence(
             reasons.append("system_boundary_path_and_symbol_reference")
         if path in dependency_manifest_paths:
             reasons.append("test_dependency_manifest")
+        if path in related_container_config_paths:
+            reasons.append("related_deployment_config")
         if path in referenced_module_paths:
             reasons.append("local_module_import")
         if imported_changed_paths:
@@ -2003,6 +2613,10 @@ def discover_neighbor_evidence(
                 "path": path,
                 "categories": list(categories),
                 "matched_symbols": matches,
+                "relationship_depth": relationship_depth_by_path.get(path, 0),
+                "relationship_anchors": relationship_anchors,
+                "dispatched_action_anchors": list(dispatched_action_anchors),
+                "direct_relationship_anchor": path in direct_anchor_search_paths,
                 "codegraph_callers": codegraph_matches,
                 "codegraph_callees": codegraph_callee_matches,
                 "reasons": reasons,
@@ -2013,15 +2627,164 @@ def discover_neighbor_evidence(
             }
         )
 
-    candidates.sort(
-        key=lambda item: (
-            0 if "dependency" in item["categories"] else
-            1 if set(item["categories"]) & _SYSTEM_BOUNDARY_CATEGORIES else
-            2 if "declaration" in item["categories"] else
-            3 if "test" in item["categories"] else 4,
+    changed_file_context_ranges_added = 0
+    changed_file_context_ranges_omitted = 0
+    changed_file_context_range_omitted_examples = []
+    diff_context_ranges_by_path: dict[str, list[tuple[int, int]]] = {}
+    for hunk in diff_hunk_inventory.get("hunks", []):
+        path_index = hunk.get("changed_path_index")
+        if not isinstance(path_index, int) or path_index >= len(context.changed_files):
+            continue
+        path = context.changed_files[path_index]
+        start = max(1, int(hunk["new_start"]) - 8)
+        end = int(hunk["new_start"]) + max(1, int(hunk["new_count"])) - 1 + 8
+        diff_context_ranges_by_path.setdefault(path, []).append((start, end))
+
+    for path, terms in sorted(changed_file_relationship_terms_by_path.items()):
+        source = changed_sources.get(path)
+        if source is None or not terms:
+            continue
+        source_lines = _source_lines(source)
+        try:
+            decoded_lines = [line.decode("utf-8") for line in source_lines]
+        except UnicodeDecodeError:
+            continue
+        route_terms = changed_file_route_terms_by_path.get(path, set())
+        matching_lines: dict[int, set[str]] = {}
+        route_lines = set()
+        for line_number, line in enumerate(decoded_lines, start=1):
+            found = _matching_relationship_terms(line.encode("utf-8"), tuple(terms))
+            if not found:
+                continue
+            matching_lines[line_number] = found
+            if any(
+                re.search(rf"/{re.escape(term)}(?:/|[?#\"'`]|\b)", line, re.IGNORECASE)
+                for term in route_terms
+            ):
+                route_lines.add(line_number)
+        selected_lines = sorted(route_lines or set(matching_lines))
+        exclusion_ranges = diff_context_ranges_by_path.get(path, [])
+        selected_lines = [
+            line_number
+            for line_number in selected_lines
+            if not any(start <= line_number <= end for start, end in exclusion_ranges)
+        ]
+        if not selected_lines:
+            continue
+
+        proposed_ranges = []
+        for line_number in selected_lines:
+            is_route_line = line_number in route_lines
+            before, after = (16, 40) if is_route_line else (3, 3)
+            start = max(1, line_number - before)
+            end = min(len(source_lines), line_number + after)
+            if is_route_line and any(
+                start <= hunk_end and end >= hunk_start
+                for hunk_start, hunk_end in exclusion_ranges
+            ):
+                start = max(1, line_number - 3)
+                end = min(len(source_lines), line_number + 3)
+            proposed_ranges.append((start, end))
+        merged_ranges = []
+        for start, end in sorted(proposed_ranges):
+            if merged_ranges and start <= merged_ranges[-1][1] + 8:
+                merged_ranges[-1] = (merged_ranges[-1][0], max(merged_ranges[-1][1], end))
+            else:
+                merged_ranges.append((start, end))
+        range_limit = min(
+            _DISCOVERY_MAX_CHANGED_FILE_CONTEXT_RANGES_PER_PATH,
+            max(0, _DISCOVERY_MAX_CHANGED_FILE_CONTEXT_RANGES - changed_file_context_ranges_added),
+        )
+        changed_file_context_ranges_omitted += max(0, len(merged_ranges) - range_limit)
+        if len(merged_ranges) > range_limit:
+            changed_file_context_range_omitted_examples.extend(
+                [path] * (len(merged_ranges) - range_limit)
+            )
+        for start, end in merged_ranges[:range_limit]:
+            if any(
+                start <= hunk_end and end >= hunk_start
+                for hunk_start, hunk_end in exclusion_ranges
+            ):
+                continue
+            range_bytes = b"".join(source_lines[start - 1 : end])
+            range_terms = sorted(
+                {
+                    term
+                    for line_number in range(start, end + 1)
+                    for term in matching_lines.get(line_number, set())
+                }
+            )
+            range_match_lines: dict[str, list[int]] = {}
+            for line_number in range(start, end + 1):
+                for term in matching_lines.get(line_number, set()):
+                    line_numbers = range_match_lines.setdefault(term, [])
+                    if len(line_numbers) < 8:
+                        line_numbers.append(line_number)
+            candidates.append(
+                {
+                    "path": path,
+                    "categories": list(_neighbor_categories(path)),
+                    "matched_symbols": [
+                        {"symbol": term, "lines": range_match_lines[term], "more_lines": False}
+                        for term in range_terms
+                    ],
+                    "relationship_depth": relationship_depth_by_path.get(path, 0),
+                    "relationship_anchors": range_terms,
+                    "direct_relationship_anchor": path in direct_anchor_search_paths,
+                    "changed_file_context_range": True,
+                    "start_line": start,
+                    "end_line": end,
+                    "codegraph_callers": [],
+                    "codegraph_callees": [],
+                    "reasons": ["changed_file_relationship_range", "relationship_expansion_anchor"],
+                    "imported_changed_paths": [],
+                    "test_audit_candidates": [],
+                    "size_bytes": len(range_bytes),
+                    "sha256": hashlib.sha256(range_bytes).hexdigest(),
+                }
+            )
+            changed_file_context_ranges_added += 1
+
+    def candidate_priority(item: dict) -> tuple:
+        categories = set(item["categories"])
+        is_code_source = _relationship_expandable_source(item["path"])
+        is_local_import = item["path"] in referenced_module_paths
+        has_action_anchor = bool(set(item["relationship_anchors"]) & _ACTION_ARGUMENT_TERMS)
+        has_dispatched_action = bool(item.get("dispatched_action_anchors"))
+        priority = (
+            0 if "dependency" in categories else
+            1 if is_code_source and item.get("changed_file_context_range") else
+            2 if "related_deployment_config" in item["reasons"] else
+            3 if is_code_source and has_dispatched_action else
+            4 if is_code_source and is_local_import and item["direct_relationship_anchor"] else
+            5 if is_code_source and has_action_anchor else
+            6 if is_code_source and is_local_import else
+            7 if is_code_source and _COMMAND_ENTRYPOINT_PATH.search(item["path"]) else
+            8 if is_code_source and item["direct_relationship_anchor"] else
+            9 if is_code_source and categories & _SYSTEM_BOUNDARY_CATEGORIES else
+            10 if is_code_source and item["relationship_depth"] > 0 else
+            11 if is_code_source and "declaration" in categories else
+            12 if "test" in categories else
+            13 if is_code_source else
+            14 if is_local_import else
+            15 if item["direct_relationship_anchor"] else
+            16 if item["relationship_depth"] > 0 else
+            17 if "declaration" in categories else 18
+        )
+        return (
+            priority,
+            -len(item["relationship_anchors"]),
+            item["relationship_depth"],
+            -len(_path_tokens(item["path"]) & changed_path_tokens),
             item["path"],
         )
-    )
+
+    candidates.sort(key=candidate_priority)
+    candidate_results_considered = len(candidates)
+    candidate_results_omitted_by_limit = max(0, candidate_results_considered - max_candidates)
+    candidate_result_omission_examples = [
+        item["path"] for item in candidates[max_candidates:]
+    ]
     candidates = candidates[:max_candidates]
     used_refs = set(context.evidence_refs)
     test_audit_evidence_refs_by_path = {
@@ -2040,6 +2803,8 @@ def discover_neighbor_evidence(
             sha256=candidate["sha256"],
             revision=context.head_sha,
             path=candidate["path"],
+            start_line=candidate.get("start_line"),
+            end_line=candidate.get("end_line"),
             source_text_available=True,
         )
         used_refs.add(record.evidence_ref)
@@ -2073,8 +2838,13 @@ def discover_neighbor_evidence(
         "symbol_search_path_limit": "Only the highest-ranked path-related files are searched for symbol matches.",
         "symbol_search_source_size_limit": "A selected symbol-search source exceeded a byte cap.",
         "candidate_path_limit": "Only the highest-ranked candidate paths are opened and read.",
+        "candidate_result_limit": "Eligible evidence candidates exceeded the maximum records included in the discovery packet.",
         "candidate_source_size_limit": "A candidate source exceeded a per-file or total-source byte cap.",
         "module_search_term_limit": "Only the configured number of module-name and symbol terms are searched.",
+        "relationship_expansion_frontier_limit": "Only the highest-ranked candidate sources are expanded at each bounded depth.",
+        "relationship_expansion_term_limit": "Only the configured number of route and symbol anchors are searched per expansion round.",
+        "relationship_expansion_source_size_limit": "Candidate sources exceeded a per-file or total-source byte cap before relationship expansion.",
+        "changed_file_context_range_limit": "Only a bounded number of additional source ranges are attached from changed files.",
         "codegraph_symbol_query_limit": "Only the configured number of changed symbols receive CodeGraph queries.",
     }
 
@@ -2122,6 +2892,12 @@ def discover_neighbor_evidence(
         candidate_scan_limit,
     )
     add_omission(
+        "candidate_result_limit",
+        candidate_results_omitted_by_limit,
+        candidate_result_omission_examples,
+        max_candidates,
+    )
+    add_omission(
         "candidate_source_size_limit",
         len(candidate_paths_skipped_by_size),
         candidate_paths_skipped_by_size,
@@ -2132,6 +2908,30 @@ def discover_neighbor_evidence(
         len(all_module_search_terms) - len(module_search_terms),
         list(all_module_search_terms[len(module_search_terms) :]),
         _DISCOVERY_MAX_MODULE_SEARCH_TERMS,
+    )
+    add_omission(
+        "relationship_expansion_frontier_limit",
+        relationship_expansion_frontier_omitted,
+        relationship_expansion_frontier_omitted_examples,
+        expansion_path_limit,
+    )
+    add_omission(
+        "relationship_expansion_term_limit",
+        relationship_expansion_terms_omitted,
+        relationship_expansion_term_omitted_examples,
+        _DISCOVERY_MAX_RELATIONSHIP_EXPANSION_TERMS,
+    )
+    add_omission(
+        "relationship_expansion_source_size_limit",
+        len(relationship_expansion_source_paths_skipped_by_size),
+        relationship_expansion_source_paths_skipped_by_size,
+        _DISCOVERY_MAX_SOURCE_BYTES,
+    )
+    add_omission(
+        "changed_file_context_range_limit",
+        changed_file_context_ranges_omitted,
+        changed_file_context_range_omitted_examples,
+        _DISCOVERY_MAX_CHANGED_FILE_CONTEXT_RANGES,
     )
     add_omission(
         "codegraph_symbol_query_limit",
@@ -2161,9 +2961,25 @@ def discover_neighbor_evidence(
             "exhaustive": False,
         },
         {
+            "kind": "bounded_candidate_relationship_expansion",
+            "depth": _DISCOVERY_MAX_RELATIONSHIP_EXPANSION_ROUNDS,
+            "candidate_sources_read": relationship_expansion_sources_read,
+            "terms_searched": len(relationship_expansion_terms),
+            "paths_added": len(relationship_expansion_paths),
+            "exhaustive": False,
+        },
+        {
+            "kind": "matched_ranges_in_changed_files",
+            "range_count": changed_file_context_ranges_added,
+            "exhaustive": False,
+        },
+        {
             "kind": "system_boundary_path_candidates",
             "categories": sorted(_SYSTEM_BOUNDARY_CATEGORIES),
-            "method": "path classification plus bounded symbol/reference matches",
+            "method": (
+                "path classification, bounded symbol/reference matches, and paired "
+                "Dockerfile/Compose configuration candidates"
+            ),
             "semantic_links_verified": False,
         },
         {
@@ -2191,7 +3007,7 @@ def discover_neighbor_evidence(
                 "runtime-generated links are not resolved as static import edges."
             ),
         },
-        {"kind": "api_and_serialized_contract_registration", "reason": "Framework route registries and serialized contracts may not have direct imports or matching identifiers."},
+        {"kind": "api_and_serialized_contract_registration", "reason": "Bounded route and identifier expansion supplements direct imports, but framework route registries and serialized contracts are not resolved semantically."},
         {"kind": "database_model_schema_migration_query_relations", "reason": "Path labels and text matches do not establish ORM, migration, or query semantics."},
         {"kind": "event_names_subscribers_and_topics", "reason": "String-based event wiring and subscribers are not resolved as semantic edges."},
         {"kind": "configuration_flags_and_authorization_policies", "reason": "Path classification is heuristic and does not resolve runtime flag or policy evaluation."},
@@ -2220,6 +3036,9 @@ def discover_neighbor_evidence(
         "referenced_symbols": list(ordered_referenced_symbols),
         "referenced_module_paths": sorted(referenced_module_paths),
         "searched_symbols": list(ordered_symbols),
+        "changed_diff_anchor_terms": list(changed_diff_terms),
+        "changed_anchor_search_paths": len(direct_anchor_search_paths),
+        "changed_anchor_search_bytes": direct_anchor_search_bytes,
         "module_search_terms": list(module_search_terms),
         "module_search_terms_omitted": max(
             0, len(all_module_search_terms) - len(module_search_terms)
@@ -2228,12 +3047,30 @@ def discover_neighbor_evidence(
         "module_name_search_bytes": module_name_search_bytes,
         "module_name_search_bytes_limit": _DISCOVERY_MAX_MODULE_SEARCH_BYTES,
         "module_name_search_exhaustive": False,
+        "relationship_expansion": {
+            "max_depth": _DISCOVERY_MAX_RELATIONSHIP_EXPANSION_ROUNDS,
+            "max_candidate_sources_per_round": expansion_path_limit,
+            "candidate_sources_considered": relationship_expansion_sources_considered,
+            "candidate_sources_read": relationship_expansion_sources_read,
+            "candidate_sources_omitted_by_limit": relationship_expansion_frontier_omitted,
+            "candidate_sources_omitted_by_size": len(relationship_expansion_source_paths_skipped_by_size),
+            "max_terms_per_round": _DISCOVERY_MAX_RELATIONSHIP_EXPANSION_TERMS,
+            "terms_searched": relationship_expansion_terms,
+            "terms_omitted_by_limit": relationship_expansion_terms_omitted,
+            "paths_added": len(relationship_expansion_paths),
+            "changed_file_ranges_added": changed_file_context_ranges_added,
+            "search_bytes": relationship_expansion_search_bytes,
+            "search_bytes_limit": _DISCOVERY_MAX_MODULE_SEARCH_BYTES,
+            "exhaustive": False,
+        },
         "changed_source_symbol_collection_truncated": not collect_changed_symbols,
         "changed_sources_skipped_symbol_scan": changed_sources_skipped_symbol_scan,
         "changed_sources_skipped_symbol_scan_examples": changed_sources_skipped_symbol_scan_paths[:_DISCOVERY_MAX_OMISSION_EXAMPLES],
         "candidate_records": records,
         "candidate_manifest": candidate_manifest,
         "candidate_count": len(candidate_manifest),
+        "candidate_results_considered": candidate_results_considered,
+        "candidate_results_omitted_by_limit": candidate_results_omitted_by_limit,
         "candidate_set_sha256": candidate_set_sha256,
         "candidate_limit": max_candidates,
         "candidate_paths_considered": len(candidate_paths),

@@ -195,13 +195,15 @@ async def test_finish_review_exports_markdown_with_the_accepted_outcome(
 
 
 async def test_attempt_ledger_preserves_failed_usage_and_sums_known_retries(host_session):
+    from qa_orchestrator.codex_executor import RetryableProfileOutputError
+
     service, run_id = host_session(profile="python_reviewer")
 
     async def execute(job):
         job.observation.input_tokens = 10 * job.attempt
         job.observation.output_tokens = 2 * job.attempt
         if job.attempt == 1:
-            raise RetryableProfileError("secret")
+            raise RetryableProfileOutputError("secret")
         return report(job.profile, job.session.review_context)
 
     result = await HostReviewAdapter(

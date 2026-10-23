@@ -397,10 +397,17 @@ class ReviewContext(BaseModel):
         default=None, strict=True, ge=0, le=200
     )
     neighbor_discovery_candidate_set_sha256: Sha256Digest | None = None
+    neighbor_discovery_candidate_results_omitted_by_limit: int | None = Field(
+        default=None, strict=True, ge=0, le=1000
+    )
     diff_hunks: tuple[ReviewDiffHunk, ...] = Field(
         default=(), max_length=_MAX_REVIEW_DIFF_HUNKS
     )
     diff_hunk_inventory_sha256: Sha256Digest | None = None
+    diff_hunk_inventory_status: Literal["complete", "partial"] | None = None
+    diff_hunk_inventory_count_at_least: int | None = Field(
+        default=None, strict=True, ge=0, le=_MAX_REVIEW_DIFF_HUNKS + 1
+    )
 
     @field_validator("repository")
     @classmethod
@@ -460,10 +467,32 @@ class ReviewContext(BaseModel):
             and self.neighbor_discovery_sha256 is None
         ):
             raise ValueError("neighbor discovery candidates require a discovery digest")
-        if self.diff_hunk_inventory_sha256 is None:
-            if self.diff_hunks:
+        if (
+            self.neighbor_discovery_candidate_results_omitted_by_limit is not None
+            and self.neighbor_discovery_candidate_count is None
+        ):
+            raise ValueError("neighbor discovery candidate omissions require a bound candidate set")
+        if self.diff_hunk_inventory_status is None:
+            if self.diff_hunk_inventory_count_at_least is not None:
+                raise ValueError("diff hunk inventory count requires an inventory status")
+            if self.diff_hunk_inventory_sha256 is None and self.diff_hunks:
                 raise ValueError("diff hunk inventory digest is required when hunks are present")
-        else:
+        elif self.diff_hunk_inventory_status == "complete":
+            if (
+                self.diff_hunk_inventory_sha256 is None
+                or self.diff_hunk_inventory_count_at_least != len(self.diff_hunks)
+            ):
+                raise ValueError("complete diff hunk inventory count or digest is missing")
+        elif self.diff_hunk_inventory_count_at_least is not None and (
+            self.diff_hunk_inventory_count_at_least <= len(self.diff_hunks)
+        ):
+            raise ValueError("partial diff hunk inventory count must exceed indexed hunks")
+        elif self.diff_hunk_inventory_sha256 is None and self.diff_hunks:
+            raise ValueError("partial diff hunk inventory digest is required when hunks are present")
+        elif self.diff_hunk_inventory_sha256 is not None and not self.diff_hunks:
+            raise ValueError("partial diff hunk inventory must include indexed hunks")
+
+        if self.diff_hunk_inventory_sha256 is not None:
             for index, hunk in enumerate(self.diff_hunks):
                 if hunk.index != index:
                     raise ValueError("diff hunk indexes must be contiguous and ordered")
@@ -506,6 +535,12 @@ class ReviewContext(BaseModel):
             payload.pop("neighbor_discovery_candidate_count", None)
         if self.neighbor_discovery_candidate_set_sha256 is None:
             payload.pop("neighbor_discovery_candidate_set_sha256", None)
+        if self.neighbor_discovery_candidate_results_omitted_by_limit is None:
+            payload.pop("neighbor_discovery_candidate_results_omitted_by_limit", None)
+        if self.diff_hunk_inventory_status is None:
+            payload.pop("diff_hunk_inventory_status", None)
+        if self.diff_hunk_inventory_count_at_least is None:
+            payload.pop("diff_hunk_inventory_count_at_least", None)
         if self.diff_hunk_inventory_sha256 is None:
             payload.pop("diff_hunks", None)
             payload.pop("diff_hunk_inventory_sha256", None)

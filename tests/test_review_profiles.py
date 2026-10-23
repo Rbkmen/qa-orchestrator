@@ -108,6 +108,9 @@ def test_every_profile_and_canonical_guidance_require_scenario_led_review(tmp_pa
         "real invocation or update trigger",
         "distinguish source, test, and runtime evidence",
         "supported candidate, refuted with counterevidence, or unverified",
+        "complete relevant definitions and contract/test/config excerpts",
+        "follow-up queries scoped by changed symbol/path and relation direction",
+        'profile\'s "no candidate" conclusion close that source gap',
     ):
         assert rule in canonical_rules
 
@@ -122,6 +125,8 @@ def test_evidence_investigator_and_code_reviewer_have_distinct_outputs(tmp_path)
     assert "Finding Candidates" in review_route.required_sections
     assert "Evidence Map" not in review_route.required_sections
     assert "do not diagnose defects" in evidence_route.focus
+    assert "exactly one entry per evidence_ref" in evidence_route.focus
+    assert "combine multiple relationships" in evidence_route.focus
     assert "do not repeat the map" in review_route.focus
 
 
@@ -135,6 +140,19 @@ def test_code_reviewer_checks_api_client_completeness(tmp_path):
         "repeated reads of the same endpoint",
         "current resource identity or version",
         "early returns do not skip required side effects",
+    ):
+        assert check in focus
+
+
+def test_code_reviewer_checks_call_contracts_and_dispatch(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    focus = service.prepare_review_route(ReviewAgent.CODE_REVIEWER).focus.lower()
+
+    for check in (
+        "declared receiver and action types",
+        "invocation and dispatch conventions",
+        "loose mocks",
+        "real object",
     ):
         assert check in focus
 

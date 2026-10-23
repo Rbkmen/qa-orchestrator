@@ -191,6 +191,23 @@ def test_changed_source_can_be_omitted_by_profile_or_budget(pinned_evidence):
     assert "D1" in selected.included_refs
     assert "S1" in selected.budget_omitted_refs
 
+    shared = select_context(
+        packet,
+        ReviewAgent.OMISSION_AUDITOR,
+        max_bytes=2_000_000,
+        profile_override_refs=("S1",),
+    )
+    assert "S1" in shared.included_refs
+    assert "S1" not in shared.omitted_refs
+
+    shared_budget_limited = select_context(
+        packet,
+        ReviewAgent.OMISSION_AUDITOR,
+        max_bytes=budget,
+        profile_override_refs=("S1",),
+    )
+    assert "S1" in shared_budget_limited.budget_omitted_refs
+
 
 def test_mr_claim_evidence_cannot_be_made_optional(pinned_evidence):
     from qa_orchestrator.context_pack import (

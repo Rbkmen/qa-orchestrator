@@ -59,6 +59,8 @@ REVIEW_PROFILES: Mapping[ReviewAgent, ReviewProfileDefinition] = MappingProxyTyp
                 "Inspect the changed surface for concrete failure modes and contract breaks. "
                 "Use the Evidence Map as context; add caller or dependency detail only when "
                 "needed to check a material scenario or support a candidate, and do not repeat the map. "
+                "Validate calls against declared receiver and action types and established invocation "
+                "and dispatch conventions; loose mocks do not prove that the real object accepts the call. "
                 "Apply the shared scenario trace to every material requirement or claim. For example, "
                 "query-only navigation must update dependent metadata, just as a status-only change "
                 "must update dependent responses, caches or events. For API clients, verify pagination "
@@ -101,7 +103,9 @@ REVIEW_PROFILES: Mapping[ReviewAgent, ReviewProfileDefinition] = MappingProxyTyp
             focus=(
                 "Map the execution path, callers, dependencies, data flow, and architecture "
                 "boundaries. Return evidence references and unresolved links only; do not "
-                "diagnose defects or restate the full diff."
+                "diagnose defects or restate the full diff. In the Evidence Map, emit exactly "
+                "one entry per evidence_ref; combine multiple relationships for the same ref "
+                "in that entry."
             ),
             required_sections=("Scope", "Evidence Map", "Unverified"),
             escalation_signals=(

@@ -349,6 +349,59 @@ def test_report_never_calls_capped_discovery_closed(bound_review_context):
     assert "1 omission" in rendered
 
 
+def test_report_marks_unreturned_discovery_candidates_as_incomplete(
+    bound_review_context,
+):
+    context = _context_with_discovery(bound_review_context).model_copy(
+        update={"neighbor_discovery_candidate_results_omitted_by_limit": 17}
+    )
+    ledger = _impact_ledger_for_context(
+        context,
+        discovery_state="partial",
+        limits=[
+            {
+                "name": "candidate_result_limit",
+                "value": 50,
+                "reached": True,
+                "uninspected": True,
+            }
+        ],
+        omissions=[
+            {
+                "kind": "candidate_result_limit",
+                "count": 17,
+                "limit": 50,
+                "examples": ["src/omitted.py"],
+            }
+        ],
+    )
+    report = FinalReviewReport(
+        summary="Every returned impact candidate was reviewed.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        impact_coverage=ledger,
+    )
+
+    rendered = render_final_report(report, context=context)
+    gaps = evidence_module.review_completion_gaps(context, report)
+
+    assert "Neighbor discovery omitted 17 eligible candidates" in rendered
+    assert "blast-radius coverage is incomplete" in rendered
+    assert "Impact closure: partial" in rendered
+    assert any(
+        gap.startswith("neighbor discovery result limit omitted 17 eligible candidates")
+        for gap in gaps
+    )
+
+    mismatched_report = report.model_copy(
+        update={"impact_coverage": _impact_ledger_for_context(context)}
+    )
+    with pytest.raises(
+        ValueError,
+        match="impact coverage omissions do not match the bound candidate result limit",
+    ):
+        validate_final_report_context(mismatched_report, context)
+
+
 def test_impact_rationale_is_markdown_escaped(bound_review_context):
     context = _context_with_discovery(bound_review_context)
     ledger = _impact_ledger_for_context(
@@ -863,6 +916,69 @@ def test_report_accounts_for_bound_diff_hunk_attestations(
     else:
         assert f"Unreviewed diff hunk indexes: {expected_unreviewed}" in rendered
         assert f"unreviewed diff hunk indexes: {expected_unreviewed}" in gaps
+
+
+def test_partial_diff_hunk_inventory_blocks_completion_after_indexed_hunks_are_reviewed(
+    bound_review_context,
+):
+    hunk = ReviewDiffHunk(
+        index=0,
+        changed_path_index=0,
+        old_start=10,
+        old_count=1,
+        new_start=10,
+        new_count=1,
+        header="@@ -10 +10 @@",
+        sha256="a" * 64,
+    )
+    hunks = (hunk,)
+    inventory_digest = review_diff_hunk_inventory_sha256(
+        bound_review_context.diff_sha256, hunks
+    )
+    context = ReviewContext.model_validate(
+        {
+            **bound_review_context.model_dump(mode="python"),
+            "diff_hunks": hunks,
+            "diff_hunk_inventory_sha256": inventory_digest,
+            "diff_hunk_inventory_status": "partial",
+            "diff_hunk_inventory_count_at_least": 501,
+        }
+    )
+    report = FinalReviewReport(
+        summary="Every available indexed hunk was reviewed.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        coverage_ledger=ReviewCoverageLedger(
+            changed_paths_sha256=review_changed_paths_sha256(context.changed_files),
+            changed_path_count=len(context.changed_files),
+            profiles=(
+                ProfileChangedPathCoverage(
+                    profile=ReviewAgent.CODE_REVIEWER,
+                    context_selection_recorded=True,
+                    reviewed_diff_hunk_indexes=(0,),
+                ),
+            ),
+            diff_hunk_inventory_sha256=inventory_digest,
+            diff_hunk_count=1,
+            unreviewed_diff_hunk_indexes=(),
+        ),
+    )
+
+    rendered = render_final_report(report, context=context)
+    without_ledger = render_final_report(
+        FinalReviewReport(
+            summary="Report without a coverage ledger.",
+            profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        ),
+        context=context,
+    )
+    gaps = evidence_module.review_completion_gaps(context, report)
+
+    assert "Diff hunk inventory: partial; at least 501 total, 1 indexed." in rendered
+    assert "Diff hunk inventory: partial; at least 501 total, 1 indexed." in without_ledger
+    assert (
+        "diff hunk inventory is partial: at least 501 hunks exist, but only 1 are indexed"
+    ) in gaps
+    assert not any(gap.startswith("unreviewed diff hunk indexes:") for gap in gaps)
 
 
 def test_strict_completion_requires_a_bound_diff_hunk_inventory(bound_review_context):

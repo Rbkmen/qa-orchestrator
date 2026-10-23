@@ -9,12 +9,14 @@ from pydantic import ValidationError
 import qa_orchestrator.evidence as evidence_module
 from qa_orchestrator.contracts import (
     EvidenceRecord,
+    FinalReviewReport,
     ProfileAttemptMetrics,
     ProfileContextSelection,
     ProfileExecutionMetrics,
     ProfileReviewReport,
     ReviewAgent,
     ReviewContext,
+    ReviewDiffHunk,
     ReviewFindingCandidate,
     impact_candidate_set_sha256,
     review_diff_hunk_inventory_sha256,
@@ -22,6 +24,7 @@ from qa_orchestrator.contracts import (
 from qa_orchestrator.evidence import (
     _neighbor_categories,
     _path_tokens,
+    _tracked_typescript_module_paths,
     bind_neighbor_discovery,
     discover_neighbor_evidence,
     evidence_main,
@@ -32,6 +35,257 @@ from qa_orchestrator.evidence import (
     verify_evidence,
 )
 from qa_orchestrator.orchestration import DeepReviewSignals, OrchestrationError, QaOrchestrator
+
+
+def test_typescript_module_alias_resolves_to_tracked_source():
+    tracked = {
+        "src/core/logical_layers/utils/layersOrder/layersOrder.ts",
+    }
+
+    assert _tracked_typescript_module_paths(
+        "src/core/logical_layers/renderers/GenericRenderer.ts",
+        "~core/logical_layers/utils/layersOrder/layersOrder",
+        tracked,
+    ) == tracked
+
+
+def test_discovery_traces_ui_api_handler_and_startup_wiring(tmp_path, monkeypatch):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args])
+
+    git("init", "--quiet")
+    files = {
+        "web/src/components/AuditTrail.tsx": (
+            "import { getAuditEntry } from '../api/client';\n"
+            "import { useAuditLog } from '../hooks/useAuditLog';\n"
+            "export function AuditTrail(entry: { id: string }) {\n"
+            "  const log = useAuditLog();\n"
+            "  return getAuditEntry(entry.id) ?? log;\n"
+            "}\n"
+        ),
+        "web/src/api/client.ts": (
+            "export async function getAuditEntry(id: string) {\n"
+            "  return fetchAPI(`/audit/${encodeURIComponent(id)}`);\n"
+            "}\n"
+            + "\n".join(f"// client padding {index}" for index in range(14))
+            + "\n"
+        ),
+        "web/src/hooks/useAuditLog.ts": (
+            "export function useAuditLog() {\n"
+            "  return { total: 0 };\n"
+            "}\n"
+        ),
+        "internal/admin/a_audit_reader.go": (
+            "package admin\n"
+            "func unrelated() {\n"
+            "  respondError(nil, 0, \"unrelated\", nil)\n"
+            + "\n".join(f"  UnrelatedRead{index}()" for index in range(60))
+            + "\n}\n"
+        ),
+        "internal/admin/api.go": (
+            "func changedAuditList() {\n"
+            "  _ = 1\n"
+            "}\n"
+            + "\n".join(f"// padding {index}" for index in range(100))
+            + "\n"
+            + "const auditEntryRoute = \"/admin/audit/\"\n"
+            "func (a *API) handleAuditEntry(w http.ResponseWriter, r *http.Request) {\n"
+            "  if a.evalStore == nil { http.Error(w, \"unavailable\", 503); return }\n"
+            "  _, _ = a.evalStore.GetEntry(r.PathValue(\"id\"))\n"
+            "}\n"
+            "func (a *API) SetEvalRunner(store eval.Store) { a.evalStore = store }\n"
+        ),
+        "cmd/gateway/main.go": (
+            "func wire(cfg Config, api *admin.API) {\n"
+            "  if cfg.evalStore != nil && cfg.llmJudge != nil {\n"
+            "    api.SetEvalRunner(cfg.evalStore)\n"
+            "  }\n"
+            "}\n"
+        ),
+    }
+    files.update(
+        {
+            f"internal/config/audit_option_{index}.go": (
+                "package config\n"
+                f"func auditOption{index}() {{\n"
+                '  respondError(nil, 0, "unrelated", nil)\n'
+                "}\n"
+            )
+            for index in range(30)
+        }
+    )
+    for path, content in files.items():
+        target = repository / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").decode().strip()
+
+    changed = repository / "web/src/components/AuditTrail.tsx"
+    changed.write_text(
+        files["web/src/components/AuditTrail.tsx"].replace(
+            "return getAuditEntry(entry.id) ?? log;",
+            "return getAuditEntry(entry.id) ?? log ?? null;",
+        ),
+        encoding="utf-8",
+    )
+    api_source = repository / "internal/admin/api.go"
+    api_source.write_text(
+        files["internal/admin/api.go"].replace(
+            "  _ = 1", '  respondError(nil, 0, "changed", nil)'
+        ),
+        encoding="utf-8",
+    )
+    client_source = repository / "web/src/api/client.ts"
+    client_source.write_text(
+        files["web/src/api/client.ts"].replace("// client padding 13", "// client padding 13 changed"),
+        encoding="utf-8",
+    )
+    git("add", "web/src/components/AuditTrail.tsx", "internal/admin/api.go", "web/src/api/client.ts")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "head")
+    head = git("rev-parse", "HEAD").decode().strip()
+    diff = git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head, "--")
+    context = ReviewContext(
+        repository="github.com/example/repo",
+        base_sha=base,
+        head_sha=head,
+        diff_sha256=hashlib.sha256(diff).hexdigest(),
+        evidence_packet_sha256=hashlib.sha256(b"packet").hexdigest(),
+        changed_files=(
+            "internal/admin/api.go",
+            "web/src/api/client.ts",
+            "web/src/components/AuditTrail.tsx",
+        ),
+        evidence_refs=("S1", "D1"),
+    )
+
+    monkeypatch.setattr(evidence_module, "_DISCOVERY_MAX_MODULE_SEARCH_TERMS", 1)
+    manifest = discover_neighbor_evidence(
+        context, repository, use_codegraph=False, max_candidates=25
+    )
+    assert len(manifest["candidate_records"]) == 25
+
+    by_path = {item["path"]: item for item in manifest["candidate_records"]}
+    assert "web/src/api/client.ts" in by_path
+    assert "web/src/hooks/useAuditLog.ts" in by_path
+    assert "internal/admin/api.go" in by_path
+    assert "cmd/gateway/main.go" in by_path
+    assert list(by_path).index("web/src/hooks/useAuditLog.ts") < list(by_path).index(
+        "internal/admin/a_audit_reader.go"
+    )
+    api_ranges = [
+        item for item in manifest["candidate_records"]
+        if item["path"] == "internal/admin/api.go" and item.get("changed_file_context_range")
+    ]
+    assert api_ranges
+    assert any(
+        item["start_line"] > 50
+        and {"audit", "GetEntry", "handleAuditEntry"}
+        & {match["symbol"] for match in item["matched_symbols"]}
+        for item in api_ranges
+    )
+    client_ranges = [
+        item for item in manifest["candidate_records"]
+        if item["path"] == "web/src/api/client.ts" and item.get("changed_file_context_range")
+    ]
+    assert client_ranges
+    assert any(
+        match["symbol"] == "getAuditEntry"
+        for item in client_ranges
+        for match in item["matched_symbols"]
+    )
+    assert any(
+        match["symbol"] == "SetEvalRunner"
+        for match in by_path["cmd/gateway/main.go"]["matched_symbols"]
+    )
+
+
+def test_discovery_traces_string_action_calls_to_atom_implementation(tmp_path, monkeypatch):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args])
+
+    git("init", "--quiet")
+    files = {
+        "src/renderers/GenericRenderer.ts": (
+            "import { mapLibreParentsIds } from '~core/utils/mapLibreParentsIds';\n"
+            "import { layersOrderManager } from '~core/utils/layersOrder';\n"
+            "export function refresh(layer: (action: string) => void) {\n"
+            "  return layer;\n"
+            "}\n"
+        ),
+        "src/core/utils/mapLibreParentsIds.ts": (
+            "export const mapLibreParentsIds = { clear() {} };\n"
+        ),
+        "src/core/utils/layersOrder.ts": (
+            "export const layersOrderManager = { init() {} };\n"
+        ),
+        "src/utils/applyNewLayerSource.ts": (
+            "export function applyNewLayerSource(layerAtom: LayerAtom) {\n"
+            "  store.dispatch([layerAtom.disable()]);\n"
+            "  store.dispatch([layerAtom.enable()]);\n"
+            "}\n"
+        ),
+        "docs/implementation-notes.md": (
+            "LayerAtom disable enable getState createAtom layersRegistry\n"
+            "Related implementation references are descriptive only.\n"
+        ),
+    }
+    for path, content in files.items():
+        target = repository / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").decode().strip()
+    changed = repository / "src/renderers/GenericRenderer.ts"
+    changed.write_text(
+        files["src/renderers/GenericRenderer.ts"].replace(
+            "  return layer;",
+            "  mapLibreParentsIds.clear();\n"
+            "  layersOrderManager.init();\n"
+            "  layer('disable');\n  layer('enable');\n  return layer;",
+        ),
+        encoding="utf-8",
+    )
+    git("add", "src/renderers/GenericRenderer.ts")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "head")
+    head = git("rev-parse", "HEAD").decode().strip()
+    diff = git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head, "--")
+    context = ReviewContext(
+        repository="github.com/example/repo",
+        base_sha=base,
+        head_sha=head,
+        diff_sha256=hashlib.sha256(diff).hexdigest(),
+        evidence_packet_sha256=hashlib.sha256(b"packet").hexdigest(),
+        changed_files=("src/renderers/GenericRenderer.ts",),
+        evidence_refs=("S1", "D1"),
+    )
+
+    monkeypatch.setattr(evidence_module, "_DISCOVERY_MAX_MODULE_SEARCH_TERMS", 2)
+    manifest = discover_neighbor_evidence(context, repository, use_codegraph=False)
+
+    by_path = {item["path"]: item for item in manifest["candidate_records"]}
+    assert "src/utils/applyNewLayerSource.ts" in by_path
+    assert by_path["src/core/utils/mapLibreParentsIds.ts"]["direct_relationship_anchor"]
+    assert by_path["src/core/utils/layersOrder.ts"]["direct_relationship_anchor"]
+    assert {match["symbol"] for match in by_path["src/utils/applyNewLayerSource.ts"]["matched_symbols"]} >= {
+        "disable",
+        "enable",
+    }
+    assert by_path["src/utils/applyNewLayerSource.ts"]["dispatched_action_anchors"] == [
+        "disable",
+        "enable",
+    ]
+    assert list(by_path).index("src/utils/applyNewLayerSource.ts") < list(by_path).index(
+        "docs/implementation-notes.md"
+    )
 
 
 @pytest.fixture
@@ -1049,8 +1303,34 @@ def test_diff_hunk_inventory_fails_closed_on_parse_error_and_limit():
     assert over_limit["status"] == "partial"
     assert over_limit["reason"] == "diff_hunk_limit_reached"
     assert over_limit["count_at_least"] == 501
-    assert over_limit["hunks"] == []
-    assert over_limit["inventory_sha256"] is None
+    assert len(over_limit["hunks"]) == 500
+    assert [hunk["index"] for hunk in over_limit["hunks"]] == list(range(500))
+    assert over_limit["inventory_sha256"] == review_diff_hunk_inventory_sha256(
+        over_limit_context.diff_sha256,
+        tuple(ReviewDiffHunk.model_validate(hunk) for hunk in over_limit["hunks"]),
+    )
+
+    discovery = {
+        "schema_version": 2,
+        "base_sha": over_limit_context.base_sha,
+        "head_sha": over_limit_context.head_sha,
+        "diff_sha256": over_limit_context.diff_sha256,
+        "changed_files": list(over_limit_context.changed_files),
+        "candidate_records": [],
+        "candidate_manifest": [],
+        "candidate_count": 0,
+        "candidate_set_sha256": impact_candidate_set_sha256(()),
+        "diff_hunk_inventory": over_limit,
+    }
+    discovery["discovery_sha256"] = evidence_module.neighbor_discovery_sha256(discovery)
+
+    bound = evidence_module.bind_neighbor_discovery(over_limit_context, discovery)
+    restored = ReviewContext.model_validate_json(bound.model_dump_json())
+
+    assert restored.diff_hunk_inventory_status == "partial"
+    assert restored.diff_hunk_inventory_count_at_least == 501
+    assert len(restored.diff_hunks) == 500
+    assert restored.diff_hunk_inventory_sha256 == over_limit["inventory_sha256"]
 
 
 def test_discovery_digest_is_stable_and_changes_when_omissions_change():
@@ -1092,10 +1372,179 @@ def test_path_tokens_ignore_file_extensions():
         ("workers/reconcile_orders.py", "job"),
         ("config/feature_flags.yml", "config"),
         ("authorization/policies/refunds.py", "authorization"),
+        ("cmd/gateway/main.go", "service_boundary"),
     ],
 )
 def test_neighbor_categories_cover_system_boundaries(path, category):
     assert category in _neighbor_categories(path)
+
+
+def test_non_entrypoint_cmd_file_is_not_promoted_to_service_boundary():
+    assert "service_boundary" not in _neighbor_categories(
+        "cmd/gateway/audit_neighbor.go"
+    )
+
+
+def test_discovery_pairs_changed_dockerfile_with_compose_runtime_config(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args])
+
+    git("init", "--quiet")
+    files = {
+        "src/API/Dockerfile": "FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS base\nUSER appuser\n",
+        "src/API/Services/DeviceMonitoringService.cs": (
+            "namespace API.Services;\n"
+            "public class DeviceMonitoringService { public void Check() { } }\n"
+        ),
+        "docker-compose.yaml": (
+            "services:\n"
+            "  api:\n"
+            "    image: ghcr.io/example/api:latest\n"
+        ),
+    }
+    for path, content in files.items():
+        target = repository / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").decode().strip()
+
+    (repository / "src/API/Dockerfile").write_text(
+        files["src/API/Dockerfile"].replace(
+            "USER appuser", "RUN apt-get install -y iputils-ping\nUSER appuser"
+        ),
+        encoding="utf-8",
+    )
+    (repository / "src/API/Services/DeviceMonitoringService.cs").write_text(
+        "using System.Net.NetworkInformation;\n"
+        "namespace API.Services;\n"
+        "public class DeviceMonitoringService { public void Check() { using var ping = new Ping(); } }\n",
+        encoding="utf-8",
+    )
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "head")
+    head = git("rev-parse", "HEAD").decode().strip()
+    diff = git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head, "--")
+    changed_files = tuple(
+        path.decode("utf-8")
+        for path in git("diff", "--name-only", "-z", base, head, "--").split(b"\0")
+        if path
+    )
+    context = ReviewContext(
+        repository="github.com/example/repo",
+        base_sha=base,
+        head_sha=head,
+        diff_sha256=hashlib.sha256(diff).hexdigest(),
+        evidence_packet_sha256=hashlib.sha256(b"packet").hexdigest(),
+        changed_files=changed_files,
+        evidence_refs=("D1",),
+    )
+
+    manifest = discover_neighbor_evidence(
+        context, repository, max_candidates=50, use_codegraph=False
+    )
+
+    by_path = {entry["path"]: entry for entry in manifest["candidate_records"]}
+    assert "docker-compose.yaml" in by_path
+    assert "deployment" in by_path["docker-compose.yaml"]["categories"]
+    assert "related_deployment_config" in by_path["docker-compose.yaml"]["reasons"]
+
+
+def test_discovery_reports_candidates_omitted_by_result_limit(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args])
+
+    git("init", "--quiet")
+    files = {
+        "src/service.py": "def calculate_total(value):\n    return value\n",
+        "src/caller_a.py": "from src.service import calculate_total\n\ndef first(value):\n    return calculate_total(value)\n",
+        "src/caller_b.py": "from src.service import calculate_total\n\ndef second(value):\n    return calculate_total(value)\n",
+    }
+    for path, content in files.items():
+        target = repository / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").decode().strip()
+
+    (repository / "src/service.py").write_text(
+        files["src/service.py"].replace("return value", "return value * 2"),
+        encoding="utf-8",
+    )
+    git("add", "src/service.py")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "head")
+    head = git("rev-parse", "HEAD").decode().strip()
+    diff = git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head, "--")
+    context = ReviewContext(
+        repository="github.com/example/repo",
+        base_sha=base,
+        head_sha=head,
+        diff_sha256=hashlib.sha256(diff).hexdigest(),
+        evidence_packet_sha256=hashlib.sha256(b"packet").hexdigest(),
+        changed_files=("src/service.py",),
+        evidence_refs=("D1",),
+    )
+
+    manifest = discover_neighbor_evidence(
+        context, repository, max_candidates=1, use_codegraph=False
+    )
+
+    assert manifest["candidate_count"] == 1
+    assert manifest["candidate_paths_omitted_by_limit"] == 0
+    assert manifest["candidate_results_considered"] == 2
+    assert manifest["candidate_results_omitted_by_limit"] == 1
+    omission = next(
+        item for item in manifest["omissions"] if item["kind"] == "candidate_result_limit"
+    )
+    assert omission["count"] == 1
+    assert omission["limit"] == 1
+    assert len(omission["examples"]) == 1
+
+    bound_context = bind_neighbor_discovery(context, manifest)
+    assert bound_context.neighbor_discovery_candidate_results_omitted_by_limit == 1
+    report = FinalReviewReport(
+        summary="Reviewed the available neighbor candidates.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+    )
+    gaps = evidence_module.review_completion_gaps(
+        bound_context, report, allow_legacy_missing_hunk_ledger=True
+    )
+    assert any(
+        gap.startswith("neighbor discovery result limit omitted 1 eligible candidate")
+        for gap in gaps
+    )
+    inconsistent = {
+        **manifest,
+        "candidate_results_omitted_by_limit": 0,
+    }
+    inconsistent["discovery_sha256"] = neighbor_discovery_sha256(inconsistent)
+    with pytest.raises(ValueError, match="candidate result limits are inconsistent"):
+        bind_neighbor_discovery(context, inconsistent)
+    inconsistent_omission = {
+        **manifest,
+        "omissions": [
+            {**item, "count": 2}
+            if item["kind"] == "candidate_result_limit"
+            else item
+            for item in manifest["omissions"]
+        ],
+    }
+    inconsistent_omission["discovery_sha256"] = neighbor_discovery_sha256(
+        inconsistent_omission
+    )
+    with pytest.raises(
+        ValueError,
+        match="candidate result omission does not match its limit",
+    ):
+        bind_neighbor_discovery(context, inconsistent_omission)
 
 
 def test_discovery_follows_test_imports_and_suggests_dependency_manifest(tmp_path):

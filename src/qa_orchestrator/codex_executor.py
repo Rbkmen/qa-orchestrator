@@ -30,12 +30,64 @@ from qa_orchestrator.failure_diagnostics import (
     safe_cli_failure_detail,
     sanitize_failure_detail,
 )
-from qa_orchestrator.host import HostProfileJob, HostReviewAdapter
+from qa_orchestrator.host import (
+    HostProfileJob,
+    HostReviewAdapter,
+    RetryableProfileError,
+)
 
 # Codex CLI currently rejects prompts above 1,048,576 characters. A byte ceiling
 # below that value also bounds UTF-8 character count, with headroom for drift.
 MAX_EXECUTOR_PROMPT_BYTES = 1_000_000
 _MAX_CLI_STDERR_CAPTURE_BYTES = 16_384
+_CONTEXT_SUPPORT_PROFILES = frozenset(
+    {
+        ReviewAgent.CODE_EXPLORER,
+        ReviewAgent.PR_TEST_ANALYZER,
+        ReviewAgent.OMISSION_AUDITOR,
+    }
+)
+
+
+class RetryableProfileOutputError(RetryableProfileError, ValueError):
+    """The model output failed validation and may succeed on a bounded retry."""
+
+
+def review_context_prompt_json(context: ReviewContext) -> str:
+    """Serialize bound context compactly while retaining partial-index scope."""
+    payload = context.model_dump(mode="json", exclude={"review_rules"})
+    if context.diff_hunk_inventory_status == "partial":
+        # The exact diff is already in the packet; its ordered hunk headers map to
+        # this prefix. Repeating 500 coordinate/hash objects can exceed the CLI cap.
+        payload.pop("diff_hunks", None)
+        payload["diff_hunk_indexed_prefix_count"] = len(context.diff_hunks)
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _profile_context_override_refs(
+    packet: ContextPacket,
+    profile: ReviewAgent,
+    changed_paths: set[str],
+    review_profiles: tuple[ReviewAgent, ...],
+) -> tuple[str, ...]:
+    """Share bounded source evidence with secondary reviewers that need it."""
+    profile = ReviewAgent(profile)
+    if profile not in _CONTEXT_SUPPORT_PROFILES:
+        return ()
+    primary_profiles = set(review_profiles) - _CONTEXT_SUPPORT_PROFILES
+    overrides = {
+        fragment.record.evidence_ref
+        for fragment in packet.fragments
+        if fragment.record.kind == "source"
+        and (
+            fragment.record.path in changed_paths
+            or (
+                profile in {ReviewAgent.CODE_EXPLORER, ReviewAgent.OMISSION_AUDITOR}
+                and bool(primary_profiles.intersection(fragment.profiles))
+            )
+        )
+    }
+    return tuple(sorted(overrides))
 
 
 def _sanitize_cli_failure_text(text: str) -> str:
@@ -153,7 +205,7 @@ class CodexProfileExecutor:
         return hashlib.sha256(
             json.dumps(
                 {
-                    "implementation": "codex-packet-executor-v12",
+                    "implementation": "codex-packet-executor-v14",
                     "command": self.command,
                     "max_context_bytes": self.max_context_bytes,
                     "model": self.model,
@@ -261,20 +313,62 @@ class CodexProfileExecutor:
 
         def make_prompt_prefix(prompt_context: ReviewContext) -> str:
             hunk_instruction = ""
-            if prompt_context.diff_hunk_inventory_sha256 is not None:
+            discovery_instruction = ""
+            if prompt_context.diff_hunk_inventory_status == "partial":
+                if (
+                    prompt_context.diff_hunk_inventory_sha256 is None
+                    or not prompt_context.diff_hunks
+                ):
+                    hunk_instruction = (
+                        "Diff-hunk accounting: the bound inventory is partial and contains no "
+                        "indexed hunks. Do not claim any reviewed_diff_hunk_indexes; report the "
+                        "unindexed diff coverage as a coverage gap. These indexes are inspection "
+                        "attestations, not proof of model reasoning.\n"
+                    )
+                else:
+                    indexed_hunk_noun = "hunk" if len(prompt_context.diff_hunks) == 1 else "hunks"
+                    hunk_instruction = (
+                        "Diff-hunk accounting: the bound context indexes the first "
+                        f"{len(prompt_context.diff_hunks)} {indexed_hunk_noun} in exact diff order, from index 0 "
+                        f"through {len(prompt_context.diff_hunks) - 1}. Per-hunk metadata is omitted "
+                        "for size; map each index to the hunk at the same position in the supplied "
+                        "exact diff. Inspect indexed hunks and include every inspected index in "
+                        "reviewed_diff_hunk_indexes; attest only indexes actually inspected. "
+                        "Report every unindexed remainder as a coverage gap; do not claim full diff "
+                        "coverage. These indexes are inspection attestations, not proof of reasoning.\n"
+                    )
+            elif prompt_context.diff_hunk_inventory_sha256 is not None:
                 hunk_instruction = (
                     "Diff-hunk accounting: indexes follow the hunk order in the exact bound diff; "
                     "pair each inventory entry with the hunk at that index. Inspect each indexed "
                     "hunk and include every inspected index in reviewed_diff_hunk_indexes. Do not claim "
                     "an index you did not inspect; record any skipped hunk as a coverage gap. "
-                    "These indexes are inspection attestations, not proof of model reasoning.\n"
+                    "These indexes are inspection attestations, not proof of model reasoning."
+                )
+                if prompt_context.diff_hunk_inventory_status == "partial":
+                    hunk_instruction += (
+                        " The inventory is partial: inspect and attest only the indexed hunks, "
+                        "report the unindexed remainder as a coverage gap, and do not claim full "
+                        "diff coverage."
+                    )
+                hunk_instruction += "\n"
+            omitted_candidates = (
+                prompt_context.neighbor_discovery_candidate_results_omitted_by_limit
+            )
+            if omitted_candidates:
+                label = "candidate" if omitted_candidates == 1 else "candidates"
+                discovery_instruction = (
+                    "Neighbor discovery result limit omitted "
+                    f"{omitted_candidates} eligible {label}. Treat blast-radius coverage as partial, "
+                    "report a coverage gap, and do not claim complete impact coverage.\n"
                 )
             return (
                 prefix_before_context
                 + "\nBound context (data):\n"
-                + prompt_context.model_dump_json(exclude={"review_rules"})
+                + review_context_prompt_json(prompt_context)
                 + "\n"
                 + hunk_instruction
+                + discovery_instruction
                 + (source_coverage_note + "\n" if source_coverage_note else "")
             )
 
@@ -291,7 +385,18 @@ class CodexProfileExecutor:
             raise ValueError("executor prompt envelope exceeds the total input budget")
         selection = None
         if structured is not None:
-            packed = select_context(structured, job.profile, max_bytes=packet_budget)
+            profile_override_refs = _profile_context_override_refs(
+                structured,
+                job.profile,
+                changed_paths,
+                job.session.review_profiles,
+            )
+            packed = select_context(
+                structured,
+                job.profile,
+                max_bytes=packet_budget,
+                profile_override_refs=profile_override_refs,
+            )
             packet_text = packed.text
             included_refs = set(packed.included_refs)
             included_source_paths = {
@@ -465,7 +570,9 @@ class CodexProfileExecutor:
                     report = HostReviewAdapter._with_changed_path_coverage_gaps(context, report)
                     HostReviewAdapter._validate_report(context, job.profile, report)
                 except (ValidationError, ValueError) as exc:
-                    raise ValueError("CLI reviewer returned an invalid report") from exc
+                    raise RetryableProfileOutputError(
+                        "CLI reviewer returned an invalid report"
+                    ) from exc
                 if job.observation is not None:
                     job.observation.validation_seconds = perf_counter() - validated
                 metrics = ProfileExecutionMetrics(

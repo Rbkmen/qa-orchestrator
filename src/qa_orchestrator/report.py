@@ -103,6 +103,27 @@ def _render_coverage_ledger(
 ) -> list[str]:
     lines = ["## Changed-path coverage", ""]
     ledger = report.coverage_ledger
+    if context is not None and context.diff_hunk_inventory_status == "partial":
+        if context.diff_hunk_inventory_count_at_least is None:
+            lines.append(
+                "Diff hunk inventory: partial; hunk count is unavailable and no indexed hunks are bound."
+            )
+        else:
+            lines.append(
+                "Diff hunk inventory: partial; at least "
+                f"{context.diff_hunk_inventory_count_at_least} total, "
+                f"{len(context.diff_hunks)} indexed."
+            )
+    if (
+        context is not None
+        and context.neighbor_discovery_candidate_results_omitted_by_limit
+    ):
+        omitted = context.neighbor_discovery_candidate_results_omitted_by_limit
+        label = "candidate" if omitted == 1 else "candidates"
+        lines.append(
+            f"Neighbor discovery omitted {omitted} eligible {label} at its result limit; "
+            "blast-radius coverage is incomplete."
+        )
     if ledger is None:
         lines.extend((
             "Host-generated coverage ledger is unavailable; this report may predate coverage tracking.",
@@ -275,7 +296,23 @@ def _render_impact_coverage(
 ) -> list[str]:
     lines = ["## Impact closure", ""]
     ledger = report.impact_coverage
+    bound_candidate_omissions = (
+        context.neighbor_discovery_candidate_results_omitted_by_limit
+        if context is not None
+        else None
+    )
     if ledger is None:
+        if bound_candidate_omissions:
+            label = "candidate" if bound_candidate_omissions == 1 else "candidates"
+            lines.extend(
+                (
+                    "Impact closure: partial",
+                    f"- **Reason:** bound neighbor discovery omitted {bound_candidate_omissions} eligible {label} at its result limit; no impact-coverage ledger was supplied.",
+                    "- **Scope:** impact closure only describes the recorded bounded discovery; it is not exhaustive repository coverage.",
+                    "",
+                )
+            )
+            return lines
         lines.extend(
             (
                 "Impact closure: unknown",
@@ -287,6 +324,8 @@ def _render_impact_coverage(
         return lines
 
     status = impact_coverage_status(ledger)
+    if bound_candidate_omissions:
+        status = "partial"
     lines.extend(
         (
             f"Impact closure: {status}",
@@ -301,6 +340,11 @@ def _render_impact_coverage(
             f"- **Candidates:** {len(ledger.candidates)}",
         )
     )
+    if bound_candidate_omissions:
+        label = "candidate" if bound_candidate_omissions == 1 else "candidates"
+        lines.append(
+            f"- **Bound discovery omissions:** {bound_candidate_omissions} eligible {label} were excluded by the result limit."
+        )
 
     disposition_counts = {
         disposition: sum(
