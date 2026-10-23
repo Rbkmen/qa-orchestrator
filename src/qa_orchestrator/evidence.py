@@ -3971,6 +3971,14 @@ def evidence_main(argv: list[str]) -> int:
     verify = subparsers.add_parser(
         "verify", help="Check evidence against immutable local Git objects"
     )
+    check_links = subparsers.add_parser(
+        "check-links",
+        help="Check allowlisted external evidence URLs on demand",
+    )
+    check_links.add_argument("--context", required=True, type=Path)
+    check_links.add_argument("--allow-host", action="append", required=True, metavar="HOST")
+    check_links.add_argument("--timeout", type=float, default=10.0)
+    check_links.add_argument("--output", type=Path)
     chunks = subparsers.add_parser(
         "chunks", help="Read pinned source into byte-faithful AST chunks"
     )
@@ -4034,6 +4042,23 @@ def evidence_main(argv: list[str]) -> int:
         else:
             print(output, end="")
         return 0
+    if args.command == "check-links":
+        from qa_orchestrator.link_audit import check_evidence_links, link_audit_failed
+
+        if args.output and args.output.resolve() == args.context.resolve():
+            raise ValueError("link audit output must use a distinct path from the context")
+        context = ReviewContext.model_validate_json(args.context.read_bytes())
+        result = check_evidence_links(
+            context.evidence_registry,
+            allowed_hosts=tuple(args.allow_host),
+            timeout_seconds=args.timeout,
+        )
+        output = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
+        if args.output:
+            args.output.write_text(output, encoding="utf-8")
+        else:
+            print(output, end="")
+        return 1 if link_audit_failed(result) else 0
     context = ReviewContext.model_validate_json(args.context.read_bytes())
     if args.command == "discover":
         payload = discover_neighbor_evidence(

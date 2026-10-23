@@ -1,0 +1,290 @@
+{
+  "format": "qa-orchestrator-link-audit-v1",
+  "checked_at": "2026-10-23T21:11:40+00:00",
+  "allowed_hosts": [
+    "github.com"
+  ],
+  "summary": {
+    "reachable": 24,
+    "redirected": 1
+  },
+  "results": [
+    {
+      "locator": "https://github.com/PierreJanineh/TechDebtMCP/pull/135",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/PierreJanineh/TechDebtMCP/pull/135",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0001"
+      ]
+    },
+    {
+      "locator": "https://github.com/simnaut/emdash/pull/2",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/simnaut/emdash/pull/2",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0002"
+      ]
+    },
+    {
+      "locator": "https://github.com/konturio/disaster-ninja-fe/pull/1230",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/konturio/disaster-ninja-fe/pull/1230",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0003"
+      ]
+    },
+    {
+      "locator": "https://github.com/cmik/apilix/pull/12",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/cmik/apilix/pull/12",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0004"
+      ]
+    },
+    {
+      "locator": "https://github.com/AA-Factory/aafactory-prototype/pull/17",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/AA-Factory/aafactory-prototype/pull/17",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0005"
+      ]
+    },
+    {
+      "locator": "https://github.com/DisciplinedSoftware/Codebase-Conversion/pull/1",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/DisciplinedSoftware/Codebase-Conversion/pull/1",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0006"
+      ]
+    },
+    {
+      "locator": "https://github.com/brianc/node-postgres/pull/3650",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/brianc/node-postgres/pull/3650",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0007"
+      ]
+    },
+    {
+      "locator": "https://github.com/PaulStSmith/figlet-comment-generator/pull/32",
+      "status": "redirected",
+      "http_status": 206,
+      "final_url": "https://github.com/ByteForgeBiz/figlet-suite/pull/32",
+      "redirect_chain": [
+        "https://github.com/ByteForgeBiz/figlet-suite/pull/32"
+      ],
+      "error_type": null,
+      "evidence_refs": [
+        "E0008"
+      ]
+    },
+    {
+      "locator": "https://github.com/brexhq/CrabTrap/pull/15",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/brexhq/CrabTrap/pull/15",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0009"
+      ]
+    },
+    {
+      "locator": "https://github.com/k1LoW/gh-copilot-review/pull/9",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/k1LoW/gh-copilot-review/pull/9",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0010"
+      ]
+    },
+    {
+      "locator": "https://github.com/scotthamilton77/agents-config/pull/1",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/scotthamilton77/agents-config/pull/1",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0011"
+      ]
+    },
+    {
+      "locator": "https://github.com/ardevd/jadx-collaboration/pull/3",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/ardevd/jadx-collaboration/pull/3",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0012"
+      ]
+    },
+    {
+      "locator": "https://github.com/AY2526S2-CS2103T-W14-3/tp/pull/152",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/AY2526S2-CS2103T-W14-3/tp/pull/152",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0013"
+      ]
+    },
+    {
+      "locator": "https://github.com/vanyastaff/nebula/pull/224",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/vanyastaff/nebula/pull/224",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0014"
+      ]
+    },
+    {
+      "locator": "https://github.com/NCATSTranslator/translator-ingests/pull/336",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/NCATSTranslator/translator-ingests/pull/336",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0015"
+      ]
+    },
+    {
+      "locator": "https://github.com/mheuss/chronicle/pull/14",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/mheuss/chronicle/pull/14",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0016"
+      ]
+    },
+    {
+      "locator": "https://github.com/superhighfives/pika/pull/200",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/superhighfives/pika/pull/200",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0017"
+      ]
+    },
+    {
+      "locator": "https://github.com/gagneurlab/PROTRIDER/pull/10",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/gagneurlab/PROTRIDER/pull/10",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0018"
+      ]
+    },
+    {
+      "locator": "https://github.com/allan-mobley-jr/gimmes/pull/468",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/allan-mobley-jr/gimmes/pull/468",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0019"
+      ]
+    },
+    {
+      "locator": "https://github.com/superyyrrzz/ForgeMap/pull/106",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/superyyrrzz/ForgeMap/pull/106",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0020"
+      ]
+    },
+    {
+      "locator": "https://github.com/renedierking/LANdalf/pull/88",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/renedierking/LANdalf/pull/88",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0021"
+      ]
+    },
+    {
+      "locator": "https://github.com/scottlz0310/Mcp-Docker/pull/29",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/scottlz0310/Mcp-Docker/pull/29",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0022"
+      ]
+    },
+    {
+      "locator": "https://github.com/wirechat/wirechat/pull/183",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/wirechat/wirechat/pull/183",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0023"
+      ]
+    },
+    {
+      "locator": "https://github.com/sdsykes/fastimage/pull/165",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/sdsykes/fastimage/pull/165",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0024"
+      ]
+    },
+    {
+      "locator": "https://github.com/Marvell-Consulting/statswales-frontend/pull/626",
+      "status": "reachable",
+      "http_status": 206,
+      "final_url": "https://github.com/Marvell-Consulting/statswales-frontend/pull/626",
+      "redirect_chain": [],
+      "error_type": null,
+      "evidence_refs": [
+        "E0025"
+      ]
+    }
+  ]
+}

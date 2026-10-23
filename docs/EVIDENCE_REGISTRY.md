@@ -27,6 +27,19 @@ qa-orch evidence verify --context bound-context.json --repository /path/to/repo 
 
 The builder computes source/diff hashes from immutable Git objects. External content hashes are supplied by the host. Verification checks commit identities, the exact diff hash, source hashes and ranges, and optionally the packet hash and finding coordinates. It does not execute target code or modify the repository. External requirements/runtime records remain explicitly unverified by this local checker. Final `verification_records` preserve test, CI and runtime outcomes with the exact reviewed head SHA, scenario, environment, source/run reference, and reason for non-passing states. These records are host-supplied; a run URL or runtime evidence hash does not make the orchestrator an independent CI verifier. A missing packet check is reported as unknown; mismatches fail instead of silently rebinding the input.
 
+## On-demand link reachability
+
+`verify` stays offline. To check whether URL locators respond, run the separate network command explicitly and allowlist each exact hostname:
+
+```sh
+qa-orch evidence check-links --context bound-context.json \
+  --allow-host github.com --timeout 10 --output link-audit.json
+```
+
+Repeat `--allow-host` for each exact hostname required by the evidence. Wildcards, IP addresses, ports, and paths are rejected. Only HTTPS URLs without embedded credentials, query strings, or fragments are requested; redirects are followed only when their destination hostname is also allowlisted. Identical URLs are checked once and mapped back to their evidence refs. The JSON distinguishes reachable, redirected, access-denied, missing, and failure statuses; the command exits nonzero for failed URL checks. Non-URL identifiers are reported without a network request.
+
+A reachable response proves only that the URL responded at check time. It does not prove that the page content matches an external evidence hash, that the page still represents the pinned PR/task state, or that the cited claim is true. External records therefore remain `unverified_external_refs` in ordinary local verification until a separate content-verification mechanism is available.
+
 The MCP server validates registry structure and citation/location membership. In schema-v2 reviews, an `introduced` finding must cite the bound diff, a `pre_existing` finding must cite base-source evidence covering the same location, and an `exacerbated_by_pr` finding must cite both the bound diff and base-source evidence covering the same location. The latter means the defect predates the PR but the PR makes it worse. It cannot read the host's raw packet or prove evidence truth. The host may pass `evidence_verifier=lambda context: verify_evidence(context, repository, packet)` to `HostReviewAdapter` to verify before any workers launch. Legacy contexts without a registry remain accepted; local verification requires a registry.
 
 When a final report JSON is available, export a readable Markdown summary with its evidence refs resolved through the same bound context:
