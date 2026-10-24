@@ -118,6 +118,72 @@ def test_every_profile_and_canonical_guidance_require_scenario_led_review(tmp_pa
         assert rule in canonical_rules
 
 
+def test_finding_routes_require_scope_matched_source_and_diff_evidence(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    required_rules = (
+        "For introduced or PR-exacerbated findings, cite the bound diff ref and head-source ref.",
+        "For pre-existing findings, cite matching base-source and head-source refs for the location.",
+    )
+    finding_profiles = set(ReviewAgent) - {
+        ReviewAgent.CODE_EXPLORER,
+        ReviewAgent.PR_TEST_ANALYZER,
+    }
+
+    for profile in finding_profiles:
+        constraints = " ".join(service.prepare_review_route(profile).constraints)
+        for rule in required_rules:
+            assert rule in constraints
+
+    canonical_rules = (
+        Path(__file__).parents[1]
+        / "client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md"
+    ).read_text(encoding="utf-8").replace("`", " ")
+    for rule in required_rules:
+        assert rule in canonical_rules
+
+
+def test_recall_guidance_respects_profile_output_boundaries(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    routes = {profile: service.prepare_review_route(profile) for profile in ReviewAgent}
+
+    for profile, route in routes.items():
+        constraints = " ".join(route.constraints)
+        if profile is ReviewAgent.CODE_EXPLORER:
+            assert "Preserve unresolved execution-path, caller, and dependency links" in constraints
+            assert "do not diagnose defects" in constraints
+            assert "Use two passes for recall" not in constraints
+        elif profile is ReviewAgent.PR_TEST_ANALYZER:
+            assert "Use two passes for test-coverage recall" in constraints
+            assert "do not diagnose implementation defects" in constraints
+            assert "Use two passes for recall" not in constraints
+        else:
+            assert "Use two passes for recall" in constraints
+            assert "hypotheses grounded in changed behavior or a requirement" in constraints
+            assert "do not silently drop them or promote them to findings" in constraints
+            assert "applicability-based boundary sweep" in constraints
+            assert "worst-case CPU, memory, and output growth" in constraints
+            assert "regex backtracking" in constraints
+            assert "server/direct load with client navigation" in constraints
+            assert "vary pathname, query, hash, locale, and trailing slash independently" in constraints
+            assert "Mark irrelevant dimensions not applicable" in constraints
+
+    canonical_rules = " ".join(
+        (
+            Path(__file__).parents[1]
+            / "client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md"
+        )
+        .read_text(encoding="utf-8")
+        .replace("`", "")
+        .split()
+    )
+    assert "Finding-producing profiles use two passes for recall" in canonical_rules
+    assert "conditional boundary sweep" in canonical_rules
+    assert "regex backtracking" in canonical_rules
+    assert "pathname, query, hash, locale, and trailing slash independently" in canonical_rules
+    assert "Evidence Investigator preserves unresolved execution-path links" in canonical_rules
+    assert "Test Analyzer uses two passes for test-coverage recall" in canonical_rules
+
+
 def test_evidence_investigator_and_code_reviewer_have_distinct_outputs(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
     evidence_route = service.prepare_review_route(ReviewAgent.CODE_EXPLORER)
@@ -377,6 +443,27 @@ def test_changed_file_hints_follow_confirmed_language_and_test_paths():
         ReviewAgent.PYTHON_REVIEWER,
         ReviewAgent.PR_TEST_ANALYZER,
     )
+    assert review_profiles.recommended_profiles_for_changed_files(
+        ("spec/models/player_spec.rb",)
+    ) == (
+        ReviewAgent.RUBY_REVIEWER,
+        ReviewAgent.PR_TEST_ANALYZER,
+    )
+    assert review_profiles.recommended_profiles_for_changed_files(
+        ("internal/parser/parser_test.go",)
+    ) == (ReviewAgent.PR_TEST_ANALYZER,)
+    assert review_profiles.recommended_profiles_for_changed_files(
+        ("api/spec/openapi.yaml",)
+    ) == ()
+    assert review_profiles.recommended_profiles_for_changed_files(
+        ("src/main/java/orders/OrderTests.java",)
+    ) == (ReviewAgent.PR_TEST_ANALYZER,)
+    assert review_profiles.recommended_profiles_for_changed_files(
+        ("src/main/kotlin/orders/OrderTest.kt",)
+    ) == (ReviewAgent.PR_TEST_ANALYZER,)
+    assert review_profiles.recommended_profiles_for_changed_files(
+        ("src/main/csharp/orders/OrderTests.cs",)
+    ) == (ReviewAgent.PR_TEST_ANALYZER,)
     assert review_profiles.recommended_profiles_for_changed_files(
         ("android/app/src/MainActivity.kt",)
     ) == (ReviewAgent.MOBILE_REVIEWER,)

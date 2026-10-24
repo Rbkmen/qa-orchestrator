@@ -317,10 +317,19 @@ def _validate_mandatory_presence(context: ReviewContext, deleted_paths: tuple[st
         path: context.base_sha if path in deleted_paths else context.head_sha
         for path in context.changed_files
     }
+    source_revisions_by_path: dict[str, set[str]] = {}
     for entry in context.evidence_registry:
-        if (
-            entry.kind == "source"
-            and entry.path in expected_revisions
-            and entry.revision != expected_revisions[entry.path]
-        ):
+        if entry.kind != "source" or entry.path not in expected_revisions:
+            continue
+        expected_revision = expected_revisions[entry.path]
+        allowed_revisions = {expected_revision}
+        if expected_revision == context.head_sha:
+            allowed_revisions.add(context.base_sha)
+        if entry.revision not in allowed_revisions:
             raise ValueError("changed source evidence must match the pinned revision")
+        source_revisions_by_path.setdefault(entry.path, set()).add(entry.revision)
+    if any(
+        expected_revisions[path] not in revisions
+        for path, revisions in source_revisions_by_path.items()
+    ):
+        raise ValueError("changed source evidence must match the pinned revision")

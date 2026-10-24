@@ -1038,6 +1038,44 @@ def test_claimed_lines_must_use_a_supporting_head_ref_and_stay_in_bounds(pinned_
         verify_evidence(entire_file, repository, candidates=(candidate(line=99),))
 
 
+def test_pre_existing_finding_on_modified_file_accepts_both_source_revisions(pinned_evidence):
+    from qa_orchestrator.context_pack import build_context_packet
+
+    repository, _, context, definitions = pinned_evidence
+    head_source, diff_record = definitions
+    base_source = {
+        "evidence_ref": "B1",
+        "kind": "source",
+        "revision": context.base_sha,
+        "path": "src/api.py",
+    }
+    context_data = context.model_dump(mode="python")
+    context_data["evidence_refs"] = ("S1", "B1", "D1")
+    manifest = dict(context_data["input_manifest"])
+    manifest.update(
+        schema_version=2,
+        source_inventory_status="complete",
+        source_conflict_status="clear",
+    )
+    context_data["input_manifest"] = manifest
+    bound = register_evidence(
+        ReviewContext.model_validate(context_data),
+        [head_source, base_source, diff_record],
+        repository,
+    )
+
+    packet = build_context_packet(bound, repository)
+    assert {fragment.record.evidence_ref for fragment in packet.fragments} == {
+        "S1",
+        "B1",
+        "D1",
+    }
+    finding = candidate().model_copy(
+        update={"change_origin": "pre_existing", "evidence_refs": ("S1", "B1")}
+    )
+    validate_registered_locations(bound, (finding,))
+
+
 def test_schema_v2_findings_require_registered_source_evidence(pinned_evidence):
     repository, _, context, definitions = pinned_evidence
     context_data = context.model_dump(mode="python")
