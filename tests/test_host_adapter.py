@@ -11,6 +11,7 @@ from qa_orchestrator.contracts import (
     ReviewAgent,
     ReviewContext,
     ReviewDiffHunk,
+    ReviewScenarioDisposition,
     ReviewVerificationRecord,
     review_diff_hunk_inventory_sha256,
 )
@@ -78,12 +79,59 @@ async def test_host_reports_changed_paths_missing_from_profile_attestation(host_
     result = await HostReviewAdapter(service).run_primary_review(
         run_id, execute, lambda _: DeepReviewSignals()
     )
-
     gaps = result.session.profile_reports[0].coverage_gaps
     assert any(
         "explicitly attest inspection" in gap.text and "src/service.py" in gap.text
         for gap in gaps
     )
+
+
+async def test_host_runs_targeted_auditor_for_unverified_single_profile_scenario(host_session):
+    service, run_id = host_session(profile=ReviewAgent.PYTHON_REVIEWER)
+    executed = []
+    assessed = []
+
+    async def execute(job):
+        executed.append(job)
+        if job.profile is ReviewAgent.PYTHON_REVIEWER:
+            return ProfileReviewReport(
+                profile=job.profile,
+                scope="Reviewed the retry behavior.",
+                reviewed_changed_paths=job.session.review_context.changed_files,
+                scenario_coverage=(
+                    ReviewScenarioDisposition(
+                        scenario="A retry can execute the write twice.",
+                        disposition="unverified",
+                        evidence_refs=("E1",),
+                        rationale="The downstream idempotency behavior is not in the packet.",
+                    ),
+                ),
+            )
+        return ProfileReviewReport(
+            profile=job.profile,
+            scope="Audited the unresolved retry behavior.",
+            reviewed_changed_paths=job.session.review_context.changed_files,
+        )
+
+    def assess_risk(reports):
+        assessed.append(reports)
+        return DeepReviewSignals()
+
+    result = await HostReviewAdapter(service).run_primary_review(run_id, execute, assess_risk)
+
+    assert [job.profile for job in executed] == [
+        ReviewAgent.PYTHON_REVIEWER,
+        ReviewAgent.OMISSION_AUDITOR,
+    ]
+    assert len(executed[1].previous_reports) == 1
+    assert executed[1].previous_reports[0].scenario_coverage[0].scenario == (
+        "A retry can execute the write twice."
+    )
+    assert len(assessed) == 1
+    assert result.session.completed_profiles == [
+        ReviewAgent.PYTHON_REVIEWER,
+        ReviewAgent.OMISSION_AUDITOR,
+    ]
 
 
 def test_host_rejects_attestation_for_path_outside_bound_change(bound_review_context):
@@ -556,6 +604,7 @@ async def test_only_explicit_transient_failures_retry_and_retry_tokens_stay_unkn
         return ProfileReviewReport(
             profile=job.profile,
             scope="Reviewed source.",
+            reviewed_changed_paths=job.session.review_context.changed_files,
             execution_metrics=ProfileExecutionMetrics(
                 started_at=datetime.now(UTC),
                 completed_at=datetime.now(UTC),

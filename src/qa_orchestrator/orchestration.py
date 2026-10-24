@@ -34,6 +34,7 @@ from qa_orchestrator.contracts import (
 )
 from qa_orchestrator.evidence import (
     complete_criterion_coverage,
+    complete_scenario_coverage,
     profile_input_receipt_verified,
     review_completion_gaps,
     validate_context_selection,
@@ -54,6 +55,7 @@ from qa_orchestrator.review_profiles import (
     REVIEW_BUNDLES,
     bundle_execution_groups,
     bundle_profiles,
+    needs_targeted_omission_audit,
     recommended_bundles_for,
     recommended_profiles_for_changed_files,
 )
@@ -1253,6 +1255,24 @@ class QaOrchestrator:
                     )
                 )
 
+            if validated_report is not None and not is_idempotent_legacy_replay:
+                try:
+                    validated_report = complete_scenario_coverage(
+                        session.review_context,
+                        session.profile_reports,
+                        validated_report,
+                    )
+                except ValueError as exc:
+                    raise OrchestrationError("invalid behavior scenario coverage") from exc
+                is_idempotent_legacy_replay = (
+                    is_idempotent_legacy_replay
+                    or (
+                        session.status in _TERMINAL_SESSION_STATUSES
+                        and session.status is final_status
+                        and validated_report == session.final_review_report
+                    )
+                )
+
             if (expected_revision is not None and expected_revision != session.revision
                 and not is_idempotent_legacy_replay):
                 raise OrchestrationError("stale session revision")
@@ -1382,6 +1402,11 @@ class QaOrchestrator:
                         *item.implementation_refs,
                         *item.test_refs,
                     )
+                )
+                report_refs.update(
+                    reference
+                    for item in validated_report.scenario_coverage
+                    for reference in item.evidence_refs
                 )
                 report_refs.update(
                     reference
@@ -1659,7 +1684,7 @@ class QaOrchestrator:
                 if session.selected_bundle is not None:
                     groups = bundle_execution_groups(session.selected_bundle)
                 elif session.selected_profile is not None:
-                    groups = ((session.selected_profile,),)
+                    groups = tuple((profile,) for profile in session.review_profiles)
                 else:
                     raise OrchestrationError("missing selected profile for execution group")
 
@@ -1732,6 +1757,11 @@ class QaOrchestrator:
                         for note in (*report.coverage_gaps, *report.unverified)
                         for reference in note.evidence_refs
                     )
+                    report_refs.update(
+                        reference
+                        for item in report.scenario_coverage
+                        for reference in item.evidence_refs
+                    )
                     report_refs.update(entry.evidence_ref for entry in report.evidence_map)
                     if report_refs - context_refs:
                         raise OrchestrationError(
@@ -1753,11 +1783,17 @@ class QaOrchestrator:
                     "synthesis can be skipped only for a clean single-profile review"
                 )
             if request.skip_synthesis and any(
-                report.finding_candidates or report.coverage_gaps or report.unverified
+                report.finding_candidates
+                or report.coverage_gaps
+                or report.unverified
+                or any(
+                    item.disposition in {"candidate", "unverified"}
+                    for item in report.scenario_coverage
+                )
                 for report in transition_reports
             ):
                 raise OrchestrationError(
-                    "synthesis cannot be skipped with findings, coverage gaps, or unverified items"
+                    "synthesis cannot be skipped with findings, unresolved scenarios, coverage gaps, or unverified items"
                 )
             completed_profiles = [*session.completed_profiles, *transition_profiles]
             profile_reports = [*session.profile_reports, *transition_reports]
@@ -1774,6 +1810,38 @@ class QaOrchestrator:
                         "profile_reports": profile_reports,
                         "model_policy": self._model_policies[OrchestrationStep.PRIMARY_REVIEW],
                         "next_action": _NEXT_ACTIONS[OrchestrationStep.PRIMARY_REVIEW],
+                    }
+                )
+
+            if needs_targeted_omission_audit(profile_reports, session.review_profiles):
+                if request.risk_signals is not None:
+                    raise OrchestrationError(
+                        "risk signals must be assessed after the targeted omission audit"
+                    )
+                if request.skip_synthesis:
+                    raise OrchestrationError(
+                        "synthesis cannot be skipped while unresolved scenarios require an omission audit"
+                    )
+                return session.model_copy(
+                    update={
+                        "current_step": OrchestrationStep.PRIMARY_REVIEW,
+                        "review_profiles": [
+                            *session.review_profiles,
+                            ReviewAgent.OMISSION_AUDITOR,
+                        ],
+                        "current_profile": ReviewAgent.OMISSION_AUDITOR,
+                        "completed_profiles": completed_profiles,
+                        "profile_reports": profile_reports,
+                        "risk_signals": None,
+                        "deep_assessment": None,
+                        "deep_reason_code": None,
+                        "model_policy": self._model_policies[
+                            OrchestrationStep.PRIMARY_REVIEW
+                        ],
+                        "next_action": (
+                            "Run one targeted read-only omission_auditor pass over the unresolved "
+                            "scenarios before final risk assessment."
+                        ),
                     }
                 )
 

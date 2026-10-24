@@ -722,6 +722,20 @@ def render_final_report(
                 )
             )
 
+    if report.scenario_coverage:
+        lines.extend(("## Scenario disposition matrix", ""))
+        for index, item in enumerate(report.scenario_coverage, start=1):
+            lines.extend(
+                (
+                    f"### Scenario {index}: {_text(item.scenario)}",
+                    "",
+                    f"- **Disposition:** {_text(item.disposition)}",
+                    f"- **Evidence refs:** {_refs(item.evidence_refs, context)}",
+                    f"- **Assessment:** {_text(item.rationale)}",
+                    "",
+                )
+            )
+
     if report.candidate_decisions:
         lines.extend(("## Candidate decisions", ""))
         for decision in report.candidate_decisions:
@@ -912,6 +926,9 @@ def validate_final_report_context(report: FinalReviewReport, context: ReviewCont
             *item.implementation_refs,
             *item.test_refs,
         )
+    )
+    report_refs.update(
+        ref for item in report.scenario_coverage for ref in item.evidence_refs
     )
     report_refs.update(
         ref for item in report.verification_records for ref in item.evidence_refs

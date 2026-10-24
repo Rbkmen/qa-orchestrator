@@ -26,7 +26,134 @@ def test_output_schema_enforces_profile_finding_scope(profile):
     assert "reviewed_changed_paths" in schema["required"]
     assert schema["properties"]["reviewed_diff_hunk_indexes"]["type"] == "array"
     assert "reviewed_diff_hunk_indexes" in schema["required"]
+    assert schema["properties"]["scenario_coverage"]["maxItems"] == 25
+    assert "scenario_coverage" in schema["required"]
     assert schema["properties"]["profile"]["enum"] == [profile.value]
+
+
+def test_omission_auditor_gets_a_target_queue_for_unverified_scenarios(executor_input):
+    from qa_orchestrator.codex_executor import _targeted_scenario_audit_instruction
+    from qa_orchestrator.contracts import ProfileReviewReport, ReviewScenarioDisposition
+
+    _, job, _ = executor_input
+    prior = ProfileReviewReport(
+        profile=ReviewAgent.CODE_REVIEWER,
+        scope="Reviewed the retry path.",
+        scenario_coverage=(
+            ReviewScenarioDisposition(
+                scenario="A retried request can repeat the wallet write.",
+                disposition="unverified",
+                evidence_refs=("E1",),
+                rationale="The packet omits the downstream idempotency guard.",
+            ),
+        ),
+    )
+    prior_other = ProfileReviewReport(
+        profile=ReviewAgent.PR_TEST_ANALYZER,
+        scope="Reviewed retry test coverage.",
+        scenario_coverage=(
+            ReviewScenarioDisposition(
+                scenario="a retried request can repeat the wallet write.",
+                disposition="unverified",
+                evidence_refs=("E2",),
+                rationale="No test distinguishes the retry result.",
+            ),
+        ),
+    )
+    auditor_job = replace(
+        job,
+        profile=ReviewAgent.OMISSION_AUDITOR,
+        route=build_review_route(ReviewAgent.OMISSION_AUDITOR),
+        previous_reports=(prior, prior_other),
+    )
+
+    instruction = _targeted_scenario_audit_instruction(auditor_job)
+    queue = json.loads(instruction.splitlines()[1])
+
+    assert "Targeted second-pass queue" in instruction
+    assert "A retried request can repeat the wallet write." in instruction
+    assert "E1" in instruction
+    assert "copy the scenario text exactly" in instruction.lower()
+    assert queue["items"][0]["evidence_refs"] == ["E1", "E2"]
+    assert queue["items"][0]["source_profiles"] == [
+        ReviewAgent.CODE_REVIEWER.value,
+        ReviewAgent.PR_TEST_ANALYZER.value,
+    ]
+    assert len(queue["items"]) == 1
+
+
+async def test_omission_auditor_prompt_includes_the_targeted_scenario_queue(executor_input, tmp_path):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.contracts import ProfileReviewReport, ReviewScenarioDisposition
+
+    packet, job, script = executor_input
+    prior = ProfileReviewReport(
+        profile=ReviewAgent.CODE_REVIEWER,
+        scope="Reviewed the retry path.",
+        scenario_coverage=(
+            ReviewScenarioDisposition(
+                scenario="A retried request can repeat the wallet write.",
+                disposition="unverified",
+                evidence_refs=("E1",),
+                rationale="The packet omits the downstream idempotency guard.",
+            ),
+        ),
+    )
+    job = replace(
+        job,
+        profile=ReviewAgent.OMISSION_AUDITOR,
+        route=build_review_route(ReviewAgent.OMISSION_AUDITOR),
+        previous_reports=(prior,),
+    )
+    captured_prompt = tmp_path / "auditor-prompt.txt"
+    source = script.read_text()
+    source = source.replace("'profile':'python_reviewer'", "'profile':'omission_auditor'")
+    source = source.replace(
+        "prompt=sys.stdin.read()",
+        f"prompt=sys.stdin.read(); pathlib.Path({str(captured_prompt)!r}).write_text(prompt)",
+    )
+    script.write_text(source)
+
+    await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(job)
+
+    prompt = captured_prompt.read_text()
+    assert "Targeted second-pass queue" in prompt
+    assert "A retried request can repeat the wallet write." in prompt
+
+
+def test_context_selection_must_include_scenario_evidence(executor_input):
+    from qa_orchestrator.contracts import (
+        ProfileContextSelection,
+        ProfileReviewReport,
+        ReviewScenarioDisposition,
+    )
+    from qa_orchestrator.evidence import validate_context_selection
+
+    _, job, _ = executor_input
+    context = job.session.review_context
+    report = ProfileReviewReport(
+        profile=ReviewAgent.CODE_REVIEWER,
+        context_selection=ProfileContextSelection(
+            source_packet_sha256=context.evidence_packet_sha256,
+            selected_packet_sha256="a" * 64,
+            included_refs=("E2",),
+            omitted_refs=("E1",),
+            max_bytes=1024,
+            selected_bytes=512,
+        ),
+        scope="Reviewed the retry path.",
+        scenario_coverage=(
+            ReviewScenarioDisposition(
+                scenario="A retry repeats the side effect.",
+                disposition="unverified",
+                evidence_refs=("E1",),
+                rationale="The selected context omitted the caller contract.",
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="profile report cites evidence omitted from its context"):
+        validate_context_selection(context, report)
 
 
 @pytest.mark.parametrize("profile", ["pr_test_analyzer", "code_explorer"])
@@ -71,7 +198,7 @@ def test_executor_schema_change_invalidates_previous_identity(executor_input):
     packet, _, _ = executor_input
     executor = CodexProfileExecutor(packet)
     old_identity = hashlib.sha256(json.dumps({
-        "implementation": "codex-packet-executor-v13",
+        "implementation": "codex-packet-executor-v14",
         "command": executor.command,
         "max_context_bytes": executor.max_context_bytes,
         "model": executor.model,

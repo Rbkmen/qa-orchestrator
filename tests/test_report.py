@@ -27,6 +27,7 @@ from qa_orchestrator.contracts import (
     ReviewInputManifest,
     ReviewInputSource,
     ReviewNote,
+    ReviewScenarioDisposition,
     ReviewVerificationRecord,
     impact_candidate_set_sha256,
     review_changed_paths_sha256,
@@ -738,6 +739,65 @@ def test_criterion_coverage_rejects_unknown_refs_and_wrong_evidence_kinds(
     )
     with pytest.raises(ValueError, match="implementation evidence must reference source or diff"):
         validate_final_report_context(wrong_support_kind, context)
+
+
+def test_scenario_disposition_requires_evidence_and_nonduplicate_scenarios():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="evidence_refs"):
+        ReviewScenarioDisposition(
+            scenario="A retry repeats the side effect.",
+            disposition="unverified",
+            evidence_refs=(),
+            rationale="The retry path is not included in the packet.",
+        )
+
+    scenario = ReviewScenarioDisposition(
+        scenario="A retry repeats the side effect.",
+        disposition="unverified",
+        evidence_refs=("E1",),
+        rationale="The retry path is not included in the packet.",
+    )
+    with pytest.raises(ValidationError, match="scenario coverage scenarios must be unique"):
+        FinalReviewReport(
+            summary="Reviewed the retry behavior.",
+            profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+            scenario_coverage=(
+                scenario,
+                scenario.model_copy(update={"scenario": "  A RETRY repeats the side effect. "}),
+            ),
+        )
+
+
+def test_final_report_validates_scenario_refs_and_renders_the_matrix(bound_review_context):
+    valid = ReviewScenarioDisposition(
+        scenario="A retry can repeat the write.",
+        disposition="unverified",
+        evidence_refs=("E2",),
+        rationale="The packet does not show the downstream idempotency behavior.",
+    )
+    report = FinalReviewReport(
+        summary="Reviewed the retry behavior.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        scenario_coverage=(valid,),
+    )
+
+    validate_final_report_context(report, bound_review_context)
+    rendered = render_final_report(report, context=bound_review_context)
+    assert "## Scenario disposition matrix" in rendered
+    assert "A retry can repeat the write" in rendered
+    assert "unverified" in rendered
+    assert "E2" in rendered
+
+    unknown_ref = report.model_copy(
+        update={
+            "scenario_coverage": (
+                valid.model_copy(update={"evidence_refs": ("E9",)}),
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="report cites refs outside the bound context"):
+        validate_final_report_context(unknown_ref, bound_review_context)
 
 
 def test_renderer_resolves_refs_from_bound_context(bound_review_context):

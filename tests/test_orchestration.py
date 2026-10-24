@@ -18,6 +18,7 @@ from qa_orchestrator.contracts import (
     ReviewCoverageLedger,
     ReviewFindingCandidate,
     ReviewNote,
+    ReviewScenarioDisposition,
     ReviewVerificationRecord,
     review_changed_paths_sha256,
 )
@@ -471,6 +472,62 @@ def test_review_bound_fast_path_cannot_skip_reported_coverage_gaps(
         )
 
 
+def test_single_profile_unverified_scenario_schedules_targeted_omission_auditor(
+    bound_review_context, make_profile_review_report
+):
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review", bound_review_context)
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_profile=ReviewAgent.CODE_REVIEWER,
+    )
+    primary_report = make_profile_review_report(
+        ReviewAgent.CODE_REVIEWER,
+        scenario_coverage=(
+            ReviewScenarioDisposition(
+                scenario="A retry can execute the write twice.",
+                disposition="unverified",
+                evidence_refs=("E1",),
+                rationale="The downstream idempotency behavior is not in the packet.",
+            ),
+        ),
+    )
+
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profile=ReviewAgent.CODE_REVIEWER,
+        profile_reports=[primary_report],
+    )
+
+    assert session.current_step is OrchestrationStep.PRIMARY_REVIEW
+    assert session.current_profile is ReviewAgent.OMISSION_AUDITOR
+    assert session.review_profiles == [
+        ReviewAgent.CODE_REVIEWER,
+        ReviewAgent.OMISSION_AUDITOR,
+    ]
+    assert session.completed_profiles == [ReviewAgent.CODE_REVIEWER]
+    assert session.profile_reports == [primary_report]
+
+    auditor_report = make_profile_review_report(ReviewAgent.OMISSION_AUDITOR)
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profile=ReviewAgent.OMISSION_AUDITOR,
+        profile_reports=[auditor_report],
+        risk_signals=DeepReviewSignals(),
+    )
+    assert session.current_step is OrchestrationStep.SYNTHESIS
+    assert session.completed_profiles == [
+        ReviewAgent.CODE_REVIEWER,
+        ReviewAgent.OMISSION_AUDITOR,
+    ]
+
+
 def test_finish_replaces_coverage_ledger_with_host_observed_path_coverage(
     bound_review_context,
     make_profile_review_report,
@@ -523,6 +580,14 @@ def test_finish_replaces_coverage_ledger_with_host_observed_path_coverage(
         ReviewAgent.CODE_REVIEWER,
         context_selection=selection,
         reviewed_changed_paths=("src/service.py",),
+        scenario_coverage=(
+            ReviewScenarioDisposition(
+                scenario="A retry can execute the write twice.",
+                disposition="unverified",
+                evidence_refs=("E1",),
+                rationale="The downstream idempotency behavior is not in the packet.",
+            ),
+        ),
         execution_metrics=ProfileExecutionMetrics(
             started_at=attempt_started,
             completed_at=attempt_completed,
@@ -581,6 +646,18 @@ def test_finish_replaces_coverage_ledger_with_host_observed_path_coverage(
         status="completed",
         completed_profile=ReviewAgent.CODE_REVIEWER,
         profile_reports=[profile_report],
+    )
+    auditor_report = make_profile_review_report(
+        ReviewAgent.OMISSION_AUDITOR,
+        context=context,
+        reviewed_changed_paths=("src/service.py",),
+    )
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed",
+        completed_profile=ReviewAgent.OMISSION_AUDITOR,
+        profile_reports=[auditor_report],
         risk_signals=DeepReviewSignals(),
     )
     session = orchestrator.advance(
@@ -589,7 +666,7 @@ def test_finish_replaces_coverage_ledger_with_host_observed_path_coverage(
         status="completed",
     )
     final_report = make_final_review_report(
-        (ReviewAgent.CODE_REVIEWER,), context=context
+        (ReviewAgent.CODE_REVIEWER, ReviewAgent.OMISSION_AUDITOR), context=context
     ).model_copy(
         update={
             "coverage_ledger": ReviewCoverageLedger(
@@ -681,6 +758,12 @@ def test_finish_replaces_coverage_ledger_with_host_observed_path_coverage(
     assert ledger.profiles[0].reviewer_attested_path_indexes == (0,)
     assert ledger.profiles[0].reviewer_attested_path_indexes != (1,)
     assert len(finished.final_review_report.criterion_coverage) == 1
+    assert len(finished.final_review_report.scenario_coverage) == 1
+    scenario = finished.final_review_report.scenario_coverage[0]
+    assert scenario.scenario == "A retry can execute the write twice."
+    assert scenario.disposition == "unverified"
+    assert scenario.evidence_refs == ("E1",)
+    assert "No final disposition was supplied" in scenario.rationale
     criterion = finished.final_review_report.criterion_coverage[0]
     assert criterion.criterion_ref == "E2"
     assert criterion.criterion_kind == "requirement"

@@ -12,15 +12,19 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
 from qa_orchestrator.contracts import (
+    MAX_REVIEW_SCENARIOS,
     EvidenceRecord,
     FinalReviewReport,
     ImpactCoverageLedger,
     ImpactCoverageOmission,
     ProfileReviewReport,
+    ReviewAgent,
     ReviewContext,
     ReviewCriterionCoverage,
     ReviewDiffHunk,
     ReviewFindingCandidate,
+    ReviewNote,
+    ReviewScenarioDisposition,
     impact_candidate_set_sha256,
     impact_coverage_omissions_sha256,
     review_changed_paths_sha256,
@@ -828,6 +832,11 @@ def validate_registered_locations(
 
 
 def validate_context_selection(context: ReviewContext, report: ProfileReviewReport) -> None:
+    scenario_refs = {
+        ref for item in report.scenario_coverage for ref in item.evidence_refs
+    }
+    if scenario_refs - set(context.evidence_refs):
+        raise ValueError("scenario coverage cites refs outside the bound context")
     selection = report.context_selection
     if selection is None:
         return
@@ -843,6 +852,9 @@ def validate_context_selection(context: ReviewContext, report: ProfileReviewRepo
         raise ValueError("context selection omits mandatory evidence")
     cited = {ref for f in report.finding_candidates for ref in f.evidence_refs}
     cited.update(ref for note in (*report.coverage_gaps, *report.unverified) for ref in note.evidence_refs)
+    cited.update(
+        ref for item in report.scenario_coverage for ref in item.evidence_refs
+    )
     cited.update(item.evidence_ref for item in report.evidence_map)
     if cited - set(selection.included_refs):
         raise ValueError("profile report cites evidence omitted from its context")
@@ -1286,6 +1298,72 @@ def complete_criterion_coverage(
         {
             **report.model_dump(),
             "criterion_coverage": (*report.criterion_coverage, *generated),
+        }
+    )
+
+
+def complete_scenario_coverage(
+    context: ReviewContext,
+    profile_reports: Sequence[ProfileReviewReport],
+    report: FinalReviewReport,
+) -> FinalReviewReport:
+    """Carry every prior material scenario into final synthesis or expose it as a gap."""
+    packet_refs = set(context.evidence_refs)
+    supplied_keys = {
+        " ".join(item.scenario.split()).casefold() for item in report.scenario_coverage
+    }
+    for item in report.scenario_coverage:
+        if set(item.evidence_refs) - packet_refs:
+            raise ValueError("scenario coverage cites evidence outside the bound packet")
+
+    missing: list[tuple[ReviewAgent, ReviewScenarioDisposition]] = []
+    seen = set(supplied_keys)
+    for profile_report in profile_reports:
+        for item in profile_report.scenario_coverage:
+            if set(item.evidence_refs) - packet_refs:
+                raise ValueError("profile scenario coverage cites evidence outside the bound packet")
+            key = " ".join(item.scenario.split()).casefold()
+            if key not in seen:
+                seen.add(key)
+                missing.append((profile_report.profile, item))
+
+    if not missing:
+        return report
+
+    scenarios = list(report.scenario_coverage)
+    generated_gaps: list[ReviewNote] = []
+    for profile, item in missing:
+        if len(scenarios) < MAX_REVIEW_SCENARIOS:
+            rationale = (
+                "No final disposition was supplied; prior "
+                f"{profile.value} status was {item.disposition}. {item.rationale}"
+            )[:500]
+            scenarios.append(
+                ReviewScenarioDisposition(
+                    scenario=item.scenario,
+                    disposition="unverified",
+                    evidence_refs=item.evidence_refs,
+                    rationale=rationale,
+                )
+            )
+        else:
+            generated_gaps.append(
+                ReviewNote(
+                    text=(
+                        f"{profile.value} left a material scenario without a final disposition: "
+                        f"{item.scenario}"
+                    ),
+                    evidence_refs=item.evidence_refs,
+                )
+            )
+
+    if len(report.coverage_gaps) + len(generated_gaps) > 100:
+        raise ValueError("unrepresented prior scenarios exceed final report capacity")
+    return FinalReviewReport.model_validate(
+        {
+            **report.model_dump(),
+            "scenario_coverage": tuple(scenarios),
+            "coverage_gaps": (*report.coverage_gaps, *generated_gaps),
         }
     )
 

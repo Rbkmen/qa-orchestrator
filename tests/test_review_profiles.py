@@ -63,6 +63,7 @@ def test_every_review_profile_returns_read_only_route(tmp_path):
         ReviewAgent.OMISSION_AUDITOR: [
             "Scope",
             "Finding Candidates",
+            "Scenario Disposition Audit",
             "Prior Finding Validation",
             "Removed Behavior Audit",
             "Coverage Gaps",
@@ -330,6 +331,11 @@ def test_omission_auditor_challenges_prior_reports_without_repeating_them(tmp_pa
     assert "source-profile/candidate-id pair" in focus
     assert "budget prevents exhaustive validation" in focus
     assert "unreviewed pair as a coverage gap" in focus
+    assert "scenario_coverage" in focus
+    assert "unverified scenario" in focus
+    assert "Scenario Disposition Audit" in review_profiles.REVIEW_PROFILES[
+        ReviewAgent.OMISSION_AUDITOR
+    ].required_sections
 
 
 def test_review_profiles_expose_the_approved_display_names(tmp_path):

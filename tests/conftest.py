@@ -100,6 +100,7 @@ def make_profile_review_report(bound_review_context):
         findings=(),
         coverage_gaps=(),
         unverified=(),
+        scenario_coverage=(),
         evidence_map=(),
         execution_metrics: ProfileExecutionMetrics | None = None,
         context=None,
@@ -170,6 +171,7 @@ def make_profile_review_report(bound_review_context):
             ),
             coverage_gaps=tuple(coverage_gaps),
             unverified=tuple(unverified),
+            scenario_coverage=tuple(scenario_coverage),
             evidence_map=tuple(evidence_map),
             execution_metrics=execution_metrics,
         )

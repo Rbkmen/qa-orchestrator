@@ -108,6 +108,7 @@ def impact_candidate_set_sha256(
 # Added defaulted fields expand legacy persisted reports when they are loaded.
 _MAX_PROFILE_REVIEW_REPORT_BYTES = 72 * 1024
 _MAX_FINAL_REVIEW_REPORT_BYTES = 80 * 1024
+MAX_REVIEW_SCENARIOS = 25
 
 
 class EvidenceRecord(BaseModel):
@@ -1303,6 +1304,27 @@ class ImpactCoverageLedger(BaseModel):
         return self
 
 
+class ReviewScenarioDisposition(BaseModel):
+    """Evidence-backed outcome for one material behavior scenario in a review."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scenario: str = Field(min_length=1, max_length=500)
+    disposition: Literal["candidate", "refuted", "unverified", "not_applicable_to_diff"]
+    evidence_refs: tuple[EvidenceRefId, ...] = Field(min_length=1, max_length=8)
+    rationale: str = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_scenario(self) -> "ReviewScenarioDisposition":
+        if not self.scenario.strip():
+            raise ValueError("scenario must not be blank")
+        if not self.rationale.strip():
+            raise ValueError("scenario rationale must not be blank")
+        if len(set(self.evidence_refs)) != len(self.evidence_refs):
+            raise ValueError("scenario evidence refs must be unique")
+        return self
+
+
 class ProfileReviewReport(BaseModel):
     """Structured host-reported result for one completed specialist profile."""
 
@@ -1332,6 +1354,13 @@ class ProfileReviewReport(BaseModel):
     )
     coverage_gaps: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
     unverified: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
+    scenario_coverage: tuple[ReviewScenarioDisposition, ...] = Field(
+        default=(),
+        max_length=MAX_REVIEW_SCENARIOS,
+        description=(
+            "Evidence-backed dispositions for the material behavior scenarios this profile checked."
+        ),
+    )
     evidence_map: tuple[ReviewEvidenceMapEntry, ...] = Field(default=(), max_length=500)
     execution_metrics: ProfileExecutionMetrics | None = Field(
         default=None,
@@ -1360,6 +1389,11 @@ class ProfileReviewReport(BaseModel):
             raise ValueError("reviewed_changed_paths must be unique")
         if tuple(sorted(set(self.reviewed_diff_hunk_indexes))) != self.reviewed_diff_hunk_indexes:
             raise ValueError("reviewed_diff_hunk_indexes must be unique and sorted")
+        scenario_keys = {
+            " ".join(item.scenario.split()).casefold() for item in self.scenario_coverage
+        }
+        if len(scenario_keys) != len(self.scenario_coverage):
+            raise ValueError("scenario coverage scenarios must be unique")
         if len(self.model_dump_json().encode("utf-8")) > _MAX_PROFILE_REVIEW_REPORT_BYTES:
             raise ValueError("profile report exceeds the maximum serialized size")
         return self
@@ -1468,6 +1502,14 @@ class FinalReviewReport(BaseModel):
     coverage_gaps: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
     unverified: tuple[ReviewNote, ...] = Field(default=(), max_length=100)
     criterion_coverage: tuple[ReviewCriterionCoverage, ...] = Field(default=(), max_length=100)
+    scenario_coverage: tuple[ReviewScenarioDisposition, ...] = Field(
+        default=(),
+        max_length=MAX_REVIEW_SCENARIOS,
+        description=(
+            "Final evidence-backed dispositions for material behavior scenarios raised or checked "
+            "by specialist profiles."
+        ),
+    )
     verification_records: tuple[ReviewVerificationRecord, ...] = Field(
         default=(), max_length=250,
         description="Host-supplied test, CI and runtime checks bound to the reviewed head SHA.",
@@ -1514,6 +1556,11 @@ class FinalReviewReport(BaseModel):
             self.criterion_coverage
         ):
             raise ValueError("criterion coverage refs must be unique")
+        scenario_keys = {
+            " ".join(item.scenario.split()).casefold() for item in self.scenario_coverage
+        }
+        if len(scenario_keys) != len(self.scenario_coverage):
+            raise ValueError("scenario coverage scenarios must be unique")
         if len({item.verification_id for item in self.verification_records}) != len(
             self.verification_records
         ):

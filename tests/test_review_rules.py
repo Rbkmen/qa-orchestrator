@@ -85,7 +85,11 @@ async def test_host_passes_rules_and_binds_report_digest(tmp_path, bound_review_
 
     async def execute(job):
         assert job.review_rules is not None
-        return ProfileReviewReport(profile=job.profile, scope="Source inspected")
+        return ProfileReviewReport(
+            profile=job.profile,
+            scope="Source inspected",
+            reviewed_changed_paths=job.session.review_context.changed_files,
+        )
 
     result = await HostReviewAdapter(service).run_primary_review(
         run.run_id, execute, lambda _: DeepReviewSignals()

@@ -410,7 +410,8 @@ Statuses are `refuted`, `not_refuted`, or `unverified`. They are host assessment
 not proof of an independent agent run. Confirmation/duplicate linkage requires
 `not_refuted`; that status alone never confirms a defect. The existing source,
 impact, lineage and decision checks still apply. If evidence is unavailable,
-retain `unverified` and explain the gap. No obligatory second model pass is added.
+retain `unverified` and explain the gap. No additional refutation-specific model
+pass is added.
 
 The check hashes the complete review context and exact profile-local candidate.
 Changed refs, revisions, rules, packet, coordinates or condition text invalidate
@@ -488,3 +489,20 @@ This reuses the existing final omission-audit call, so it adds no profile,
 execution group, provider, or scheduled job. It is still a model-reported
 validation: the host and orchestrator do not independently prove the semantic
 disposition or that the requested reasoning took place.
+
+## 14. Preserve and audit material behavior scenarios
+
+Profile and final reports now include a bounded `scenario_coverage` matrix. Each
+row records concise scenario text, one disposition (`candidate`, `refuted`,
+`unverified`, or `not_applicable_to_diff`), bound evidence refs, and rationale.
+Unknown refs and duplicate scenario rows are rejected. Finalization carries any
+scenario omitted from synthesis forward as `unverified`, or exposes it as a
+coverage gap when the matrix is full.
+
+Bundles already place `OMISSION_AUDITOR` after specialist profiles. Its prompt
+now gives it a bounded queue of candidate/unverified scenarios, prior
+unverified notes, and coverage gaps, then requires it to preserve exact scenario
+text while checking the bound packet. A single-profile route adds one auditor
+pass only when unresolved items exist and waits to assess risk until that pass
+finishes. This improves traceability and makes omissions visible; it does not
+prove model reasoning or guarantee that the queue is semantically complete.

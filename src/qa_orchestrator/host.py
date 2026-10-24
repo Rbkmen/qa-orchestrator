@@ -34,6 +34,7 @@ from qa_orchestrator.orchestration import (
     OrchestrationStep,
     QaOrchestrationSession,
 )
+from qa_orchestrator.review_profiles import needs_targeted_omission_audit
 from qa_orchestrator.review_rules import ReviewRuleset
 from qa_orchestrator.service import OrchestratorService
 
@@ -323,8 +324,14 @@ class HostReviewAdapter:
                     is_last = len(session.completed_profiles) + len(remaining) == len(
                         session.review_profiles
                     )
+                    reports_for_assessment = tuple(session.profile_reports) + unsaved
+                    needs_omission_audit = is_last and needs_targeted_omission_audit(
+                        reports_for_assessment, session.review_profiles
+                    )
                     signals = (
-                        assess_risk(tuple(session.profile_reports) + unsaved) if is_last else None
+                        assess_risk(reports_for_assessment)
+                        if is_last and not needs_omission_audit
+                        else None
                     )
                     session = self._submit_transition(
                         AdvanceQaOrchestrationRequest(
@@ -339,6 +346,12 @@ class HostReviewAdapter:
                         )
                     )
                     unsaved = ()
+                    if (
+                        session.current_step is OrchestrationStep.PRIMARY_REVIEW
+                        and session.current_profile is not None
+                        and all(session.current_profile not in existing for existing in groups)
+                    ):
+                        groups.append([session.current_profile])
         except TimeoutError:
             failures = (HostProfileFailure(None, "run_timeout"),)
         except asyncio.CancelledError as exc:
