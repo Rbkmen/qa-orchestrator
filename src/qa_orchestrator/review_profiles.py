@@ -245,9 +245,36 @@ REVIEW_PROFILES: Mapping[ReviewAgent, ReviewProfileDefinition] = MappingProxyTyp
                 "failure modes, boundary conditions, state transitions, error/retry behavior, "
                 "and downstream side effects that the earlier reports may have missed. Return "
                 "only concrete, evidence-backed findings absent from prior reports. Do not repeat "
-                "existing candidates; report unresolved scenarios as coverage gaps or unverified."
+                "existing candidates; report unresolved scenarios as coverage gaps or unverified. "
+                "Before searching for omissions, validate every finding candidate from prior "
+                "implementation-review reports. Add a Prior Finding Validation table with one row "
+                "per source-profile/candidate-ID pair and exactly one disposition: supported, "
+                "refuted, or unverified. Include the source profile to disambiguate IDs. "
+                "Independently reconstruct the reachable trigger, relevant input/state, consequence, "
+                "and caller or consumer path from bound evidence; check compensating controls and "
+                "counterevidence. Cite bound evidence refs and give a concise rationale. A refuted "
+                "candidate needs specific counterevidence that defeats its claimed path. If required "
+                "source, contract, or runtime evidence is unavailable, mark unverified and name the "
+                "gap. These dispositions annotate prior candidates only: do not promote, remove, "
+                "rewrite, or duplicate them; the host retains the final decision. If the report "
+                "budget prevents exhaustive validation, list each unreviewed pair as a coverage gap "
+                "and do not claim the validation is complete. Then independently audit for omissions. "
+                "For behaviorally relevant removals, renames, or deleted branches, include a "
+                "Removed Behavior Audit table with prior behavior, callers and consumers, "
+                "replacement path or none, and evidence refs/tests. Use bound base-source evidence "
+                "when available and trace surviving consumers at head. State when the old path or "
+                "replacement cannot be verified. A missing replacement is a coverage gap unless "
+                "evidence proves a concrete contract or behavior failure; report that as a finding "
+                "candidate. State None when no behaviorally relevant code was removed."
             ),
-            required_sections=("Scope", "Finding Candidates", "Coverage Gaps", "Unverified"),
+            required_sections=(
+                "Scope",
+                "Finding Candidates",
+                "Prior Finding Validation",
+                "Removed Behavior Audit",
+                "Coverage Gaps",
+                "Unverified",
+            ),
             escalation_signals=(
                 "A changed behavior path has no concrete evidence-backed scenario in prior reports.",
                 "Prior reviews rely on the same unverified contract or omit a relevant boundary.",

@@ -81,6 +81,110 @@ index 0000000..1111111 100644
 """
     assert evidence_module._added_diff_relationship_terms(e2e_diff, {"Locale"}) == ()
 
+    removed_test_diff = (
+        b"diff --git a/tests-e2e/api/download.test.ts b/tests-e2e/api/download.test.ts\n"
+        b"--- a/tests-e2e/api/download.test.ts\n"
+        b"+++ b/tests-e2e/api/download.test.ts\n"
+        b"@@ -20,1 +20,0 @@\n"
+        b"-    const removed_audit_row_id = parseAuditRecord(payload);\n"
+    )
+    assert evidence_module._removed_diff_relationship_terms(removed_test_diff, set()) == ()
+
+
+def test_discovery_uses_removed_diff_anchors_to_find_remaining_consumers(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), *args])
+
+    git("init", "--quiet")
+    changed_path = "src/worker/handle_webhook.py"
+    files = {
+        changed_path: (
+            "def handle_webhook(payload):\n"
+            "    audit_row_id = parseAuditRecord(payload)\n"
+            "    stored_id = persistAuditRow(audit_row_id)\n"
+            "    return fetchAuditDetail(stored_id)\n"
+            + "".join(
+                f"    removed_field_{index:03d} = findRemovedField{index:03d}()\n"
+                for index in range(150)
+            )
+            + f"    {'removed_' + 'x' * 300} = parseLargeField(payload)\n"
+        ),
+        "src/commands/dispatch.py": (
+            "def dispatch(payload):\n    return parseAuditRecord(payload)\n"
+        ),
+        "src/storage/row_store.py": (
+            "def persist(value):\n    return persistAuditRow(value)\n"
+        ),
+        "ui/screens/detail_fetch.py": (
+            "def load_detail(row_id):\n    return fetchAuditDetail(row_id)\n"
+        ),
+    }
+    for path, content in files.items():
+        target = repository / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").decode().strip()
+
+    changed_file = repository / changed_path
+    changed_file.write_text("def handle_webhook(payload):\n    return None\n", encoding="utf-8")
+    git("add", changed_path)
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "head")
+    head = git("rev-parse", "HEAD").decode().strip()
+    diff = git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head, "--")
+    context = ReviewContext(
+        repository="github.com/example/repo",
+        base_sha=base,
+        head_sha=head,
+        diff_sha256=hashlib.sha256(diff).hexdigest(),
+        evidence_packet_sha256=hashlib.sha256(b"packet").hexdigest(),
+        changed_files=(changed_path,),
+        evidence_refs=("D1",),
+    )
+
+    manifest = discover_neighbor_evidence(
+        context,
+        repository,
+        max_candidates=50,
+        use_codegraph=False,
+    )
+
+    by_path = {item["path"]: item for item in manifest["candidate_records"]}
+    assert set(manifest.get("removed_diff_anchor_terms", ())) >= {
+        "audit_row_id",
+        "parseAuditRecord",
+        "persistAuditRow",
+        "fetchAuditDetail",
+    }
+    assert set(manifest["removed_diff_anchor_terms"]) <= set(
+        manifest["changed_diff_anchor_terms"]
+    )
+    assert len(manifest["removed_diff_anchor_terms"]) <= evidence_module._DISCOVERY_MAX_SYMBOLS
+    assert manifest.get("removed_diff_anchor_terms_omitted", 0) > 0
+    removed_term_omission = next(
+        omission
+        for omission in manifest["omissions"]
+        if omission["kind"] == "removed_diff_anchor_term_limit"
+    )
+    assert removed_term_omission["count"] == manifest["removed_diff_anchor_terms_omitted"]
+    assert removed_term_omission["limit"] == evidence_module._DISCOVERY_MAX_SYMBOLS
+    assert manifest["diff_anchor_term_max_bytes"] == 256
+    assert all(
+        len(term.encode("utf-8")) <= manifest["diff_anchor_term_max_bytes"]
+        for term in manifest["removed_diff_anchor_terms"]
+    )
+    bound_context = bind_neighbor_discovery(context, manifest)
+    assert bound_context.neighbor_discovery_omissions_sha256 is not None
+    assert {
+        "src/commands/dispatch.py",
+        "src/storage/row_store.py",
+        "ui/screens/detail_fetch.py",
+    } <= set(by_path)
+
 
 def test_neighbor_categories_recognize_qualified_test_directories():
     assert _neighbor_categories("tests-e2e/consumer/helpers/download.ts") == ("test",)

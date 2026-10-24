@@ -33,6 +33,7 @@ _DISCOVERY_MAX_SOURCE_BYTES = 4_000_000
 _DISCOVERY_MAX_TOTAL_BYTES = 64_000_000
 _DISCOVERY_MAX_CANDIDATES = 200
 _DISCOVERY_MAX_DIFF_HUNKS = 500
+_DISCOVERY_MAX_DIFF_ANCHOR_TERM_BYTES = 256
 _DISCOVERY_MAX_CANDIDATE_SCAN_PATHS = 200
 _DISCOVERY_MAX_SYMBOL_SEARCH_PATHS = 32
 _DISCOVERY_MAX_SYMBOL_SEARCH_BYTES = 16_000_000
@@ -449,14 +450,18 @@ def _diff_hunk_inventory(context: ReviewContext, diff: bytes) -> dict[str, objec
     }
 
 
-def _added_diff_relationship_terms(
-    diff: bytes, referenced_symbols: set[str]
-) -> tuple[str, ...]:
-    """Return changed calls, type references, and domain fields as search anchors."""
+def _diff_relationship_terms(
+    diff: bytes,
+    referenced_symbols: set[str],
+    *,
+    change_marker: str,
+    path_marker: str,
+) -> tuple[tuple[str, ...], int]:
+    """Extract bounded call, type, and domain-field anchors and count omitted terms."""
     try:
         lines = diff.decode("utf-8").splitlines()
     except UnicodeDecodeError:
-        return ()
+        return (), 0
     action_terms = []
     semantic_terms = []
     semantic_term_set = set()
@@ -464,19 +469,15 @@ def _added_diff_relationship_terms(
     changed_path_is_test = False
 
     def add_semantic_term(name: str) -> None:
-        if (
-            name not in _IGNORED_IDENTIFIERS
-            and name not in semantic_term_set
-            and len(semantic_terms) < _DISCOVERY_MAX_SYMBOLS
-        ):
+        if name not in _IGNORED_IDENTIFIERS and name not in semantic_term_set:
             semantic_term_set.add(name)
             semantic_terms.append(name)
 
     for line in lines:
-        if line.startswith("+++ b/"):
-            changed_path_is_test = bool(_TEST_PATH.search(line[6:]))
+        if line.startswith(path_marker):
+            changed_path_is_test = bool(_TEST_PATH.search(line[len(path_marker) :]))
             continue
-        if not line.startswith("+") or line.startswith("+++"):
+        if not line.startswith(change_marker) or line.startswith(change_marker * 3):
             continue
         if changed_path_is_test:
             continue
@@ -511,7 +512,61 @@ def _added_diff_relationship_terms(
             if name not in referenced_symbols and not mixed_case:
                 continue
             call_terms.append(name)
-    return tuple(dict.fromkeys((*action_terms, *semantic_terms, *call_terms)))
+    ordered_terms = tuple(dict.fromkeys((*action_terms, *semantic_terms, *call_terms)))
+    eligible_terms = tuple(
+        term
+        for term in ordered_terms
+        if len(term.encode("utf-8")) <= _DISCOVERY_MAX_DIFF_ANCHOR_TERM_BYTES
+    )
+    eligible_term_set = set(eligible_terms)
+    if len(eligible_terms) <= _DISCOVERY_MAX_SYMBOLS:
+        return eligible_terms, len(ordered_terms) - len(eligible_terms)
+
+    action_terms = tuple(
+        term for term in dict.fromkeys(action_terms) if term in eligible_term_set
+    )
+    semantic_terms = tuple(
+        term for term in dict.fromkeys(semantic_terms) if term in eligible_term_set
+    )
+    call_terms = tuple(term for term in dict.fromkeys(call_terms) if term in eligible_term_set)
+    selected = list(action_terms[:_DISCOVERY_MAX_SYMBOLS])
+    remaining = _DISCOVERY_MAX_SYMBOLS - len(selected)
+    call_quota = min(len(call_terms), remaining // 2)
+    semantic_quota = min(len(semantic_terms), remaining - call_quota)
+    selected.extend(call_terms[:call_quota])
+    selected.extend(semantic_terms[:semantic_quota])
+    selected_set = set(selected)
+    for term in (*semantic_terms[semantic_quota:], *call_terms[call_quota:]):
+        if len(selected) >= _DISCOVERY_MAX_SYMBOLS:
+            break
+        if term not in selected_set:
+            selected.append(term)
+            selected_set.add(term)
+    return tuple(selected), len(ordered_terms) - len(selected)
+
+
+def _added_diff_relationship_terms(
+    diff: bytes, referenced_symbols: set[str]
+) -> tuple[str, ...]:
+    """Return changed calls, type references, and domain fields as search anchors."""
+    return _diff_relationship_terms(
+        diff,
+        referenced_symbols,
+        change_marker="+",
+        path_marker="+++ b/",
+    )[0]
+
+
+def _removed_diff_relationship_terms(
+    diff: bytes, referenced_symbols: set[str]
+) -> tuple[str, ...]:
+    """Return removed calls, type references, and domain fields as search anchors."""
+    return _diff_relationship_terms(
+        diff,
+        referenced_symbols,
+        change_marker="-",
+        path_marker="--- a/",
+    )[0]
 
 
 def _candidate_route_terms(source: bytes) -> tuple[str, ...]:
@@ -2478,9 +2533,19 @@ def discover_neighbor_evidence(
             name = PurePosixPath(path).parent.name
         if _IDENTIFIER.fullmatch(name) and name.lower() not in _IGNORED_IDENTIFIERS:
             module_names.append(name)
-    changed_diff_terms = _added_diff_relationship_terms(
-        pinned_diff, set(ordered_referenced_symbols)
+    added_diff_terms, added_diff_terms_omitted = _diff_relationship_terms(
+        pinned_diff,
+        set(ordered_referenced_symbols),
+        change_marker="+",
+        path_marker="+++ b/",
     )
+    removed_diff_terms, removed_diff_terms_omitted = _diff_relationship_terms(
+        pinned_diff,
+        set(ordered_referenced_symbols),
+        change_marker="-",
+        path_marker="--- a/",
+    )
+    changed_diff_terms = tuple(dict.fromkeys((*added_diff_terms, *removed_diff_terms)))
     all_module_search_terms = tuple(
         dict.fromkeys(
             (
@@ -3558,6 +3623,8 @@ def discover_neighbor_evidence(
         "test_workflow_scan_limit": "Only a bounded number and byte size of likely CI workflow files are inspected for test commands.",
         "candidate_source_size_limit": "A candidate source exceeded a per-file or total-source byte cap.",
         "module_search_term_limit": "Only the configured number of module-name and symbol terms are searched.",
+        "added_diff_anchor_term_limit": "Only a bounded number of distinct added-side identifiers within the per-term byte limit are searched.",
+        "removed_diff_anchor_term_limit": "Only a bounded number of distinct removed-side identifiers within the per-term byte limit are searched.",
         "relationship_expansion_frontier_limit": "Only the highest-ranked candidate sources are expanded at each bounded depth.",
         "relationship_expansion_term_limit": "Only the configured number of route and symbol anchors are searched per expansion round.",
         "relationship_expansion_source_size_limit": "Candidate sources exceeded a per-file or total-source byte cap before relationship expansion.",
@@ -3643,6 +3710,18 @@ def discover_neighbor_evidence(
         len(all_module_search_terms) - len(module_search_terms),
         list(all_module_search_terms[len(module_search_terms) :]),
         _DISCOVERY_MAX_MODULE_SEARCH_TERMS,
+    )
+    add_omission(
+        "added_diff_anchor_term_limit",
+        added_diff_terms_omitted,
+        [],
+        _DISCOVERY_MAX_SYMBOLS,
+    )
+    add_omission(
+        "removed_diff_anchor_term_limit",
+        removed_diff_terms_omitted,
+        [],
+        _DISCOVERY_MAX_SYMBOLS,
     )
     add_omission(
         "relationship_expansion_frontier_limit",
@@ -3846,6 +3925,11 @@ def discover_neighbor_evidence(
         "referenced_symbols": list(ordered_referenced_symbols),
         "referenced_module_paths": sorted(referenced_module_paths),
         "searched_symbols": list(ordered_symbols),
+        "added_diff_anchor_terms": list(added_diff_terms),
+        "added_diff_anchor_terms_omitted": added_diff_terms_omitted,
+        "removed_diff_anchor_terms": list(removed_diff_terms),
+        "removed_diff_anchor_terms_omitted": removed_diff_terms_omitted,
+        "diff_anchor_term_max_bytes": _DISCOVERY_MAX_DIFF_ANCHOR_TERM_BYTES,
         "changed_diff_anchor_terms": list(changed_diff_terms),
         "changed_anchor_search_paths": len(direct_anchor_search_paths),
         "changed_anchor_search_bytes": direct_anchor_search_bytes,

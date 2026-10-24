@@ -300,10 +300,28 @@ def test_scoring_uses_explicit_verdicts_and_counts_duplicate_noise(benchmark_inp
         BenchmarkDataset.model_validate(dataset), BenchmarkResults.model_validate(results)
     )
     run = score["runs"][0]
+    assert score["schema_version"] == 3
     assert run["precision"] == 1 / 3
     assert run["recall"] == 0.5
     assert run["matched_gold"] == 1
     assert run["missed_high_impact"] == 0
+    assert run["gold_complete"] is True
+    assert run["missed_gold"] == [
+        {
+            "gold_id": "G-2",
+            "severity": "medium",
+            "category": "security",
+            "path": "src/api.py",
+            "start_line": 2,
+            "end_line": 2,
+            "scope": "exacerbated-by-pr",
+            "difficulty": "hard",
+            "context_required": "broader-project-context",
+            "diagnosis": "unclassified",
+            "diagnosis_rationale": None,
+            "evidence_refs": [],
+        }
+    ]
     assert run["confidence"]["high"]["valid"] == 1
     assert run["confidence"]["medium"]["valid"] == 0
     assert score["configurations"]["baseline"]["input_tokens"] is None
@@ -317,6 +335,138 @@ def test_scoring_uses_explicit_verdicts_and_counts_duplicate_noise(benchmark_inp
     assert strata["difficulty"]["easy"]["recall"] == 1.0
     assert strata["context_required"]["broader-project-context"]["recall"] == 0.0
     assert score["configurations"]["baseline"]["p95_elapsed_ms"] == 500
+
+
+def test_manual_missed_gold_diagnosis_is_post_run_and_does_not_change_metrics(benchmark_inputs):
+    dataset_data, results_data = deepcopy(benchmark_inputs)
+    results_data["schema_version"] = 4
+    results_data["runs"][0]["queue_wait_ms"] = 75
+    results_data["schedule"] = {
+        "schedule_id": "schedule-1",
+        "strategy": "interleaved",
+        "run_order": ["run-1"],
+    }
+    results_data["runs"][0]["missed_gold_diagnoses"] = [
+        {
+            "gold_id": "G-2",
+            "cause": "neighbor_trace_gap",
+            "rationale": "E7 was present in the packet, but the report did not trace it to the detail fetch.",
+            "evidence_refs": ["E7"],
+        }
+    ]
+    dataset = BenchmarkDataset.model_validate(dataset_data)
+    results = BenchmarkResults.model_validate(results_data)
+
+    baseline = score_benchmark(
+        dataset,
+        BenchmarkResults.model_validate(benchmark_inputs[1]),
+    )
+    diagnosed = score_benchmark(dataset, results)
+
+    assert diagnosed["runs"][0]["missed_gold"][0]["diagnosis"] == "neighbor_trace_gap"
+    assert "detail fetch" in diagnosed["runs"][0]["missed_gold"][0]["diagnosis_rationale"]
+    assert diagnosed["runs"][0]["missed_gold"][0]["evidence_refs"] == ["E7"]
+    assert diagnosed["runs"][0]["precision"] == baseline["runs"][0]["precision"]
+    assert diagnosed["runs"][0]["recall"] == baseline["runs"][0]["recall"]
+
+
+@pytest.mark.parametrize("gold_id", ("G-1", "G-404"))
+def test_score_rejects_diagnoses_for_matched_or_unknown_gold(gold_id, benchmark_inputs):
+    dataset_data, results_data = deepcopy(benchmark_inputs)
+    results_data["schema_version"] = 4
+    results_data["runs"][0]["missed_gold_diagnoses"] = [
+        {
+            "gold_id": gold_id,
+            "cause": "review_analysis_gap",
+            "rationale": "The manually reviewed source path is recorded as E7.",
+            "evidence_refs": ["E7"],
+        }
+    ]
+
+    with pytest.raises(ValueError, match="known unmatched gold finding"):
+        score_benchmark(
+            BenchmarkDataset.model_validate(dataset_data),
+            BenchmarkResults.model_validate(results_data),
+        )
+
+
+def test_incomplete_gold_cannot_receive_a_miss_diagnosis_but_still_marks_recall_unknown(
+    benchmark_inputs,
+):
+    dataset_data, results_data = deepcopy(benchmark_inputs)
+    dataset_data["cases"][0]["gold_complete"] = False
+    dataset = BenchmarkDataset.model_validate(dataset_data)
+    result = score_benchmark(dataset, BenchmarkResults.model_validate(results_data))
+    assert result["runs"][0]["gold_complete"] is False
+    assert result["runs"][0]["recall"] is None
+    assert result["runs"][0]["missed_gold"][0]["diagnosis"] == "unclassified"
+
+    results_data["schema_version"] = 4
+    results_data["runs"][0]["missed_gold_diagnoses"] = [
+        {
+            "gold_id": "G-2",
+            "cause": "evidence_packet_gap",
+            "rationale": "The required related source was not in the pinned packet.",
+        }
+    ]
+    with pytest.raises(ValueError, match="complete gold set"):
+        score_benchmark(dataset, BenchmarkResults.model_validate(results_data))
+
+
+def test_missed_gold_diagnoses_require_results_schema_four(benchmark_inputs):
+    _, results_data = deepcopy(benchmark_inputs)
+    results_data["runs"][0]["missed_gold_diagnoses"] = [
+        {
+            "gold_id": "G-2",
+            "cause": "evidence_packet_gap",
+            "rationale": "The required related source was not in the pinned packet.",
+        }
+    ]
+
+    with pytest.raises(ValidationError, match="schema version 4"):
+        BenchmarkResults.model_validate(results_data)
+
+
+def test_schema_four_keeps_schedule_and_failed_attempt_metadata(benchmark_inputs):
+    dataset_data, results_data = deepcopy(benchmark_inputs)
+    results_data["schema_version"] = 4
+    run = results_data["runs"][0]
+    run["attempt"] = 1
+    run["queue_wait_ms"] = 75
+    run["missed_gold_diagnoses"] = [
+        {
+            "gold_id": "G-2",
+            "cause": "uncertain",
+            "rationale": "The packet does not establish which reviewer step lost the finding.",
+        }
+    ]
+    results_data["failures"] = [
+        {
+            "case_id": run["case_id"],
+            "configuration_id": run["configuration_id"],
+            "model": run["model"],
+            "reasoning": run["reasoning"],
+            "checklist_sha256": run["checklist_sha256"],
+            "host_instructions_sha256": run["host_instructions_sha256"],
+            "attempt": 2,
+            "failure_code": "provider_failed",
+            "error_type": "RuntimeError",
+        }
+    ]
+    results_data["schedule"] = {
+        "schedule_id": "schedule-1",
+        "strategy": "interleaved",
+        "run_order": [run["run_id"]],
+    }
+
+    score = score_benchmark(
+        BenchmarkDataset.model_validate(dataset_data),
+        BenchmarkResults.model_validate(results_data),
+    )
+
+    assert score["schema_version"] == 4
+    assert score["configurations"]["baseline"]["failed_attempts"] == 1
+    assert score["runs"][0]["missed_gold"][0]["diagnosis"] == "uncertain"
 
 
 def test_quality_gate_checks_low_recall_strata_and_p95_latency(benchmark_inputs):
@@ -893,6 +1043,7 @@ def test_legacy_results_wire_format_omits_task_context_hash(benchmark_inputs):
     serialized = BenchmarkResults.model_validate(payload).model_dump(mode="json")
 
     assert "task_context_sha256" not in serialized["runs"][0]
+    assert "missed_gold_diagnoses" not in serialized["runs"][0]
 
 
 def test_benchmark_schedule_requires_unique_complete_run_order(benchmark_inputs):

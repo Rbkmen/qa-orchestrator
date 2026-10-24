@@ -334,6 +334,13 @@ are heuristics, not verified integration edges. The `omissions` array gives a
 reason, count, limit, and up to 20 example paths or symbols for each active bound;
 CodeGraph query truncation is also reported separately.
 
+Added and removed diff lines both seed relationship search, so consumers of a
+removed identifier can still be suggested even when their paths do not share
+the changed file's names. Added and removed anchors are reported separately;
+each side is capped at 128 distinct terms of at most 256 UTF-8 bytes, and any
+truncation appears in `omissions` with its count and limit. These bounded text
+matches remain suggestions and do not establish a semantic caller edge.
+
 The manifest reports these limits and scanned-file counts; `changed_source_symbol_collection_truncated` and
 `changed_sources_skipped_symbol_scan` distinguish symbol-budget truncation from the
 continued changed-test and direct-import scans. A missing match does not prove that a
@@ -437,3 +444,47 @@ Speed comparisons require exact attempt numbers per case and configuration and
 report attempt-paired latency. The host must interleave or randomize baseline
 and candidate order to limit drift and provider-load bias; comparison artifacts
 cannot prove the schedule that produced their timestamps.
+
+## 12. Diagnose missed gold findings after a blind review
+
+`qa-orch benchmark score` reports each known unmatched gold ID with its severity,
+category, path and line range, scope, difficulty, required context, and whether
+the gold set is complete. An omitted diagnosis is shown as `unclassified`; the
+scorer does not infer why the reviewer missed it. For an incomplete gold set,
+the listed unmatched IDs are only known omissions and recall remains unknown.
+
+After the blind review and candidate adjudication are complete, a human may add
+`missed_gold_diagnoses` to the corresponding benchmark run and set
+`BenchmarkResults.schema_version` to `4`. Use one cause per unmatched finding:
+
+- `evidence_packet_gap`: the pinned packet omitted required source or contract
+  context.
+- `neighbor_trace_gap`: relevant context was available, but the review did not
+  follow its caller, producer, consumer, or storage relationship.
+- `review_analysis_gap`: the needed evidence and relationship were visible, but
+  the review did not identify the defect.
+- `uncertain`: the available artifacts do not support a defensible cause.
+
+Each diagnosis needs a short rationale; cite packet evidence refs when they
+exist. The scorer rejects diagnoses for unknown or already matched gold IDs and
+for incomplete gold sets. Diagnoses are post-run annotations: they do not alter
+precision or recall and must never be passed into the blind review input. Score
+reports use schema `3` (or `4` when failed attempts are included).
+
+## 13. Validate prior findings in the existing omission audit
+
+The final `OMISSION_AUDITOR` now emits a `Prior Finding Validation` row for each
+source-profile/candidate-ID pair from earlier implementation-review profiles.
+Each row records the pair, `supported` / `refuted` / `unverified` disposition,
+bound evidence refs, and rationale. The auditor must independently trace the
+reachable trigger and consequence, check callers or consumers and compensating
+controls, and cite counterevidence when refuting a candidate. Missing required
+evidence remains `unverified`. If the report budget prevents exhaustive
+validation, each unreviewed pair must be listed as a coverage gap. Dispositions
+annotate candidates; they do not accept, remove, rewrite, or change the host's
+final decision.
+
+This reuses the existing final omission-audit call, so it adds no profile,
+execution group, provider, or scheduled job. It is still a model-reported
+validation: the host and orchestrator do not independently prove the semantic
+disposition or that the requested reasoning took place.

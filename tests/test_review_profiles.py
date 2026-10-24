@@ -63,6 +63,8 @@ def test_every_review_profile_returns_read_only_route(tmp_path):
         ReviewAgent.OMISSION_AUDITOR: [
             "Scope",
             "Finding Candidates",
+            "Prior Finding Validation",
+            "Removed Behavior Audit",
             "Coverage Gaps",
             "Unverified",
         ],
@@ -249,6 +251,19 @@ def test_omission_auditor_challenges_prior_reports_without_repeating_them(tmp_pa
     assert "may have missed" in focus
     assert "do not repeat existing candidates" in focus
     assert "evidence-backed findings" in focus
+    assert "behaviorally relevant removals" in focus
+    assert "callers and consumers" in focus
+    assert "replacement path or none" in focus
+    assert "missing replacement is a coverage gap" in focus
+    assert "Prior Finding Validation" in review_profiles.REVIEW_PROFILES[
+        ReviewAgent.OMISSION_AUDITOR
+    ].required_sections
+    assert "supported, refuted, or unverified" in focus
+    assert "counterevidence" in focus
+    assert "candidate-id" in focus
+    assert "source-profile/candidate-id pair" in focus
+    assert "budget prevents exhaustive validation" in focus
+    assert "unreviewed pair as a coverage gap" in focus
 
 
 def test_review_profiles_expose_the_approved_display_names(tmp_path):

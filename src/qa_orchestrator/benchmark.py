@@ -22,7 +22,12 @@ from pydantic import (
     model_validator,
 )
 
-from qa_orchestrator.contracts import GitObjectId, ReviewFindingCandidate, Sha256Digest
+from qa_orchestrator.contracts import (
+    EvidenceRefId,
+    GitObjectId,
+    ReviewFindingCandidate,
+    Sha256Digest,
+)
 from qa_orchestrator.failure_diagnostics import sanitize_failure_detail
 
 
@@ -201,6 +206,36 @@ class CandidateAdjudication(BaseModel):
         return self
 
 
+class MissedGoldDiagnosis(BaseModel):
+    """Explicit post-run human analysis of why one complete-gold finding was missed."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    gold_id: str = Field(min_length=1, max_length=128)
+    cause: Literal[
+        "evidence_packet_gap",
+        "neighbor_trace_gap",
+        "review_analysis_gap",
+        "uncertain",
+    ]
+    rationale: str = Field(min_length=1, max_length=5000)
+    evidence_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=32)
+
+    @field_validator("rationale")
+    @classmethod
+    def nonblank_rationale(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("missed gold diagnosis rationale must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def unique_evidence_refs(self) -> "MissedGoldDiagnosis":
+        if len(set(self.evidence_refs)) != len(self.evidence_refs):
+            raise ValueError("missed gold diagnosis evidence refs must be unique")
+        return self
+
+
 class BenchmarkRun(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -225,6 +260,7 @@ class BenchmarkRun(BaseModel):
     candidates: tuple[ReviewFindingCandidate, ...] = Field(default=(), max_length=1000)
     adjudicator: str = Field(min_length=1, max_length=256)
     adjudications: tuple[CandidateAdjudication, ...] = Field(default=(), max_length=1000)
+    missed_gold_diagnoses: tuple[MissedGoldDiagnosis, ...] = Field(default=(), max_length=1000)
 
     @model_serializer(mode="wrap")
     def serialize_optional_task_context(self, handler):
@@ -235,6 +271,8 @@ class BenchmarkRun(BaseModel):
             payload.pop("queue_wait_ms", None)
         if self.attempt is None:
             payload.pop("attempt", None)
+        if not self.missed_gold_diagnoses:
+            payload.pop("missed_gold_diagnoses", None)
         return payload
 
     @field_validator(
@@ -267,6 +305,9 @@ class BenchmarkRun(BaseModel):
         ]
         if len(set(matched)) != len(matched):
             raise ValueError("a gold finding can be matched only once per run")
+        diagnosed_gold_ids = [item.gold_id for item in self.missed_gold_diagnoses]
+        if len(set(diagnosed_gold_ids)) != len(diagnosed_gold_ids):
+            raise ValueError("a missed gold finding can have only one diagnosis per run")
         return self
 
 
@@ -339,7 +380,7 @@ class BenchmarkSchedule(BaseModel):
 class BenchmarkResults(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1, 2, 3] = 1
+    schema_version: Literal[1, 2, 3, 4] = 1
     runs: tuple[BenchmarkRun, ...] = Field(default=(), max_length=10000)
     failures: tuple[BenchmarkFailure, ...] = Field(default=(), max_length=10000)
     schedule: BenchmarkSchedule | None = None
@@ -355,8 +396,11 @@ class BenchmarkResults(BaseModel):
         has_schedule_metadata = self.schedule is not None or any(
             run.queue_wait_ms is not None for run in self.runs
         )
-        if has_schedule_metadata and self.schema_version != 3:
-            raise ValueError("schedule and queue metadata require schema version 3")
+        has_missed_gold_diagnoses = any(run.missed_gold_diagnoses for run in self.runs)
+        if has_missed_gold_diagnoses and self.schema_version != 4:
+            raise ValueError("missed gold diagnoses require schema version 4")
+        if has_schedule_metadata and self.schema_version not in {3, 4}:
+            raise ValueError("schedule and queue metadata require schema version 3 or 4")
         if self.schedule is not None:
             run_order = self.schedule.run_order
             run_ids = tuple(run.run_id for run in self.runs)
@@ -488,6 +532,36 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
         }
         if any(d.verdict == "duplicate" and d.gold_id not in matched for d in run.adjudications):
             raise ValueError("duplicate verdict requires a matched original finding")
+        missed_gold_diagnoses = {item.gold_id: item for item in run.missed_gold_diagnoses}
+        if any(
+            gold_id not in gold or gold_id in matched
+            for gold_id in missed_gold_diagnoses
+        ):
+            raise ValueError(
+                "missed gold diagnosis must reference a known unmatched gold finding"
+            )
+        if missed_gold_diagnoses and not case.gold_complete:
+            raise ValueError("missed gold diagnosis requires a complete gold set")
+        missed_gold = []
+        for gold_id in sorted(set(gold) - matched):
+            finding = gold[gold_id]
+            diagnosis = missed_gold_diagnoses.get(gold_id)
+            missed_gold.append(
+                {
+                    "gold_id": gold_id,
+                    "severity": finding.severity,
+                    "category": finding.category,
+                    "path": finding.path,
+                    "start_line": finding.start_line,
+                    "end_line": finding.end_line,
+                    "scope": finding.scope,
+                    "difficulty": finding.difficulty,
+                    "context_required": finding.context_required,
+                    "diagnosis": diagnosis.cause if diagnosis else "unclassified",
+                    "diagnosis_rationale": diagnosis.rationale if diagnosis else None,
+                    "evidence_refs": list(diagnosis.evidence_refs) if diagnosis else [],
+                }
+            )
         valid = sum(d.verdict in {"matched", "valid_unlisted"} for d in run.adjudications)
         unresolved = sum(d.verdict == "unverified" for d in run.adjudications)
         decisions = {d.candidate_id: d for d in run.adjudications}
@@ -512,6 +586,8 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
                 "valid": valid,
                 "matched_gold": len(matched),
                 "gold_count": len(gold),
+                "gold_complete": case.gold_complete,
+                "missed_gold": missed_gold,
                 "unverified": unresolved,
                 "precision": valid / len(run.candidates) if run.candidates else None,
                 "precision_is_lower_bound": bool(unresolved),
@@ -623,7 +699,7 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
                 failures_by_configuration[configuration]
             )
     payload = {
-        "schema_version": 2 if results.failures else 1,
+        "schema_version": 4 if results.failures else 3,
         "scoring": "local_explicit_adjudication",
         "dataset_kind": dataset.kind,
         "dataset_sha256": _benchmark_dataset_sha256(dataset),
