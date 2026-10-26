@@ -181,6 +181,13 @@ def test_recall_guidance_respects_profile_output_boundaries(tmp_path):
     assert "conditional boundary sweep" in canonical_rules
     assert "regex backtracking" in canonical_rules
     assert "pathname, query, hash, locale, and trailing slash independently" in canonical_rules
+    for rule in (
+        "same path does not close a different failure mechanism",
+        "linear whole-input scans can exhaust memory without an ingress limit",
+        "trace URL parsing through the real update trigger",
+        "helper output alone does not prove a navigation refresh",
+    ):
+        assert rule in canonical_rules
     assert "Evidence Investigator preserves unresolved execution-path links" in canonical_rules
     assert "Test Analyzer uses two passes for test-coverage recall" in canonical_rules
 
@@ -333,6 +340,13 @@ def test_omission_auditor_challenges_prior_reports_without_repeating_them(tmp_pa
     assert "unreviewed pair as a coverage gap" in focus
     assert "scenario_coverage" in focus
     assert "unverified scenario" in focus
+    for check in (
+        "same path does not close a different failure mechanism",
+        "linear whole-input scans can exhaust memory without an ingress limit",
+        "trace url parsing through the real update trigger",
+        "helper output alone does not prove a navigation refresh",
+    ):
+        assert check in focus
     assert "Scenario Disposition Audit" in review_profiles.REVIEW_PROFILES[
         ReviewAgent.OMISSION_AUDITOR
     ].required_sections

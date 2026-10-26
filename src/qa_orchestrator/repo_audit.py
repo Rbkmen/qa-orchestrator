@@ -622,10 +622,6 @@ def _skip_javascript_space(source: str, position: int) -> int:
     return position
 
 
-def _javascript_test_declarations(source: str) -> list[dict[str, int | str | None]]:
-    return _javascript_test_scan(source)[0]
-
-
 def _javascript_test_scan(
     source: str,
 ) -> tuple[list[dict[str, int | str | None]], bool]:
