@@ -22,18 +22,21 @@ from pydantic import (
 )
 
 MODEL_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
-GPT6_MODEL_CATALOG_SOURCE_URL = "https://developers.openai.com/api/docs/guides/latest-model"
-GPT6_MODEL_CATALOG_REVIEWED_ON = "2026-09-29"
-GPT6_MODEL_CATALOG_MAX_REVIEW_AGE_DAYS = 180
-ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
-REASONING_EFFORTS: tuple[ReasoningEffort, ...] = (
-    "none",
-    "minimal",
+CODEX_MODEL_CATALOG_SOURCE_URL = "https://learn.chatgpt.com/docs/models"
+CODEX_MODEL_CATALOG_REVIEWED_ON = "2026-10-26"
+CODEX_MODEL_CATALOG_MAX_REVIEW_AGE_DAYS = 180
+ReasoningEffort = Literal["none", "low", "medium", "high", "xhigh", "max", "ultra"]
+CODEX_REASONING_EFFORTS: tuple[ReasoningEffort, ...] = (
     "low",
     "medium",
     "high",
     "xhigh",
     "max",
+    "ultra",
+)
+REASONING_EFFORTS: tuple[ReasoningEffort, ...] = (
+    "none",
+    *CODEX_REASONING_EFFORTS,
 )
 
 
@@ -55,10 +58,7 @@ class ModelCatalogEntry:
     reasoning_options: tuple[ReasoningEffort, ...]
 
 
-_OPENAI_REASONING = ("none", "low", "medium", "high", "xhigh", "max")
-_OPENAI_NO_REASONING = ("none",)
-_OPENAI_NO_MAX_REASONING = ("none", "low", "medium", "high", "xhigh")
-_OPENAI_REASONING_LOW_REQUIRED = ("low", "medium", "high", "xhigh", "max")
+_CODEX_REASONING_NO_ULTRA = ("low", "medium", "high", "xhigh", "max")
 _ANTHROPIC_EFFORT = ("low", "medium", "high", "xhigh", "max")
 _ANTHROPIC_NO_XHIGH_EFFORT = ("low", "medium", "high", "max")
 _ANTHROPIC_NO_EFFORT = ("none",)
@@ -68,23 +68,24 @@ _ANTHROPIC_NO_EFFORT = ("none",)
 MODEL_CATALOGS: dict[ModelProvider, tuple[ModelCatalogEntry, ...]] = {
     ModelProvider.OPENAI: (
         ModelCatalogEntry(
-            "GPT-6 Astra — максимальное качество", "gpt-6-astra", _OPENAI_REASONING_LOW_REQUIRED
+            "GPT-6 Astra — максимальное качество", "gpt-6-astra", CODEX_REASONING_EFFORTS
         ),
         ModelCatalogEntry(
             "GPT-6.1 Sol — сложная разработка и рабочие задачи",
             "gpt-6.1-sol",
-            _OPENAI_REASONING_LOW_REQUIRED,
+            CODEX_REASONING_EFFORTS,
         ),
         ModelCatalogEntry(
-            "GPT-6 Sol — сложный код и агентные задачи", "gpt-6-sol", _OPENAI_REASONING
+            "GPT-6.1 Terra — быстрый вариант для визуальных задач и работы с приложениями",
+            "gpt-6.1-terra",
+            CODEX_REASONING_EFFORTS,
         ),
-        ModelCatalogEntry("GPT-6 Luna — быстрее и экономичнее", "gpt-6-luna", _OPENAI_REASONING),
-        ModelCatalogEntry("GPT-5.6 Sol", "gpt-5.6-sol", _OPENAI_REASONING),
         ModelCatalogEntry(
-            "GPT-5.6 Terra — баланс качества и цены", "gpt-5.6-terra", _OPENAI_REASONING
+            "GPT-6 Sol — сложный код и агентные задачи", "gpt-6-sol", CODEX_REASONING_EFFORTS
         ),
-        ModelCatalogEntry("GPT-5.6 Luna — экономичный вариант", "gpt-5.6-luna", _OPENAI_REASONING),
-        ModelCatalogEntry("GPT-4.1 — reasoning не поддерживается", "gpt-4.1", _OPENAI_NO_REASONING),
+        ModelCatalogEntry(
+            "GPT-6 Luna — быстрее и экономичнее", "gpt-6-luna", _CODEX_REASONING_NO_ULTRA
+        ),
     ),
     ModelProvider.ANTHROPIC: (
         ModelCatalogEntry(
@@ -105,8 +106,8 @@ MODEL_CATALOGS: dict[ModelProvider, tuple[ModelCatalogEntry, ...]] = {
     ),
 }
 
-# Keep capability information for IDs that may still exist in an older local
-# policy or can be entered manually, without advertising them in the menu.
+# Keep capability information for IDs that may still exist in an
+# older local policy or can be entered manually, without advertising them.
 _MODEL_REASONING_OPTIONS: dict[str, tuple[ReasoningEffort, ...]] = {
     entry.model_id: entry.reasoning_options
     for entries in MODEL_CATALOGS.values()
@@ -114,10 +115,9 @@ _MODEL_REASONING_OPTIONS: dict[str, tuple[ReasoningEffort, ...]] = {
 }
 _MODEL_REASONING_OPTIONS.update(
     {
-        "gpt-5.5": _OPENAI_NO_MAX_REASONING,
-        "gpt-5.4": _OPENAI_NO_MAX_REASONING,
-        "gpt-5.4-mini": _OPENAI_NO_MAX_REASONING,
-        "gpt-5.4-nano": _OPENAI_NO_MAX_REASONING,
+        "gpt-5.6-sol": CODEX_REASONING_EFFORTS,
+        "gpt-5.6-terra": CODEX_REASONING_EFFORTS,
+        "gpt-5.6-luna": _CODEX_REASONING_NO_ULTRA,
         "claude-opus-4-8": _ANTHROPIC_EFFORT,
         "claude-opus-4-7": _ANTHROPIC_EFFORT,
         "claude-opus-4-6": _ANTHROPIC_NO_XHIGH_EFFORT,
@@ -131,6 +131,9 @@ _MODEL_PROVIDER_BY_ID = {
 }
 _MODEL_PROVIDER_BY_ID.update(
     {
+        "gpt-5.6-sol": ModelProvider.OPENAI,
+        "gpt-5.6-terra": ModelProvider.OPENAI,
+        "gpt-5.6-luna": ModelProvider.OPENAI,
         "gpt-5.5": ModelProvider.OPENAI,
         "gpt-5.4": ModelProvider.OPENAI,
         "gpt-5.4-mini": ModelProvider.OPENAI,
@@ -157,7 +160,7 @@ def model_provider_hint(model_id: str) -> ModelProvider | None:
 
 
 def reasoning_options_for(provider: ModelProvider, model_id: str) -> tuple[ReasoningEffort, ...]:
-    """Return model-specific reasoning values, or a provider-safe custom fallback."""
+    """Return model-specific options or Codex subscription options for custom OpenAI IDs."""
 
     if model_id in _MODEL_REASONING_OPTIONS:
         return _MODEL_REASONING_OPTIONS[model_id]
@@ -165,7 +168,7 @@ def reasoning_options_for(provider: ModelProvider, model_id: str) -> tuple[Reaso
         # ``none`` means omit output_config.effort for an unknown model whose
         # capabilities must be checked by the host.
         return ("none", *_ANTHROPIC_EFFORT)
-    return REASONING_EFFORTS
+    return CODEX_REASONING_EFFORTS
 
 
 def reasoning_capabilities_verified(provider: ModelProvider, model_id: str) -> bool:

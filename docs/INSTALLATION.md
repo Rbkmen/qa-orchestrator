@@ -78,17 +78,16 @@ uv run qa-orch reload
 ```
 
 For OpenAI, the recommended menu currently includes `gpt-6-astra`,
-`gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`,
-`gpt-5.6-luna`, and `gpt-4.1`. The wizard offers model-specific
-`reasoning.effort` values: `gpt-6-astra` and `gpt-6.1-sol` support `low`,
-`medium`, `high`, `xhigh`, and `max`, but not `none` or `minimal`; `gpt-4.1`
-uses `none` as a local sentinel because it does not support reasoning; the host
-omits the parameter for that model. On reasoning models that support `none`,
-the host must send it explicitly to disable reasoning: omitting the parameter
-uses the model default instead. See the [OpenAI reasoning guide](https://developers.openai.com/api/docs/guides/reasoning). Other exact OpenAI IDs, such
-as `gpt-5.5` or `gpt-5.4`, can be entered through the custom-ID option. The
-wizard rejects unsupported reasoning values only for model IDs with locally
-curated capability data.
+`gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-sol`, and `gpt-6-luna`.
+For ChatGPT sign-in in Codex, the wizard
+uses `model_reasoning_effort`: Astra, Sol, Terra, and other non-Luna models
+offer `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`; Luna models offer
+the same levels through `max`, without `ultra`. These are Codex subscription
+options, not the OpenAI API's `reasoning.effort` values. Availability depends
+on the model, plan, client, and workspace settings; setup does not check them.
+See the [official Codex model guide](https://learn.chatgpt.com/docs/models).
+Other exact IDs can be entered through the custom-ID option. The wizard
+validates capabilities only for model IDs with locally curated data.
 For an unknown custom ID, it checks the ID format and provider hint but does
 not verify the model's actual capabilities; an unsupported reasoning value
 may still be saved. A returned `reasoning_capabilities_verified: false` means

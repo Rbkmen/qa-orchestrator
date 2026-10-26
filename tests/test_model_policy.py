@@ -8,10 +8,10 @@ import pytest
 import qa_orchestrator.model_policy as model_policy_module
 from qa_orchestrator.cli import PROVIDER_OPTIONS, main
 from qa_orchestrator.model_policy import (
+    CODEX_MODEL_CATALOG_MAX_REVIEW_AGE_DAYS,
+    CODEX_MODEL_CATALOG_REVIEWED_ON,
+    CODEX_MODEL_CATALOG_SOURCE_URL,
     DEFAULT_MODEL_SELECTION,
-    GPT6_MODEL_CATALOG_MAX_REVIEW_AGE_DAYS,
-    GPT6_MODEL_CATALOG_REVIEWED_ON,
-    GPT6_MODEL_CATALOG_SOURCE_URL,
     MODEL_CATALOGS,
     ModelProvider,
     ModelSelection,
@@ -191,12 +191,9 @@ def test_model_catalog_contains_current_recommended_models():
     assert [entry.model_id for entry in MODEL_CATALOGS[ModelProvider.OPENAI]] == [
         "gpt-6-astra",
         "gpt-6.1-sol",
+        "gpt-6.1-terra",
         "gpt-6-sol",
         "gpt-6-luna",
-        "gpt-5.6-sol",
-        "gpt-5.6-terra",
-        "gpt-5.6-luna",
-        "gpt-4.1",
     ]
     assert [entry.model_id for entry in MODEL_CATALOGS[ModelProvider.ANTHROPIC]] == [
         "claude-fable-5-1",
@@ -211,6 +208,7 @@ def test_model_catalog_contains_current_recommended_models():
         "high",
         "xhigh",
         "max",
+        "ultra",
     )
     assert reasoning_options_for(ModelProvider.OPENAI, "gpt-6.1-sol") == (
         "low",
@@ -218,36 +216,81 @@ def test_model_catalog_contains_current_recommended_models():
         "high",
         "xhigh",
         "max",
+        "ultra",
+    )
+    assert reasoning_options_for(ModelProvider.OPENAI, "gpt-6.1-terra") == (
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
     )
     assert reasoning_options_for(ModelProvider.OPENAI, "gpt-6-sol") == (
-        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    )
+    assert reasoning_options_for(ModelProvider.OPENAI, "gpt-6-luna") == (
         "low",
         "medium",
         "high",
         "xhigh",
         "max",
     )
-    assert reasoning_options_for(ModelProvider.OPENAI, "gpt-6-luna") == (
-        "none",
+    assert reasoning_options_for(ModelProvider.OPENAI, "gpt-5.6-sol") == (
         "low",
         "medium",
         "high",
         "xhigh",
         "max",
+        "ultra",
+    )
+    assert reasoning_options_for(ModelProvider.OPENAI, "gpt-5.6-terra") == (
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    )
+    assert reasoning_options_for(ModelProvider.OPENAI, "gpt-5.6-luna") == (
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    )
+    assert reasoning_options_for(ModelProvider.OPENAI, "gpt-6-custom") == (
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
     )
     assert reasoning_options_for(ModelProvider.ANTHROPIC, "claude-haiku-4-5-20251001") == ("none",)
 
 
-def test_gpt6_catalog_source_and_review_date_are_explicit_and_current():
-    reviewed_on = date.fromisoformat(GPT6_MODEL_CATALOG_REVIEWED_ON)
+def test_codex_model_catalog_source_and_review_date_are_explicit_and_current():
+    reviewed_on = date.fromisoformat(CODEX_MODEL_CATALOG_REVIEWED_ON)
     today = datetime.now(UTC).date()
 
-    assert GPT6_MODEL_CATALOG_SOURCE_URL == (
-        "https://developers.openai.com/api/docs/guides/latest-model"
+    assert CODEX_MODEL_CATALOG_SOURCE_URL == (
+        "https://learn.chatgpt.com/docs/models"
     )
     assert reviewed_on <= today
-    assert (today - reviewed_on).days <= GPT6_MODEL_CATALOG_MAX_REVIEW_AGE_DAYS
-    for model_id in ("gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"):
+    assert (today - reviewed_on).days <= CODEX_MODEL_CATALOG_MAX_REVIEW_AGE_DAYS
+    for model_id in (
+        "gpt-6-astra",
+        "gpt-6.1-sol",
+        "gpt-6.1-terra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+    ):
         assert reasoning_capabilities_verified(ModelProvider.OPENAI, model_id)
     assert not reasoning_capabilities_verified(ModelProvider.OPENAI, "gpt-6-custom")
 
@@ -258,8 +301,12 @@ def test_gpt6_catalog_source_and_review_date_are_explicit_and_current():
         (ModelProvider.OPENAI, "gpt-6-astra", "none"),
         (ModelProvider.OPENAI, "gpt-6.1-sol", "none"),
         (ModelProvider.OPENAI, "gpt-6.1-sol", "minimal"),
-        (ModelProvider.OPENAI, "gpt-5.4", "max"),
-        (ModelProvider.OPENAI, "gpt-4.1", "high"),
+        (ModelProvider.OPENAI, "gpt-6.1-terra", "none"),
+        (ModelProvider.OPENAI, "gpt-6.1-terra", "minimal"),
+        (ModelProvider.OPENAI, "gpt-6-luna", "ultra"),
+        (ModelProvider.OPENAI, "gpt-5.6-luna", "ultra"),
+        (ModelProvider.OPENAI, "gpt-6-custom", "none"),
+        (ModelProvider.OPENAI, "gpt-6-custom", "minimal"),
         (ModelProvider.ANTHROPIC, "claude-haiku-4-5-20251001", "high"),
         (ModelProvider.ANTHROPIC, "claude-opus-4-6", "xhigh"),
         (ModelProvider.ANTHROPIC, "claude-sonnet-4-6", "xhigh"),
@@ -300,11 +347,11 @@ def test_model_selection_rejects_known_cross_provider_model(provider, model):
 def test_openai_reasoning_reaches_each_configured_stage():
     selection = ModelSelection(
         provider=ModelProvider.OPENAI,
-        triage_model="gpt-5.5",
+        triage_model="gpt-6.1-terra",
         primary_model="gpt-6-sol",
         deep_model="gpt-6-sol",
         synthesis_model="gpt-5.5",
-        triage_reasoning="low",
+        triage_reasoning="ultra",
         primary_reasoning="high",
         deep_reasoning="xhigh",
         synthesis_reasoning="xhigh",
@@ -312,7 +359,8 @@ def test_openai_reasoning_reaches_each_configured_stage():
 
     policies = build_model_policies(selection)
 
-    assert policies[OrchestrationStep.TRIAGE].reasoning == "low"
+    assert policies[OrchestrationStep.TRIAGE].model == "gpt-6.1-terra"
+    assert policies[OrchestrationStep.TRIAGE].reasoning == "ultra"
     assert policies[OrchestrationStep.PRIMARY_REVIEW].reasoning == "high"
     assert policies[OrchestrationStep.DEEP_REVIEW].reasoning == "xhigh"
     assert policies[OrchestrationStep.SYNTHESIS].reasoning == "xhigh"
@@ -474,14 +522,14 @@ def test_setup_menu_orders_each_model_before_its_reasoning(tmp_path, monkeypatch
     assert prompts == [
         "Выбор [1]: ",
         "Номер [1]: ",
+        "Выбор [5]: ",
+        "Выбор [5]: ",
         "Выбор [4]: ",
-        "Выбор [6]: ",
-        "Выбор [3]: ",
-        "Выбор [3]: ",
-        "Выбор [3]: ",
+        "Выбор [2]: ",
         "Выбор [4]: ",
         "Выбор [3]: ",
-        "Выбор [3]: ",
+        "Выбор [4]: ",
+        "Выбор [2]: ",
     ]
     output = capsys.readouterr().out
     assert "1. Русский (RU)" in output
@@ -490,6 +538,25 @@ def test_setup_menu_orders_each_model_before_its_reasoning(tmp_path, monkeypatch
     assert "Первично оценивает задачу и выбирает набор или профиль ревью." in output
     assert "Объединяет результаты ревью в итоговый QA-вывод." in output
     assert "high" in output
+    assert "gpt-4.1" not in output
+    assert "GPT-5.6" not in output
+
+
+def test_setup_menu_can_select_gpt61_terra_and_ultra_effort(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
+    answers = iter(("", "", "3", "6", "3", "2", "3", "4", "3", "2"))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert main(["setup"]) == 0
+
+    selection = load_model_selection(tmp_path / "model-policy.json")
+    assert selection.triage_model == "gpt-6.1-terra"
+    assert selection.triage_reasoning == "ultra"
+    assert selection.primary_model == "gpt-6.1-terra"
+    assert selection.primary_reasoning == "medium"
+    output = capsys.readouterr().out
+    assert "GPT-6.1 Terra" in output
+    assert "ultra" in output
 
 
 def test_setup_menu_supports_english_and_explains_workflow_stages(tmp_path, monkeypatch, capsys):
@@ -541,6 +608,7 @@ def test_english_setup_localizes_gpt61_label(tmp_path, monkeypatch, capsys):
     assert main(["setup"]) == 130
     output = capsys.readouterr().out
     assert "GPT-6.1 Sol — complex coding and professional work" in output
+    assert "GPT-6.1 Terra — visual reasoning and computer use" in output
     assert "сложная разработка" not in output
 
 

@@ -30,12 +30,14 @@ policy with a provider, four model IDs, and provider-specific reasoning/effort.
 Use `qa-orch setup --host-default` to return to host mode. Legacy policy files
 without `mode` continue to mean `configured`.
 
-In `configured` mode, OpenAI uses `reasoning.effort` and Anthropic uses
-`output_config.effort`. For OpenAI reasoning models that support it, send `none`
-explicitly to disable reasoning; omitting the parameter can enable the model
-default instead. For non-reasoning models such as GPT-4.1, omit the parameter.
-For Anthropic, `none` is a local sentinel meaning omit effort and use model
-defaults. `high` remains the recommendation for deep escalation when supported.
+In `configured` mode, the OpenAI provider runs through Codex and uses
+`model_reasoning_effort`; Anthropic uses `output_config.effort`. The OpenAI
+catalog describes Codex with ChatGPT sign-in: it offers `low`, `medium`, `high`,
+`xhigh`, `max`, and `ultra` for non-Luna models, while Luna supports up to
+`max`. These subscription options differ from the OpenAI API's
+`reasoning.effort`; API-key sessions can have different capabilities. For
+Anthropic, `none` is a local sentinel meaning omit effort and use model defaults.
+`high` remains the recommendation for deep escalation when supported.
 The orchestrator never calls models or stores API keys. Model IDs and reasoning
 are configured independently for each stage and returned in `model_policy`.
 
@@ -50,7 +52,7 @@ In `configured` mode, the session returns the current stage's provider, model, r
 
 ### Keeping the recommended model catalog current
 
-The GPT-6 catalog source and last-review date live beside `MODEL_CATALOGS` in `src/qa_orchestrator/model_policy.py`. Tests fail when that review is more than 180 days old. Before refreshing it, verify model IDs and reasoning support against the [official GPT-6 model guidance](https://developers.openai.com/api/docs/guides/latest-model), then update the catalog and its exact reasoning-option assertions in `tests/test_model_policy.py`. This review date covers the GPT-6 entries only. Keep custom model IDs available and do not add provider calls to setup; the host remains responsible for verifying its own model access.
+The Codex catalog source and last-review date live beside `MODEL_CATALOGS` in `src/qa_orchestrator/model_policy.py`. Tests fail when that review is more than 180 days old. Before refreshing it, verify model IDs and subscription effort support against the [official Codex model guide](https://learn.chatgpt.com/docs/models), then update the catalog and its exact reasoning-option assertions in `tests/test_model_policy.py`. Keep custom model IDs available and do not add provider calls to setup; the host remains responsible for verifying model access.
 
 ## Orchestration flow
 

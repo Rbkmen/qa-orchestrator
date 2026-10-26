@@ -41,32 +41,29 @@ REASONING_ROLE_LABELS = (
     ("synthesis_reasoning", "synthesis"),
 )
 REASONING_DESCRIPTIONS = {
-    "none": "отключить reasoning у поддерживающей это модели OpenAI",
-    "minimal": "минимальный уровень рассуждений",
+    "none": "не передавать effort и использовать настройки модели",
     "low": "быстрее и дешевле, подходит для простых задач",
     "medium": "сбалансированный вариант по умолчанию",
     "high": "сложный код, отладка и глубокий анализ",
     "xhigh": "длинные и сложные агентные задачи",
     "max": "максимальный уровень reasoning",
+    "ultra": "распределить части сложной задачи между субагентами",
 }
 REASONING_DESCRIPTIONS_EN = {
-    "none": "disable reasoning on an OpenAI model that supports it",
-    "minimal": "minimum reasoning effort",
+    "none": "omit effort and use the model defaults",
     "low": "faster and cheaper; suitable for simple tasks",
     "medium": "balanced default",
     "high": "complex code, debugging, and deep analysis",
     "xhigh": "long and complex agentic tasks",
     "max": "maximum reasoning effort",
+    "ultra": "delegate parts of a complex task to subagents",
 }
 MODEL_LABELS_EN = {
     "gpt-6-astra": "GPT-6 Astra — highest capability",
     "gpt-6.1-sol": "GPT-6.1 Sol — complex coding and professional work",
+    "gpt-6.1-terra": "GPT-6.1 Terra — visual reasoning and computer use",
     "gpt-6-sol": "GPT-6 Sol — complex code and agentic tasks",
     "gpt-6-luna": "GPT-6 Luna — faster and more economical",
-    "gpt-5.6-sol": "GPT-5.6 Sol",
-    "gpt-5.6-terra": "GPT-5.6 Terra — balanced quality and cost",
-    "gpt-5.6-luna": "GPT-5.6 Luna — economical option",
-    "gpt-4.1": "GPT-4.1 — reasoning is not supported",
     "claude-fable-5-1": "Claude Fable 5.1 — complex reasoning tasks",
     "claude-opus-5-5": "Claude Opus 5.5 — highest capability",
     "claude-opus-5": "Claude Opus 5",
@@ -112,12 +109,11 @@ SETUP_COPY = {
         "custom_model_only": "  1. Ввести model ID",
         "choose_prompt": "Выбор [{default}]: ",
         "model_id_prompt": "Model ID (b — назад): ",
-        "model_id_hint": "Каталог локальный: доступность модели и поддержку reasoning у провайдера инструмент не проверяет.",
+        "model_id_hint": "Каталог Codex локальный: доступность модели по плану и настройки клиента не проверяются.",
         "deep_recommendation": "Рекомендация: high для сложных и рискованных проверок.",
         "unsupported_reasoning": "Подсказка: {model} не поддерживает {parameter}; будет сохранено none.",
         "anthropic_reasoning": "Подсказка: Anthropic effort задаёт глубину рассуждений для этой модели.",
-        "astra_reasoning": "Подсказка: GPT-6 Astra не поддерживает none; начни с low или medium.",
-        "openai_reasoning": "Подсказка: доступные значения зависят от конкретной модели OpenAI.",
+        "openai_reasoning": "Подсказка: доступные значения Codex зависят от модели и клиента.",
         "cancelled": "Настройка отменена.",
         "unreadable_policy": "Текущая модельная политика не читается ({error}); будет создана новая.",
         "invalid_provider": "нужно выбрать номер из меню провайдеров",
@@ -171,12 +167,11 @@ SETUP_COPY = {
         "custom_model_only": "  1. Enter a model ID",
         "choose_prompt": "Choose [{default}]: ",
         "model_id_prompt": "Model ID (b — back): ",
-        "model_id_hint": "The catalog is local; provider availability and reasoning support are not checked here.",
+        "model_id_hint": "The Codex catalog is local; plan availability and client settings are not checked here.",
         "deep_recommendation": "Recommendation: use high for complex and high-risk reviews.",
         "unsupported_reasoning": "Tip: {model} does not support {parameter}; none will be saved.",
         "anthropic_reasoning": "Tip: Anthropic effort controls reasoning depth for this model.",
-        "astra_reasoning": "Tip: GPT-6 Astra does not support none; start with low or medium.",
-        "openai_reasoning": "Tip: available values depend on the specific OpenAI model.",
+        "openai_reasoning": "Tip: available Codex values depend on the model and client.",
         "cancelled": "Setup cancelled.",
         "unreadable_policy": "The current model policy cannot be read ({error}); a new one will be created.",
         "invalid_provider": "select a number from the provider menu",
@@ -360,7 +355,7 @@ def _model_value(
 
 def _reasoning_parameter_name(provider: ModelProvider) -> str:
     if provider is ModelProvider.OPENAI:
-        return "OpenAI reasoning.effort"
+        return "Codex model_reasoning_effort"
     return "Anthropic output_config.effort"
 
 
@@ -427,8 +422,6 @@ def _reasoning_value(
         print(copy["unsupported_reasoning"].format(model=model, parameter=parameter_name))
     elif provider is ModelProvider.ANTHROPIC:
         print(copy["anthropic_reasoning"])
-    elif model == "gpt-6-astra":
-        print(copy["astra_reasoning"])
     else:
         print(copy["openai_reasoning"])
     print(_paint(copy["back"], _COLORS["muted"]))

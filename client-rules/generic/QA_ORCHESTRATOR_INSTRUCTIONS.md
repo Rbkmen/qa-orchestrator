@@ -57,9 +57,7 @@ orchestration/evidence/finding contract. Workspace and repository rules may add 
   Compare quality and elapsed time on representative work before applying this schedule to other bundles.
 - Follow `model_policy.mode` at every stage. In `host_default`, use the host's configured model/reasoning and invent no provider/model/effort values; in `configured`, use returned
   per-stage settings. `reasoning_capabilities_verified=true` only means an exact locally curated model/provider pair; false requires host/provider verification and proves neither
-  access nor capability. `qa-orch setup` configures explicit IDs; `qa-orch setup --host-default` returns to host mode. Setup does not contact provider APIs. OpenAI uses
-  `reasoning.effort`; Anthropic uses `output_config.effort`. For supported OpenAI reasoning models, `none` explicitly disables reasoning; omit effort for non-reasoning models such
-  as GPT-4.1. For Anthropic, `none` is a local sentinel to omit effort and use model defaults. Verify model access and custom-ID effort support with the host provider.
+  access nor capability. `qa-orch setup` configures explicit IDs; `qa-orch setup --host-default` returns to host mode. Setup does not contact provider APIs. For OpenAI models through Codex with ChatGPT sign-in, use `model_reasoning_effort`; curated non-Luna models support Ultra and Luna tops out at Max. These subscription settings differ from OpenAI API `reasoning.effort`; API-key and other host clients need their own model capability checks. Anthropic uses `output_config.effort`. For Anthropic, `none` is a local sentinel to omit effort and use model defaults. Verify model access and custom-ID effort support with the host provider.
 - Execution speed and latency follow the user's host/provider settings; the orchestrator does not set or override them.
 - Keep stage labels and status text model-neutral; the stages are `Triage`, `Primary review`, optional `Deep review` and `Final synthesis`, `Host`, then `Final QA outcome`. Do not
   include model names/reasoning levels; transition identifiers are not model selectors.
