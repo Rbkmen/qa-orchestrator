@@ -1,7 +1,8 @@
 # Contributing to QA Orchestrator
 
-QA Orchestrator is a deterministic MCP service for fixed routing and bounded,
-content-free state. The host owns evidence, model execution, and QA decisions.
+QA Orchestrator is a deterministic MCP service for fixed routing and bounded
+structured orchestration state. The host owns evidence, model execution, and QA
+decisions.
 
 ## Set up development
 
@@ -32,7 +33,7 @@ directory. Never use production session-store files in development tests.
 | `review_profiles.py` | Fixed checklists, bundle order, task-based recommendations |
 | `model_policy.py` | Local catalog, model/effort validation, atomic policy storage |
 | `orchestration.py` | State machine, fixed escalation rules, TTL and capacity |
-| `session_store.py` | Optional local recovery of unfinished structured sessions |
+| `session_store.py` | Optional recovery of unfinished sessions and finalized reviews |
 | `service.py` | Service facade joining configuration and orchestration |
 | `server.py` | MCP schemas, descriptions, annotations, and tool registration |
 | `config.py` | Environment-based limits and file locations |
@@ -56,10 +57,13 @@ directory. Never use production session-store files in development tests.
   schema. CLI `config show` and `reload` inspect disk in a separate process.
 - Local state transitions are mutations even though review routes carry
   `read_only=true`. Keep MCP annotations consistent with observable behavior.
-- Memory-only operation is the default. Optional SQLite recovery stores only
-  unfinished structured sessions; finalization deletes their rows. Never add
-  task history, statistics, persistent QA memory, a source cache, hidden external
-  calls, or another autonomous agent.
+- Memory-only operation is the default. Optional SQLite recovery retains
+  unfinished sessions and finalized reviews that contain structured artifacts
+  until normal TTL expiry or capacity cleanup. Terminal sessions without review
+  artifacts are not persisted. The store contains structured reports and session
+  metadata, not raw evidence packets or prompts. Never add task history,
+  statistics, persistent QA memory, a source cache, hidden external calls, or
+  another autonomous agent.
 - Invalid operations must preserve session state. Persistence failure must
   not acknowledge a transition that was not saved. Reads must not refresh TTL.
 

@@ -2033,10 +2033,6 @@ def test_speed_comparison_cli_applies_quality_policy_and_reports_exploratory_wit
     _exercise_speed_comparison_cli(tmp_path, benchmark_inputs)
 
 
-def test_speed_comparison_cli_writes_artifact(tmp_path, benchmark_inputs):
-    _exercise_speed_comparison_cli(tmp_path, benchmark_inputs)
-
-
 def test_benchmark_usage_is_derived_from_complete_profile_attempt_ledger(benchmark_inputs):
     from datetime import UTC, datetime
 
