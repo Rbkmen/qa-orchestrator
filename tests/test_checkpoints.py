@@ -46,3 +46,25 @@ def test_checkpoints_survive_restart_detect_corruption_and_bound_storage(tmp_pat
         store.load("b" * 64)
     if os.name != "nt":
         assert path.stat().st_mode & 0o077 == 0
+
+
+def test_codex_checkpoint_ignores_only_prior_metadata_not_sent_to_model(bound_review_context):
+    from datetime import UTC, datetime, timedelta
+
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.contracts import ProfileExecutionMetrics
+
+    now = datetime.now(UTC)
+    original = ProfileReviewReport(profile="code_explorer", scope="Mapped.",
+        execution_metrics=ProfileExecutionMetrics(started_at=now, completed_at=now,
+                                                   input_tokens=10))
+    updated = original.model_copy(update={"execution_metrics": ProfileExecutionMetrics(
+        started_at=now, completed_at=now + timedelta(seconds=1), input_tokens=999)})
+    route = build_review_route("code_reviewer")
+    projection = CodexProfileExecutor.checkpoint_previous_report_projection
+    a = checkpoint_key(bound_review_context, route, None, (original,), "codex-v", previous_report_projection=projection)
+    b = checkpoint_key(bound_review_context, route, None, (updated,), "codex-v", previous_report_projection=projection)
+    assert a == b
+    changed = original.model_copy(update={"scope": "Different evidence."})
+    assert a != checkpoint_key(bound_review_context, route, None, (changed,), "codex-v", previous_report_projection=projection)
+    assert checkpoint_key(bound_review_context, route, None, (original,), "other") != checkpoint_key(bound_review_context, route, None, (updated,), "other")

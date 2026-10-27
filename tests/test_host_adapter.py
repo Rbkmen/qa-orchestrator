@@ -406,6 +406,7 @@ async def test_cancelled_attempt_keeps_observed_usage_in_partial_result(host_ses
     ).run_primary_review(run_id, execute, lambda _: DeepReviewSignals())
     assert result.session.status == "partial"
     assert result.execution_attempts[0].outcome == "cancelled"
+    assert result.execution_attempts[0].failure_kind == "cancelled"
     assert result.execution_attempts[0].input_tokens == 17
     assert result.execution_attempts[0].output_tokens is None
 
@@ -815,3 +816,27 @@ async def test_local_evidence_verification_fails_before_starting_workers(host_se
     with pytest.raises(ValueError, match="pinned content hash mismatch"):
         await adapter.run_primary_review(run_id, execute, lambda reports: DeepReviewSignals())
     assert service.get_qa_orchestration(run_id).completed_profiles == []
+
+
+async def test_invalid_output_is_retained_privately_across_a_retry(host_session):
+    from qa_orchestrator.host import ProfileOutputError, RetryableProfileError
+
+    class InvalidOutput(RetryableProfileError, ProfileOutputError):
+        pass
+
+    service, run_id = host_session(profile="python_reviewer")
+    secret = b"private diagnostic output"
+    async def execute(job):
+        if job.attempt == 1:
+            raise InvalidOutput("invalid", retained_output=secret)
+        return report(job.profile, job.session.review_context)
+
+    result = await HostReviewAdapter(
+        service, HostExecutionPolicy(retry_delay_seconds=0)
+    ).run_primary_review(run_id, execute, lambda reports: DeepReviewSignals())
+    assert not result.failures
+    assert len(result.retained_outputs) == 1
+    assert result.retained_outputs[0].attempt == 1
+    assert result.retained_outputs[0].raw_output == secret
+    assert secret.decode() not in repr(result)
+    assert secret.decode() not in result.session.model_dump_json()

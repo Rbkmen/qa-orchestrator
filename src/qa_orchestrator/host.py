@@ -4,7 +4,7 @@ import asyncio
 import os
 import tempfile
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
@@ -14,9 +14,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from qa_orchestrator.checkpoints import ProfileCheckpointStore, checkpoint_key
 from qa_orchestrator.contracts import (
+    _MAX_PROFILE_REVIEW_REPORT_BYTES,
     FinalReviewReport,
     ProfileAttemptMetrics,
     ProfileAttemptObservation,
+    ProfileContextSelection,
     ProfileExecutionMetrics,
     ProfileReviewReport,
     QaTaskOutcome,
@@ -54,6 +56,41 @@ class RetryableProfileError(Exception):
     """An executor may explicitly mark a transient failure as safe to retry."""
 
 
+class ProfileOutputError(ValueError):
+    """An execution failure with an optional private, bounded output retained in memory."""
+
+    def __init__(
+        self, message: str, *, retained_output: bytes | None = None,
+        context_selection: ProfileContextSelection | None = None,
+        missing_source_paths: tuple[str, ...] = (),
+        review_head_sha: str | None = None,
+        review_diff_sha256: str | None = None,
+        source_packet_sha256: str | None = None,
+    ):
+        if retained_output is not None and len(retained_output) > _MAX_PROFILE_REVIEW_REPORT_BYTES:
+            raise ValueError("retained output exceeds the profile report limit")
+        super().__init__(message)
+        self.retained_output = retained_output
+        self.context_selection = context_selection
+        self.missing_source_paths = missing_source_paths
+        self.review_head_sha = review_head_sha
+        self.review_diff_sha256 = review_diff_sha256
+        self.source_packet_sha256 = source_packet_sha256
+
+
+@dataclass(frozen=True)
+class RetainedProfileOutput:
+    profile: ReviewAgent
+    attempt: int
+    raw_output: bytes = field(repr=False)
+    context_selection: ProfileContextSelection | None = None
+    missing_source_paths: tuple[str, ...] = ()
+    review_head_sha: str | None = None
+    review_diff_sha256: str | None = None
+    source_packet_sha256: str | None = None
+    previous_reports: tuple[ProfileReviewReport, ...] | None = field(default=None, repr=False)
+
+
 @dataclass(frozen=True)
 class HostProfileJob:
     session: QaOrchestrationSession
@@ -80,6 +117,7 @@ class HostExecutionResult:
     completed_at: datetime
     reused_profiles: tuple[ReviewAgent, ...] = ()
     execution_attempts: tuple[ProfileAttemptMetrics, ...] = ()
+    retained_outputs: tuple[RetainedProfileOutput, ...] = field(default=(), repr=False)
 
 
 ProfileExecutor = Callable[[HostProfileJob], Awaitable[ProfileReviewReport]]
@@ -116,6 +154,7 @@ class HostReviewAdapter:
         semaphore: asyncio.Semaphore,
         reused: list[ReviewAgent],
         ledger: list[ProfileAttemptMetrics],
+        retained_outputs: list[RetainedProfileOutput],
     ) -> ProfileReviewReport | HostProfileFailure:
         context = session.review_context
         if context is None:
@@ -133,6 +172,9 @@ class HostReviewAdapter:
                     session.model_policy,
                     session.profile_reports,
                     self.executor_identity,
+                    previous_report_projection=getattr(
+                        executor, "checkpoint_previous_report_projection", None
+                    ),
                 )
                 cached = self.checkpoint_store.load(key)
                 if cached is not None:
@@ -212,15 +254,33 @@ class HostReviewAdapter:
                         )
                         outcome = "completed"
                 except (TimeoutError, RetryableProfileError) as exc:
+                    if isinstance(exc, ProfileOutputError) and exc.retained_output is not None:
+                        retained_outputs.append(RetainedProfileOutput(
+                            profile, attempt, exc.retained_output, exc.context_selection,
+                            exc.missing_source_paths, exc.review_head_sha,
+                            exc.review_diff_sha256, exc.source_packet_sha256,
+                            tuple(session.profile_reports),
+                        ))
                     outcome = "timeout" if isinstance(exc, TimeoutError) else "retryable_error"
+                    if isinstance(exc, TimeoutError) and observation.failure_kind is None:
+                        observation.failure_kind = "timeout"
                     if attempt > self.policy.max_retries:
                         failure = HostProfileFailure(
                             profile, "profile_timeout" if outcome == "timeout" else "retry_exhausted"
                         )
                 except asyncio.CancelledError:
+                    observation.failure_kind = observation.failure_kind or "cancelled"
                     outcome = "cancelled"
                     raise
-                except Exception:  # noqa: BLE001 -- never retain private provider exception bodies
+                except Exception as exc:  # noqa: BLE001 -- never retain private provider exception bodies
+                    if isinstance(exc, ProfileOutputError) and exc.retained_output is not None:
+                        retained_outputs.append(RetainedProfileOutput(
+                            profile, attempt, exc.retained_output, exc.context_selection,
+                            exc.missing_source_paths, exc.review_head_sha,
+                            exc.review_diff_sha256, exc.source_packet_sha256,
+                            tuple(session.profile_reports),
+                        ))
+                    observation.failure_kind = observation.failure_kind or "executor_error"
                     failure = HostProfileFailure(profile, "executor_error")
                 finally:
                     record = ProfileAttemptMetrics(
@@ -287,6 +347,7 @@ class HostReviewAdapter:
         failures: tuple[HostProfileFailure, ...] = ()
         reused: list[ReviewAgent] = []
         ledger: list[ProfileAttemptMetrics] = []
+        retained_outputs: list[RetainedProfileOutput] = []
         tasks: list[asyncio.Task] = []
         lease_seconds = (session.expires_at - datetime.now(UTC)).total_seconds()
         interval = min(self.policy.heartbeat_interval_seconds, max(lease_seconds / 3, 0.01))
@@ -304,7 +365,7 @@ class HostReviewAdapter:
                         continue
                     tasks = [
                         asyncio.create_task(
-                            self._execute_profile(session, profile, executor, semaphore, reused, ledger)
+                            self._execute_profile(session, profile, executor, semaphore, reused, ledger, retained_outputs)
                         )
                         for profile in remaining
                     ]
@@ -397,6 +458,7 @@ class HostReviewAdapter:
             datetime.now(UTC),
             tuple(p for p in session.review_profiles if p in reused),
             tuple(ledger),
+            tuple(retained_outputs),
         )
 
     def finish_review(

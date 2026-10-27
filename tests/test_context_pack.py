@@ -505,3 +505,51 @@ def test_pack_cli_binds_serialized_packet_hash(pinned_evidence, tmp_path):
         json.loads(bound.read_text())["evidence_packet_sha256"]
         == hashlib.sha256(packet.read_bytes()).hexdigest()
     )
+
+
+def test_selection_preview_uses_host_plan_and_preserves_bound_inputs(pinned_evidence, tmp_path, capsys):
+    from qa_orchestrator.context_pack import build_context_packet
+    from qa_orchestrator.evidence import evidence_main
+
+    repo, _, context, definitions = pinned_evidence
+    context = register_evidence(context, definitions, repo)
+    packet = build_context_packet(context, repo, optional_profiles={"S1": (ReviewAgent.CODE_REVIEWER,)})
+    packet_bytes = packet.model_dump_json().encode()
+    context = context.model_copy(update={"evidence_packet_sha256": hashlib.sha256(packet_bytes).hexdigest()})
+    context_path, packet_path = tmp_path / "context.json", tmp_path / "packet.json"
+    context_path.write_text(context.model_dump_json())
+    packet_path.write_bytes(packet_bytes)
+    args = ["preview-selection", "--context", str(context_path), "--packet", str(packet_path),
+            "--profile", "python_reviewer"]
+    assert evidence_main(args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert "D1" in result["included_refs"]
+    assert "S1" in result["omitted_refs"]
+    assert "S1" not in result["included_refs"]
+    assert result["selected_bytes"] > 0
+    with pytest.raises(ValueError, match="must differ"):
+        evidence_main(args + ["--output", str(packet_path)])
+    assert packet_path.read_bytes() == packet_bytes
+    packet_path.write_bytes(packet_bytes + b" ")
+    with pytest.raises(ValueError, match="hash mismatch"):
+        evidence_main(args)
+
+
+def test_auditor_targeted_scenario_refs_must_be_in_selected_packet(bound_review_context):
+    from qa_orchestrator.contracts import ProfileContextSelection, ReviewScenarioDisposition
+    from qa_orchestrator.evidence import validate_context_selection
+
+    selection = ProfileContextSelection(
+        source_packet_sha256=bound_review_context.evidence_packet_sha256,
+        selected_packet_sha256="a" * 64, included_refs=("E2",), omitted_refs=("E1",),
+        max_bytes=1000, selected_bytes=10,
+    )
+    report = ProfileReviewReport(
+        profile=ReviewAgent.OMISSION_AUDITOR, scope="Checked.", context_selection=selection,
+        targeted_scenario_audit=(ReviewScenarioDisposition(
+            scenario="A prior scenario", disposition="unverified", evidence_refs=("E1",),
+            rationale="Evidence omitted.",
+        ),),
+    )
+    with pytest.raises(ValueError, match="omitted"):
+        validate_context_selection(bound_review_context, report)

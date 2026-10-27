@@ -25,6 +25,8 @@ from pydantic import (
 from qa_orchestrator.contracts import (
     EvidenceRefId,
     GitObjectId,
+    ProfileAttemptMetrics,
+    ReviewAgent,
     ReviewFindingCandidate,
     Sha256Digest,
 )
@@ -257,6 +259,10 @@ class BenchmarkRun(BaseModel):
     attempt: int | None = Field(default=None, ge=1, le=20)
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
+    token_usage_scope: Literal["attempt_only", "includes_retries"] | None = Field(
+        default=None,
+        description="Whether run token counts exclude or include failed retry attempts.",
+    )
     candidates: tuple[ReviewFindingCandidate, ...] = Field(default=(), max_length=1000)
     adjudicator: str = Field(min_length=1, max_length=256)
     adjudications: tuple[CandidateAdjudication, ...] = Field(default=(), max_length=1000)
@@ -271,6 +277,8 @@ class BenchmarkRun(BaseModel):
             payload.pop("queue_wait_ms", None)
         if self.attempt is None:
             payload.pop("attempt", None)
+        if self.token_usage_scope is None:
+            payload.pop("token_usage_scope", None)
         if not self.missed_gold_diagnoses:
             payload.pop("missed_gold_diagnoses", None)
         return payload
@@ -311,6 +319,43 @@ class BenchmarkRun(BaseModel):
         return self
 
 
+def benchmark_run_with_attempt_usage(
+    run: BenchmarkRun,
+    attempts: tuple[ProfileAttemptMetrics, ...],
+    *,
+    expected_profiles: tuple[ReviewAgent, ...],
+) -> BenchmarkRun:
+    """Bind a completed fresh profile ledger to one benchmark run without double counting."""
+    if not expected_profiles or len(set(expected_profiles)) != len(expected_profiles):
+        raise ValueError("expected profiles must be nonempty and unique")
+    groups: dict[ReviewAgent, list[ProfileAttemptMetrics]] = defaultdict(list)
+    for attempt in attempts:
+        if attempt.profile not in expected_profiles:
+            raise ValueError("attempt belongs to an unexpected profile")
+        if (attempt.review_head_sha, attempt.review_diff_sha256) != (run.head_sha, run.diff_sha256):
+            raise ValueError("attempt does not match the pinned benchmark input")
+        groups[attempt.profile].append(attempt)
+    if set(groups) != set(expected_profiles):
+        raise ValueError("attempt ledger does not cover every expected profile")
+    for values in groups.values():
+        ordered = sorted(values, key=lambda item: item.attempt)
+        if [item.attempt for item in ordered] != list(range(1, len(ordered) + 1)):
+            raise ValueError("attempt ledger must be contiguous and unique")
+        if ordered[-1].outcome != "completed" or any(
+            item.outcome == "completed" for item in ordered[:-1]
+        ):
+            raise ValueError("each profile must have exactly one final completed attempt")
+    def total(field: str) -> int | None:
+        values = [getattr(attempt, field) for attempt in attempts]
+        return sum(values) if all(value is not None for value in values) else None
+    return BenchmarkRun.model_validate({
+        **run.model_dump(mode="python"),
+        "input_tokens": total("input_tokens"),
+        "output_tokens": total("output_tokens"),
+        "token_usage_scope": "includes_retries",
+    })
+
+
 class BenchmarkFailure(BaseModel):
     """One failed benchmark attempt with bounded, sanitized execution metadata."""
 
@@ -324,6 +369,8 @@ class BenchmarkFailure(BaseModel):
     host_instructions_sha256: Sha256Digest
     review_rules_sha256: Sha256Digest | None = None
     attempt: int = Field(ge=1, le=20)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
     failure_code: str = Field(pattern=r"^[a-z][a-z0-9_.-]{0,63}$")
     error_type: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_.]{0,127}$")
     exit_code: int | None = Field(default=None, ge=-255, le=255)
@@ -694,7 +741,25 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
             else None,
             "gold_recall_by": stratified_gold_recall,
         }
-        if failures_by_configuration.get(configuration):
+        failures = failures_by_configuration.get(configuration, [])
+        # Failure records and successful runs may describe the same retry. Host execution
+        # metrics include retries, so only combine them when every successful run explicitly
+        # declares that its token counts cover that attempt alone.
+        unambiguous_usage = not failures or all(
+            run.token_usage_scope == "attempt_only" for run in selected_runs
+        )
+        for token_field in ("input_tokens", "output_tokens"):
+            values = [r[token_field] for r in rows] + [getattr(f, token_field) for f in failures]
+            aggregates[configuration][f"total_{token_field}_including_failures"] = (
+                sum(values)
+                if unambiguous_usage and values and all(value is not None for value in values)
+                else None
+            )
+        if not unambiguous_usage:
+            aggregates[configuration]["token_total_limitation"] = (
+                "Successful run usage may include failed attempts; total cannot be determined."
+            )
+        if failures:
             aggregates[configuration]["failed_attempts"] = len(
                 failures_by_configuration[configuration]
             )

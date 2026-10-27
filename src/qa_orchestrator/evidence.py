@@ -833,7 +833,7 @@ def validate_registered_locations(
 
 def validate_context_selection(context: ReviewContext, report: ProfileReviewReport) -> None:
     scenario_refs = {
-        ref for item in report.scenario_coverage for ref in item.evidence_refs
+        ref for item in (*report.scenario_coverage, *report.targeted_scenario_audit) for ref in item.evidence_refs
     }
     if scenario_refs - set(context.evidence_refs):
         raise ValueError("scenario coverage cites refs outside the bound context")
@@ -853,7 +853,7 @@ def validate_context_selection(context: ReviewContext, report: ProfileReviewRepo
     cited = {ref for f in report.finding_candidates for ref in f.evidence_refs}
     cited.update(ref for note in (*report.coverage_gaps, *report.unverified) for ref in note.evidence_refs)
     cited.update(
-        ref for item in report.scenario_coverage for ref in item.evidence_refs
+        ref for item in (*report.scenario_coverage, *report.targeted_scenario_audit) for ref in item.evidence_refs
     )
     cited.update(item.evidence_ref for item in report.evidence_map)
     if cited - set(selection.included_refs):
@@ -1319,7 +1319,7 @@ def complete_scenario_coverage(
     missing: list[tuple[ReviewAgent, ReviewScenarioDisposition]] = []
     seen = set(supplied_keys)
     for profile_report in profile_reports:
-        for item in profile_report.scenario_coverage:
+        for item in (*profile_report.scenario_coverage, *profile_report.targeted_scenario_audit):
             if set(item.evidence_refs) - packet_refs:
                 raise ValueError("profile scenario coverage cites evidence outside the bound packet")
             key = " ".join(item.scenario.split()).casefold()
@@ -4165,6 +4165,15 @@ def evidence_main(argv: list[str]) -> int:
         type=Path,
         help="Write a review context bound to this discovery result and exact candidate set",
     )
+    preview = subparsers.add_parser(
+        "preview-selection", help="Preview a profile's selected packet without running a model"
+    )
+    preview.add_argument("--context", required=True, type=Path)
+    preview.add_argument("--packet", required=True, type=Path)
+    preview.add_argument("--profile", required=True)
+    preview.add_argument("--review-profile", action="append", default=[])
+    preview.add_argument("--max-bytes", type=int, default=1_000_000)
+    preview.add_argument("--output", type=Path)
     pack = subparsers.add_parser("pack", help="Build exact profile-selectable context from pinned refs")
     pack.add_argument("--plan", type=Path, help="Explicit host plan: optional_profiles, priorities, external_content")
     pack.add_argument("--bound-context", required=True, type=Path)
@@ -4237,6 +4246,47 @@ def evidence_main(argv: list[str]) -> int:
                 raise ValueError("bound context must use a distinct output path")
             bound_context = bind_neighbor_discovery(context, payload)
             args.bound_context.write_text(bound_context.model_dump_json(), encoding="utf-8")
+        output = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        if args.output:
+            args.output.write_text(output, encoding="utf-8")
+        else:
+            print(output, end="")
+        return 0
+    if args.command == "preview-selection":
+        from qa_orchestrator.codex_executor import _profile_context_override_refs
+        from qa_orchestrator.context_pack import (
+            ContextPacket,
+            select_context,
+            validate_packet_context,
+        )
+        from qa_orchestrator.contracts import ReviewAgent
+
+        if args.output and args.output.resolve() in {args.context.resolve(), args.packet.resolve()}:
+            raise ValueError("selection preview output must differ from context and packet")
+        context = ReviewContext.model_validate_json(args.context.read_bytes())
+        packet_bytes = args.packet.read_bytes()
+        if hashlib.sha256(packet_bytes).hexdigest() != context.evidence_packet_sha256:
+            raise ValueError("Evidence packet hash mismatch")
+        packet = ContextPacket.model_validate_json(packet_bytes)
+        validate_packet_context(packet, context)
+        profile = ReviewAgent(args.profile)
+        profiles = tuple(ReviewAgent(value) for value in args.review_profile) or (profile,)
+        if profile not in profiles:
+            raise ValueError("selected profile must be included in review profiles")
+        override_refs = _profile_context_override_refs(
+            packet, profile, set(context.changed_files), profiles
+        )
+        selected = select_context(packet, profile, max_bytes=args.max_bytes,
+                                  profile_override_refs=override_refs)
+        payload = {
+            "profile": profile.value, "review_profiles": [p.value for p in profiles],
+            "included_refs": selected.included_refs, "omitted_refs": selected.omitted_refs,
+            "budget_omitted_refs": selected.budget_omitted_refs,
+            "selected_bytes": len(selected.text.encode("utf-8")),
+            "selected_sha256": selected.sha256,
+            "max_bytes": args.max_bytes,
+            "note": "Packet bytes only; full executor prompt overhead may reduce the available budget.",
+        }
         output = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
         if args.output:
             args.output.write_text(output, encoding="utf-8")

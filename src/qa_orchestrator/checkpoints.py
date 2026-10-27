@@ -14,7 +14,8 @@ from qa_orchestrator.contracts import (
 )
 
 
-def checkpoint_key(context, route, model_policy, previous_reports, executor_identity: str) -> str:
+def checkpoint_key(context, route, model_policy, previous_reports, executor_identity: str, *,
+                   previous_report_projection=None) -> str:
     if not executor_identity.strip():
         raise ValueError("checkpoint reuse requires an explicit executor/instruction version")
     data = {
@@ -22,7 +23,10 @@ def checkpoint_key(context, route, model_policy, previous_reports, executor_iden
         "context": context.model_dump(mode="json"),
         "route": route.model_dump(mode="json"),
         "model_policy": model_policy.model_dump(mode="json") if model_policy else None,
-        "previous_reports": [r.model_dump(mode="json") for r in previous_reports],
+        "previous_reports": (
+            previous_report_projection(previous_reports) if previous_report_projection is not None
+            else [r.model_dump(mode="json") for r in previous_reports]
+        ),
         "executor_identity": executor_identity,
     }
     return hashlib.sha256(

@@ -580,6 +580,9 @@ class ProfileAttemptObservation(BaseModel):
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
     cached_input_tokens: int | None = Field(default=None, ge=0)
+    prompt_bytes: int | None = Field(default=None, ge=0)
+    evidence_packet_bytes: int | None = Field(default=None, ge=0)
+    prompt_overhead_bytes: int | None = Field(default=None, ge=0)
     preparation_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     model_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     validation_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
@@ -590,6 +593,8 @@ class ProfileAttemptObservation(BaseModel):
     included_evidence_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=1000)
     omitted_evidence_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=1000)
     included_source_paths: tuple[ChangedFilePath, ...] = Field(default=(), max_length=500)
+    failure_kind: Literal["input_preparation", "cli_failure", "output_missing",
+                          "output_validation", "timeout", "cancelled", "executor_error"] | None = None
     cli_failure_detail: str | None = Field(default=None, max_length=512)
     cli_exit_code: int | None = Field(default=None, ge=-255, le=255)
     cli_event_type: Literal["error", "turn.failed"] | None = None
@@ -620,7 +625,7 @@ class ProfileAttemptMetrics(ProfileAttemptObservation):
     @model_serializer(mode="wrap")
     def serialize_optional_input_receipt(self, handler):
         payload = handler(self)
-        for field in ("review_head_sha", "review_diff_sha256", "submitted_prompt_sha256", "prompt_write_status", "source_packet_sha256", "selected_packet_sha256"):
+        for field in ("review_head_sha", "review_diff_sha256", "submitted_prompt_sha256", "prompt_write_status", "source_packet_sha256", "selected_packet_sha256", "failure_kind"):
             if getattr(self, field) is None:
                 payload.pop(field, None)
         for field in ("included_evidence_refs", "omitted_evidence_refs", "included_source_paths"):
@@ -1361,11 +1366,22 @@ class ProfileReviewReport(BaseModel):
             "Evidence-backed dispositions for the material behavior scenarios this profile checked."
         ),
     )
+    targeted_scenario_audit: tuple[ReviewScenarioDisposition, ...] = Field(
+        default=(), max_length=MAX_REVIEW_SCENARIOS,
+        description="Prior queued scenario dispositions, only for the omission auditor.",
+    )
     evidence_map: tuple[ReviewEvidenceMapEntry, ...] = Field(default=(), max_length=500)
     execution_metrics: ProfileExecutionMetrics | None = Field(
         default=None,
         description="Optional host-reported execution data; the orchestrator does not verify it.",
     )
+
+    @model_serializer(mode="wrap")
+    def serialize_optional_targeted_audit(self, handler):
+        payload = handler(self)
+        if not self.targeted_scenario_audit:
+            payload.pop("targeted_scenario_audit", None)
+        return payload
 
     @field_validator("review_rules_sha256")
     @classmethod
@@ -1379,6 +1395,13 @@ class ProfileReviewReport(BaseModel):
             and self.finding_candidates
         ):
             raise ValueError(f"{self.profile.value} cannot report implementation findings")
+        if self.targeted_scenario_audit and self.profile != ReviewAgent.OMISSION_AUDITOR:
+            raise ValueError("targeted scenario audit is reserved for omission_auditor")
+        audit_keys = {
+            " ".join(item.scenario.split()).casefold() for item in self.targeted_scenario_audit
+        }
+        if len(audit_keys) != len(self.targeted_scenario_audit):
+            raise ValueError("targeted scenario audit scenarios must be unique")
         if len({entry.evidence_ref for entry in self.evidence_map}) != len(self.evidence_map):
             raise ValueError("evidence_map references must be unique")
         if len({finding.candidate_id for finding in self.finding_candidates}) != len(

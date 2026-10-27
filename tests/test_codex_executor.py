@@ -71,15 +71,40 @@ def test_omission_auditor_gets_a_target_queue_for_unverified_scenarios(executor_
     queue = json.loads(instruction.splitlines()[1])
 
     assert "Targeted second-pass queue" in instruction
-    assert "A retried request can repeat the wallet write." in instruction
-    assert "E1" in instruction
+    assert "A retried request can repeat the wallet write." not in instruction
     assert "copy the scenario text exactly" in instruction.lower()
-    assert queue["items"][0]["evidence_refs"] == ["E1", "E2"]
-    assert queue["items"][0]["source_profiles"] == [
-        ReviewAgent.CODE_REVIEWER.value,
-        ReviewAgent.PR_TEST_ANALYZER.value,
+    assert queue["items"][0]["sources"] == [
+        [0, "scenario_coverage", 0],
+        [1, "scenario_coverage", 0],
     ]
     assert len(queue["items"]) == 1
+
+
+def test_target_queue_keeps_source_coordinates_and_reports_truncation(executor_input):
+    from qa_orchestrator.codex_executor import _targeted_scenario_audit_instruction
+    from qa_orchestrator.contracts import ProfileReviewReport, ReviewNote, ReviewScenarioDisposition
+
+    _, job, _ = executor_input
+    scenarios = tuple(
+        ReviewScenarioDisposition(
+            scenario=f"Scenario {i}", disposition="unverified", evidence_refs=("E1",),
+            rationale=f"Missing evidence {i}",
+        ) for i in range(25)
+    )
+    prior = ProfileReviewReport(
+        profile=ReviewAgent.CODE_REVIEWER, scope="Checked.", scenario_coverage=scenarios,
+        unverified=(ReviewNote(text="Scenario 0", evidence_refs=("E2",)),),
+        coverage_gaps=(ReviewNote(text="Another missing scenario", evidence_refs=("E3",)),),
+    )
+    job = replace(job, profile=ReviewAgent.OMISSION_AUDITOR, previous_reports=(prior,))
+    queue = json.loads(_targeted_scenario_audit_instruction(job).splitlines()[1])
+    assert queue["items"][0]["sources"] == [
+        [0, "scenario_coverage", 0], [0, "unverified", 0],
+    ]
+    assert len(queue["items"]) == 25
+    assert queue["omitted_count"] == 1
+    assert prior.scenario_coverage[0].evidence_refs == ("E1",)
+    assert prior.unverified[0].evidence_refs == ("E2",)
 
 
 async def test_omission_auditor_prompt_includes_the_targeted_scenario_queue(executor_input, tmp_path):
@@ -118,13 +143,19 @@ async def test_omission_auditor_prompt_includes_the_targeted_scenario_queue(exec
 
     prompt = captured_prompt.read_text()
     assert "Targeted second-pass queue" in prompt
-    assert "A retried request can repeat the wallet write." in prompt
+    assert prompt.count("A retried request can repeat the wallet write.") == 1
     assert "same path does not close a different failure mechanism" in prompt.lower()
     assert "linear whole-input scans can exhaust memory without an ingress limit" in prompt.lower()
     assert "trace url parsing through the real update trigger" in prompt.lower()
     assert "helper output alone does not prove a navigation refresh" in prompt.lower()
     assert prompt.count("flip_condition") == 1
     assert prompt.count("expected_behavior") == 1
+    prior_data = prompt.split("Prior-wave reports (data):\n", 1)[1].splitlines()[0]
+    prior_report = json.loads(prior_data)[0]
+    assert prior_report["scenario_coverage"][0]["evidence_refs"] == ["E1"]
+    assert "execution_metrics" not in prior_report
+    assert "context_selection" not in prior_report
+    assert "review_rules_sha256" not in prior_report
 
 
 def test_context_selection_must_include_scenario_evidence(executor_input):
@@ -196,6 +227,9 @@ async def test_executor_rejects_forbidden_findings_despite_schema(
     with pytest.raises(RetryableProfileOutputError, match="CLI reviewer returned an invalid report") as error:
         await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(job)
     assert f"{profile} cannot report implementation findings" in str(error.value.__cause__)
+    assert error.value.retained_output is not None
+    assert b"finding_candidates" in error.value.retained_output
+    assert "finding_candidates" not in str(error.value)
 
 
 def test_executor_schema_change_invalidates_previous_identity(executor_input):
@@ -516,6 +550,7 @@ async def test_executor_reports_json_failure_type_without_exposing_event_body(ex
     assert "/Users/private" not in message
     assert observed.cli_exit_code == 0
     assert observed.cli_event_type == "turn.failed"
+    assert observed.failure_kind == "cli_failure"
     assert observed.cli_failure_detail is None
 
 
@@ -624,7 +659,9 @@ async def test_executor_selects_context_and_binds_actual_subset_hash(executor_in
         "assert 'BUDGET_OMITTED' not in prompt\nassert 'E2' not in prompt and 'E5' not in prompt\n"
         "assert '1 of 2 changed paths have excerpts available' in prompt\n"
             "assert 'Inspect every changed path and indexed hunk' in prompt\n"
-        "assert len(prompt.encode())<=12288",
+        "assert len(prompt.encode())<=12288\n"
+        "assert '\"evidence_registry\":' not in prompt\n"
+        "assert 'Evidence registry metadata for included refs' in prompt",
     ))
     report = await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(job)
     assert report.context_selection.included_refs == ("E1", "E3", "E4")
@@ -637,6 +674,8 @@ async def test_executor_selects_context_and_binds_actual_subset_hash(executor_in
     assert observation.source_packet_sha256 == context.evidence_packet_sha256
     assert observation.selected_packet_sha256 == report.context_selection.selected_packet_sha256
     assert observation.submitted_prompt_sha256 is not None
+    assert observation.prompt_bytes == observation.evidence_packet_bytes + observation.prompt_overhead_bytes
+    assert observation.evidence_packet_bytes == report.context_selection.selected_bytes
     assert observation.prompt_write_status == "written"
     assert observation.included_evidence_refs == ("E1", "E3", "E4")
     assert observation.omitted_evidence_refs == ("E2", "E5")
@@ -940,3 +979,187 @@ async def test_cleanup_stops_descendant_even_after_cli_parent_exits(executor_inp
         )(job)
     await asyncio.sleep(1.2)
     assert not marker.exists()
+
+
+def test_auditor_has_separate_capacity_for_prior_and_new_scenarios():
+    from qa_orchestrator.codex_executor import _output_schema
+    from qa_orchestrator.contracts import ProfileReviewReport, ReviewScenarioDisposition
+
+    def items(prefix):
+        return tuple(ReviewScenarioDisposition(
+            scenario=f"{prefix} {i}", disposition="unverified", evidence_refs=("E1",),
+            rationale="Needs verification.",
+        ) for i in range(25))
+    report = ProfileReviewReport(
+        profile=ReviewAgent.OMISSION_AUDITOR, scope="Checked.",
+        targeted_scenario_audit=items("prior"), scenario_coverage=items("new"),
+    )
+    assert len(report.targeted_scenario_audit) == len(report.scenario_coverage) == 25
+    schema = _output_schema(ReviewAgent.OMISSION_AUDITOR)
+    assert "targeted_scenario_audit" in schema["required"]
+    assert "targeted_scenario_audit" not in _output_schema(ReviewAgent.CODE_REVIEWER)["properties"]
+    with pytest.raises(ValueError, match="reserved"):
+        ProfileReviewReport(profile=ReviewAgent.CODE_REVIEWER, scope="Checked.",
+                            targeted_scenario_audit=items("prior"))
+
+
+def test_retained_output_revalidation_uses_original_profile_and_evidence(executor_input):
+    from datetime import UTC, datetime
+
+    from qa_orchestrator.codex_executor import revalidate_retained_profile_output
+    from qa_orchestrator.contracts import (
+        ProfileExecutionMetrics,
+        ProfileReviewReport,
+        ReviewScenarioDisposition,
+    )
+    from qa_orchestrator.host import RetainedProfileOutput
+
+    _, job, _ = executor_input
+    context = job.session.review_context
+    now = datetime.now(UTC)
+    valid = ProfileReviewReport(
+        profile=job.profile, scope="Reviewed.",
+        execution_metrics=ProfileExecutionMetrics(started_at=now, completed_at=now, input_tokens=123),
+    )
+    retained = RetainedProfileOutput(
+        job.profile, 1, valid.model_dump_json().encode(), review_head_sha=context.head_sha,
+        review_diff_sha256=context.diff_sha256, source_packet_sha256=context.evidence_packet_sha256,
+    )
+    with pytest.raises(ValueError, match="does not match"):
+        revalidate_retained_profile_output(
+            retained, context.model_copy(update={"head_sha": "f" * 40}),
+        )
+    result = revalidate_retained_profile_output(retained, context)
+    assert result.profile == job.profile
+    assert result.execution_metrics is None
+    bad = ProfileReviewReport(
+        profile=job.profile, scope="Reviewed.", scenario_coverage=(ReviewScenarioDisposition(
+            scenario="A scenario", disposition="unverified", evidence_refs=("E999",),
+            rationale="Missing evidence.",
+        ),),
+    )
+    with pytest.raises(ValueError, match="outside the bound context"):
+        revalidate_retained_profile_output(retained, context, output=bad.model_dump_json().encode())
+    wrong_profile = ProfileReviewReport(profile=ReviewAgent.CODE_REVIEWER, scope="Wrong.")
+    with pytest.raises(ValueError, match="profile"):
+        revalidate_retained_profile_output(retained, context, output=wrong_profile.model_dump_json().encode())
+
+
+def test_auditor_missing_queued_scenarios_become_explicit_coverage_gaps(executor_input):
+    from qa_orchestrator.codex_executor import _with_targeted_audit_coverage_gaps
+    from qa_orchestrator.contracts import ProfileReviewReport, ReviewScenarioDisposition
+
+    _, job, _ = executor_input
+    scenarios = tuple(ReviewScenarioDisposition(
+        scenario=f"Scenario {i}", disposition="unverified", evidence_refs=("E1",),
+        rationale="Missing evidence.",
+    ) for i in range(25))
+    prior = ProfileReviewReport(profile=ReviewAgent.CODE_REVIEWER, scope="Checked.",
+                                scenario_coverage=scenarios)
+    job = replace(job, profile=ReviewAgent.OMISSION_AUDITOR, previous_reports=(prior,))
+    report = ProfileReviewReport(profile=ReviewAgent.OMISSION_AUDITOR, scope="Checked.",
+                                 targeted_scenario_audit=scenarios[:24])
+    checked = _with_targeted_audit_coverage_gaps(job, report)
+    assert any("Scenario 24" in gap.text and gap.evidence_refs == ("E1",)
+               for gap in checked.coverage_gaps)
+    complete = report.model_copy(update={"targeted_scenario_audit": scenarios})
+    assert _with_targeted_audit_coverage_gaps(job, complete) == complete
+
+
+def test_auditor_queue_truncation_is_host_reported(executor_input):
+    from qa_orchestrator.codex_executor import _with_targeted_audit_coverage_gaps
+    from qa_orchestrator.contracts import ProfileReviewReport, ReviewNote, ReviewScenarioDisposition
+
+    _, job, _ = executor_input
+    scenarios = tuple(ReviewScenarioDisposition(
+        scenario=f"Scenario {i}", disposition="unverified", evidence_refs=("E1",),
+        rationale="Missing evidence.",
+    ) for i in range(25))
+    prior = ProfileReviewReport(
+        profile=ReviewAgent.CODE_REVIEWER, scope="Checked.", scenario_coverage=scenarios,
+        coverage_gaps=(ReviewNote(text="Additional scenario", evidence_refs=("E1",)),),
+    )
+    job = replace(job, profile=ReviewAgent.OMISSION_AUDITOR, previous_reports=(prior,))
+    report = ProfileReviewReport(profile=ReviewAgent.OMISSION_AUDITOR, scope="Checked.",
+                                 targeted_scenario_audit=scenarios)
+    checked = _with_targeted_audit_coverage_gaps(job, report)
+    assert any("omitted 1 scenario" in gap.text for gap in checked.coverage_gaps)
+
+
+def test_targeted_audit_overflow_is_summarized(executor_input):
+    from qa_orchestrator.codex_executor import _with_targeted_audit_coverage_gaps
+    from qa_orchestrator.contracts import ProfileReviewReport, ReviewNote, ReviewScenarioDisposition
+
+    _, job, _ = executor_input
+    prior = ProfileReviewReport(
+        profile=ReviewAgent.CODE_REVIEWER, scope="Checked.",
+        scenario_coverage=tuple(ReviewScenarioDisposition(
+            scenario=f"Scenario {i}", disposition="unverified", evidence_refs=("E1",),
+            rationale="Missing.",
+        ) for i in range(25)),
+    )
+    report = ProfileReviewReport(profile=ReviewAgent.OMISSION_AUDITOR, scope="Audited.",
+                                 coverage_gaps=tuple(ReviewNote(text=f"Gap {i}") for i in range(97)))
+    checked = _with_targeted_audit_coverage_gaps(
+        replace(job, profile=ReviewAgent.OMISSION_AUDITOR, previous_reports=(prior,)), report,
+    )
+    assert len(checked.coverage_gaps) == 98
+    assert "25 queue coverage issue" in checked.coverage_gaps[-1].text
+
+
+def test_retained_auditor_revalidation_checks_original_queue(executor_input):
+    from qa_orchestrator.codex_executor import revalidate_retained_profile_output
+    from qa_orchestrator.contracts import ProfileReviewReport, ReviewScenarioDisposition
+    from qa_orchestrator.host import RetainedProfileOutput
+
+    _, job, _ = executor_input
+    context = job.session.review_context
+    prior = ProfileReviewReport(profile=ReviewAgent.CODE_REVIEWER, scope="Checked.",
+        scenario_coverage=(ReviewScenarioDisposition(
+            scenario="Unreviewed case", disposition="unverified", evidence_refs=("E1",),
+            rationale="Missing evidence.",),))
+    report = ProfileReviewReport(profile=ReviewAgent.OMISSION_AUDITOR, scope="Audited.")
+    retained = RetainedProfileOutput(
+        ReviewAgent.OMISSION_AUDITOR, 1, report.model_dump_json().encode(),
+        review_head_sha=context.head_sha, review_diff_sha256=context.diff_sha256,
+        source_packet_sha256=context.evidence_packet_sha256, previous_reports=(prior,),
+    )
+    result = revalidate_retained_profile_output(retained, context)
+    assert any("Unreviewed case" in gap.text for gap in result.coverage_gaps)
+    with pytest.raises(ValueError, match="original prior reports"):
+        revalidate_retained_profile_output(replace(retained, previous_reports=None), context)
+
+
+def test_targeted_audit_exposes_merged_sources_without_cited_evidence(executor_input):
+    from qa_orchestrator.codex_executor import _with_targeted_audit_coverage_gaps
+    from qa_orchestrator.contracts import ProfileReviewReport, ReviewScenarioDisposition
+
+    _, job, _ = executor_input
+    def item(ref):
+        return ReviewScenarioDisposition(scenario="Same scenario", disposition="unverified",
+                                         evidence_refs=(ref,), rationale="Check.")
+    prior = (
+        ProfileReviewReport(profile=ReviewAgent.CODE_REVIEWER, scope="A", scenario_coverage=(item("E1"),)),
+        ProfileReviewReport(profile=ReviewAgent.PR_TEST_ANALYZER, scope="B", scenario_coverage=(item("E2"),)),
+    )
+    job = replace(job, profile=ReviewAgent.OMISSION_AUDITOR, previous_reports=prior)
+    partial = ProfileReviewReport(profile=ReviewAgent.OMISSION_AUDITOR, scope="Audit",
+                                  targeted_scenario_audit=(item("E1"),))
+    result = _with_targeted_audit_coverage_gaps(job, partial)
+    assert any("E2" in gap.evidence_refs and "Same scenario" in gap.text for gap in result.coverage_gaps)
+    complete = partial.model_copy(update={"targeted_scenario_audit": (
+        item("E1").model_copy(update={"evidence_refs": ("E1", "E2")}),)})
+    assert _with_targeted_audit_coverage_gaps(job, complete).coverage_gaps == ()
+
+
+async def test_executor_observation_distinguishes_preparation_and_output_failures(executor_input):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.contracts import ProfileAttemptObservation
+
+    packet, job, script = executor_input
+    observation = ProfileAttemptObservation()
+    packet.write_text("tampered")
+    with pytest.raises(ValueError, match="hash mismatch"):
+        await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(
+            replace(job, observation=observation))
+    assert observation.failure_kind == "input_preparation"

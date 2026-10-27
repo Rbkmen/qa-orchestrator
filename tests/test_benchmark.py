@@ -433,6 +433,9 @@ def test_schema_four_keeps_schedule_and_failed_attempt_metadata(benchmark_inputs
     run = results_data["runs"][0]
     run["attempt"] = 1
     run["queue_wait_ms"] = 75
+    run["input_tokens"] = 100
+    run["output_tokens"] = 20
+    run["token_usage_scope"] = "attempt_only"
     run["missed_gold_diagnoses"] = [
         {
             "gold_id": "G-2",
@@ -449,6 +452,8 @@ def test_schema_four_keeps_schedule_and_failed_attempt_metadata(benchmark_inputs
             "checklist_sha256": run["checklist_sha256"],
             "host_instructions_sha256": run["host_instructions_sha256"],
             "attempt": 2,
+            "input_tokens": 40,
+            "output_tokens": 5,
             "failure_code": "provider_failed",
             "error_type": "RuntimeError",
         }
@@ -466,7 +471,52 @@ def test_schema_four_keeps_schedule_and_failed_attempt_metadata(benchmark_inputs
 
     assert score["schema_version"] == 4
     assert score["configurations"]["baseline"]["failed_attempts"] == 1
+    assert score["configurations"]["baseline"]["total_input_tokens_including_failures"] == 140
+    assert score["configurations"]["baseline"]["total_output_tokens_including_failures"] == 25
+    results_data["failures"][0]["input_tokens"] = None
+    unknown = score_benchmark(
+        BenchmarkDataset.model_validate(dataset_data),
+        BenchmarkResults.model_validate(results_data),
+    )
+    assert unknown["configurations"]["baseline"]["total_input_tokens_including_failures"] is None
     assert score["runs"][0]["missed_gold"][0]["diagnosis"] == "uncertain"
+
+
+def test_failed_attempt_tokens_are_not_double_counted_in_cumulative_host_usage(benchmark_inputs):
+    dataset_data, results_data = deepcopy(benchmark_inputs)
+    results_data["schema_version"] = 4
+    run = results_data["runs"][0]
+    run.update(attempt=2, input_tokens=140, output_tokens=25)
+    results_data["failures"] = [{
+        "case_id": run["case_id"], "configuration_id": run["configuration_id"],
+        "model": run["model"], "reasoning": run["reasoning"],
+        "checklist_sha256": run["checklist_sha256"],
+        "host_instructions_sha256": run["host_instructions_sha256"],
+        "attempt": 1, "failure_code": "retryable", "error_type": "RetryableProfileError",
+        "input_tokens": 40, "output_tokens": 5,
+    }]
+    dataset = BenchmarkDataset.model_validate(dataset_data)
+    for scope in (None, "includes_retries"):
+        if scope is None:
+            run.pop("token_usage_scope", None)
+        else:
+            run["token_usage_scope"] = scope
+        score = score_benchmark(dataset, BenchmarkResults.model_validate(results_data))
+        aggregate = score["configurations"]["baseline"]
+        assert aggregate["total_input_tokens_including_failures"] is None
+        assert aggregate["total_output_tokens_including_failures"] is None
+        assert "may include failed attempts" in aggregate["token_total_limitation"]
+    run.update(input_tokens=100, output_tokens=20, token_usage_scope="attempt_only")
+    aggregate = score_benchmark(dataset, BenchmarkResults.model_validate(results_data))["configurations"]["baseline"]
+    assert aggregate["total_input_tokens_including_failures"] == 140
+    assert aggregate["total_output_tokens_including_failures"] == 25
+    assert "token_total_limitation" not in aggregate
+
+
+def test_successful_usage_scope_is_omitted_from_legacy_json(benchmark_inputs):
+    _, data = benchmark_inputs
+    run = BenchmarkResults.model_validate(data).runs[0]
+    assert "token_usage_scope" not in run.model_dump(mode="json")
 
 
 def test_quality_gate_checks_low_recall_strata_and_p95_latency(benchmark_inputs):
@@ -1985,3 +2035,38 @@ def test_speed_comparison_cli_applies_quality_policy_and_reports_exploratory_wit
 
 def test_speed_comparison_cli_writes_artifact(tmp_path, benchmark_inputs):
     _exercise_speed_comparison_cli(tmp_path, benchmark_inputs)
+
+
+def test_benchmark_usage_is_derived_from_complete_profile_attempt_ledger(benchmark_inputs):
+    from datetime import UTC, datetime
+
+    from qa_orchestrator.benchmark import benchmark_run_with_attempt_usage
+    from qa_orchestrator.contracts import ProfileAttemptMetrics, ReviewAgent
+
+    _, data = benchmark_inputs
+    run = BenchmarkResults.model_validate(data).runs[0]
+    now = datetime.now(UTC)
+    def entry(attempt, outcome, input_tokens, output_tokens):
+        return ProfileAttemptMetrics(
+            profile=ReviewAgent.CODE_REVIEWER, attempt=attempt, outcome=outcome,
+            review_head_sha=run.head_sha, review_diff_sha256=run.diff_sha256,
+            started_at=now, completed_at=now, queue_seconds=0, executor_seconds=0,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+        )
+    failed = entry(1, "retryable_error", 40, 5)
+    completed = entry(2, "completed", 100, 20)
+    measured = benchmark_run_with_attempt_usage(
+        run, (failed, completed), expected_profiles=(ReviewAgent.CODE_REVIEWER,),
+    )
+    assert (measured.input_tokens, measured.output_tokens, measured.token_usage_scope) == (
+        140, 25, "includes_retries"
+    )
+    unknown = benchmark_run_with_attempt_usage(
+        run, (entry(1, "retryable_error", None, 5), completed),
+        expected_profiles=(ReviewAgent.CODE_REVIEWER,),
+    )
+    assert unknown.input_tokens is None and unknown.output_tokens == 25
+    with pytest.raises(ValueError, match="contiguous"):
+        benchmark_run_with_attempt_usage(run, (completed,), expected_profiles=(ReviewAgent.CODE_REVIEWER,))
+    with pytest.raises(ValueError, match="cover every"):
+        benchmark_run_with_attempt_usage(run, (), expected_profiles=(ReviewAgent.CODE_REVIEWER,))

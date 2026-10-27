@@ -1122,3 +1122,26 @@ async def test_unknown_profile_is_rejected_by_mcp_schema(tmp_path):
     async with Client(build_server(service)) as client:
         with pytest.raises(ToolError):
             await client.call_tool("prepare_qa_orchestration", {"agent_profile": "unknown"})
+
+
+@pytest.mark.asyncio
+async def test_compact_advance_preserves_recovery_state_and_default_response(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    async with Client(build_server(service)) as client:
+        started = (await client.call_tool("start_qa_orchestration", {"task_type": "other"})).structured_content
+        result = (await client.call_tool("advance_qa_orchestration", {
+            "run_id": started["run_id"], "completed_step": "triage", "status": "completed",
+            "selected_profile": "code_reviewer", "compact_response": True,
+        })).structured_content
+        assert result["current_step"] == "primary_review"
+        assert result["selected_review_routes"]["routes"]
+        for key in ("review_context", "profile_reports", "audit_events", "transition_receipts"):
+            assert key not in result
+        full = (await client.call_tool("get_qa_orchestration", {"run_id": started["run_id"]})).structured_content
+        assert "audit_events" in full and "profile_reports" in full
+        other = (await client.call_tool("start_qa_orchestration", {"task_type": "other"})).structured_content
+        default = (await client.call_tool("advance_qa_orchestration", {
+            "run_id": other["run_id"], "completed_step": "triage", "status": "completed",
+            "selected_profile": "code_reviewer",
+        })).structured_content
+        assert "audit_events" in default and "profile_reports" in default

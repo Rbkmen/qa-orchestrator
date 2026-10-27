@@ -1783,7 +1783,7 @@ class QaOrchestrator:
                     )
                     report_refs.update(
                         reference
-                        for item in report.scenario_coverage
+                        for item in (*report.scenario_coverage, *report.targeted_scenario_audit)
                         for reference in item.evidence_refs
                     )
                     report_refs.update(entry.evidence_ref for entry in report.evidence_map)
@@ -1812,7 +1812,7 @@ class QaOrchestrator:
                 or report.unverified
                 or any(
                     item.disposition in {"candidate", "unverified"}
-                    for item in report.scenario_coverage
+                    for item in (*report.scenario_coverage, *report.targeted_scenario_audit)
                 )
                 for report in transition_reports
             ):

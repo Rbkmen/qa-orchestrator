@@ -502,7 +502,15 @@ coverage gap when the matrix is full.
 Bundles already place `OMISSION_AUDITOR` after specialist profiles. Its prompt
 now gives it a bounded queue of candidate/unverified scenarios, prior
 unverified notes, and coverage gaps, then requires it to preserve exact scenario
-text while checking the bound packet. A single-profile route adds one auditor
+text in `targeted_scenario_audit` while checking the bound packet; newly discovered scenarios use `scenario_coverage` with separate capacity. Both sets are carried into synthesis or exposed as gaps. A single-profile route adds one auditor
 pass only when unresolved items exist and waits to assess risk until that pass
 finishes. This improves traceability and makes omissions visible; it does not
 prove model reasoning or guarantee that the queue is semantically complete.
+
+### Preview profile context before execution
+
+`qa-orch evidence preview-selection --context packed-context.json --packet context-packet.json --profile python_reviewer` prints selected and omitted refs, selected packet bytes and the selected hash without launching a model. Add `--review-profile` once for each profile in the actual route so shared-evidence overrides match that route. The preview checks the bound packet hash and registry. Its byte limit applies to the packet alone: executor prompt overhead may reduce the final packet budget. The host must choose the plan based on inspected evidence; do not infer that omitted context is irrelevant.
+
+For structured packets, included evidence metadata appears with each packet fragment rather than being duplicated in the bound-context JSON sent to the model. The full bound registry remains available to host validation. Legacy packets retain the original context representation.
+
+The Codex executor's omission-audit queue uses zero-based references to entries in prior reports rather than duplicating scenario text and rationale. Each grouped queue item retains references to all matching entries; the first entry supplies the canonical text. Full prior reports remain in the prompt. The existing 25-item queue limit and explicit truncation warning still apply.

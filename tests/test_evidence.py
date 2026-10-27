@@ -2804,3 +2804,20 @@ def test_discovery_skips_symbol_search_when_neighbor_file_exceeds_byte_cap(
     assert manifest["symbol_search_paths_considered"] == 0
     assert manifest["symbol_search_paths_skipped_by_size"] == 1
     assert manifest["candidate_records"] == []
+
+
+def test_targeted_audit_is_preserved_in_final_coverage(bound_review_context, make_final_review_report):
+    from qa_orchestrator.contracts import ReviewScenarioDisposition
+    from qa_orchestrator.evidence import complete_scenario_coverage
+
+    item = ReviewScenarioDisposition(
+        scenario="A previously queued scenario", disposition="unverified", evidence_refs=("E1",),
+        rationale="The consumer contract is missing.",
+    )
+    profile = ProfileReviewReport(
+        profile=ReviewAgent.OMISSION_AUDITOR, scope="Audited.", targeted_scenario_audit=(item,),
+    )
+    final = make_final_review_report((ReviewAgent.OMISSION_AUDITOR,))
+    result = complete_scenario_coverage(bound_review_context, (profile,), final)
+    assert any(s.scenario == item.scenario and s.disposition == "unverified"
+               for s in result.scenario_coverage)

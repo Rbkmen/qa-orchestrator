@@ -372,6 +372,9 @@ def build_server(service: OrchestratorService) -> FastMCP:
             bool,
             Field(description="At triage, explicitly accept that the selected test analyzer or explorer cannot report implementation findings."),
         ] = False,
+        compact_response: Annotated[
+            bool, Field(description="Return workflow state without stored context, reports and audit history; use get_qa_orchestration for full state.")
+        ] = False,
     ) -> QaOrchestrationAdvanceResult:
         """Record one active QA step's result; return updated state and next_action instructions for the host.
 
@@ -406,7 +409,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
           transition error, read get_qa_orchestration(run_id) and continue from its current_step;
           if the session is unknown or expired, start a new session.
         """
-        return service.advance_qa_orchestration(
+        result = service.advance_qa_orchestration(
             AdvanceQaOrchestrationRequest(
                 run_id=run_id,
                 completed_step=completed_step,
@@ -424,6 +427,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
                 acknowledge_limited_profile=acknowledge_limited_profile,
             ),
         )
+        result._compact_response = compact_response
+        return result
 
     @mcp.tool(title="Renew active QA session lease", annotations=STATE_TOOL_ANNOTATIONS)
     def renew_qa_orchestration(

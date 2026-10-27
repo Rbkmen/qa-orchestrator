@@ -490,6 +490,8 @@ def _render_profile_execution(report: FinalReviewReport) -> list[str]:
             ):
                 if value is not None:
                     attempt_details.append(f"{label} {value:.2f}s")
+            if attempt.failure_kind is not None:
+                attempt_details.append(f"failure kind {_text(attempt.failure_kind)}")
             if attempt.input_tokens is not None:
                 attempt_details.append(f"input tokens {attempt.input_tokens}")
             if attempt.output_tokens is not None:

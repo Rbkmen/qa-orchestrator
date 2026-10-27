@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, PrivateAttr, model_serializer
 
 from qa_orchestrator.config import Settings
 from qa_orchestrator.contracts import (
@@ -34,6 +34,17 @@ from qa_orchestrator.session_store import SqliteSessionStore
 
 
 class QaOrchestrationAdvanceResult(QaOrchestrationSession):
+    _compact_response: bool = PrivateAttr(default=False)
+
+    @model_serializer(mode="wrap")
+    def serialize_response(self, handler):
+        payload = handler(self)
+        if self._compact_response:
+            for name in ("review_context", "profile_reports", "final_review_report",
+                         "audit_events", "transition_receipts"):
+                payload.pop(name, None)
+        return payload
+
     route_warning: str | None = Field(
         default=None,
         description="Advisory scope limitation for a selected single profile; not a finding.",
