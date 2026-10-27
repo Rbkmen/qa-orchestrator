@@ -134,7 +134,7 @@ def test_ci_uses_immutable_actions_and_builds_wheel():
     assert "cancel-in-progress: true" in content
     assert "github.event.pull_request.number || github.ref" in content
     assert "uv build --wheel --out-dir dist" in content
-    assert 'os: ["ubuntu-latest", "windows-latest"]' in content
+    assert 'os: ["ubuntu-latest", "macos-latest", "windows-latest"]' in content
     assert '"uv", "pip", "install"' in content
     assert "working-directory: ${{ runner.temp }}" in content
     assert (

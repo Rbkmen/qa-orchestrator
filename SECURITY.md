@@ -16,7 +16,9 @@ strictly necessary to reproduce the issue.
 QA Orchestrator keeps evidence, prompts, model responses, and final QA decisions
 in the host agent. By default, session state stays in process memory. If
 `QA_ORCHESTRATOR_SESSION_STORE_PATH` is explicitly set, a local SQLite file
-stores only unfinished structured session state for restart recovery; the row
-is deleted at finalization. Final outcomes, task history, and statistics are not
-persisted. Review the [installation guide](docs/INSTALLATION.md) before sharing
-diagnostic output.
+stores unfinished sessions and finalized reviews that contain structured review
+artifacts. These rows are available for restart recovery until normal expiry or
+capacity cleanup. Terminal sessions without review artifacts are not persisted.
+The store contains structured reports and session metadata, not raw evidence
+packets or prompts. Review the [installation guide](docs/INSTALLATION.md) before
+sharing diagnostic output.
