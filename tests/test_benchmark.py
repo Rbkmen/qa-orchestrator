@@ -2050,6 +2050,7 @@ def test_benchmark_usage_is_derived_from_complete_profile_attempt_ledger(benchma
         return ProfileAttemptMetrics(
             profile=ReviewAgent.CODE_REVIEWER, attempt=attempt, outcome=outcome,
             review_head_sha=run.head_sha, review_diff_sha256=run.diff_sha256,
+            source_packet_sha256=run.evidence_packet_sha256,
             started_at=now, completed_at=now, queue_seconds=0, executor_seconds=0,
             input_tokens=input_tokens, output_tokens=output_tokens,
         )
@@ -2070,3 +2071,15 @@ def test_benchmark_usage_is_derived_from_complete_profile_attempt_ledger(benchma
         benchmark_run_with_attempt_usage(run, (completed,), expected_profiles=(ReviewAgent.CODE_REVIEWER,))
     with pytest.raises(ValueError, match="cover every"):
         benchmark_run_with_attempt_usage(run, (), expected_profiles=(ReviewAgent.CODE_REVIEWER,))
+    with pytest.raises(ValueError, match="packet"):
+        benchmark_run_with_attempt_usage(
+            run, (entry(1, "completed", 100, 20).model_copy(
+                update={"source_packet_sha256": "f" * 64}
+            ),), expected_profiles=(ReviewAgent.CODE_REVIEWER,),
+        )
+    unbound = benchmark_run_with_attempt_usage(
+        run, (entry(1, "completed", 100, 20).model_copy(
+            update={"source_packet_sha256": None}
+        ),), expected_profiles=(ReviewAgent.CODE_REVIEWER,),
+    )
+    assert unbound.input_tokens is None and unbound.output_tokens is None

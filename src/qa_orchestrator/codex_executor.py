@@ -362,7 +362,7 @@ class CodexProfileExecutor:
         return hashlib.sha256(
             json.dumps(
                 {
-                    "implementation": "codex-packet-executor-v22",
+                    "implementation": "codex-packet-executor-v23",
                     "command": self.command,
                     "max_context_bytes": self.max_context_bytes,
                     "model": self.model,
@@ -426,6 +426,7 @@ class CodexProfileExecutor:
                 for fragment in structured.fragments
                 if fragment.record.kind == "source"
                 and fragment.record.revision == context.head_sha
+                and fragment.record.source_text_available is True
                 and fragment.record.path in changed_paths
             }
             missing_source_paths = tuple(

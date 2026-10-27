@@ -771,8 +771,9 @@ async def test_executor_excludes_binary_and_base_only_source_from_excerpt_covera
 
     assert report.context_selection.source_excerpt_files_available == 0
     assert report.context_selection.source_excerpt_files_included == 0
-    assert not any(
-        "No head-source excerpt" in gap.text for gap in report.coverage_gaps
+    assert any(
+        "No head-source excerpt" in gap.text and "assets/logo.png" in gap.text
+        for gap in report.coverage_gaps
     )
 
 

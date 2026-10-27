@@ -334,6 +334,9 @@ def benchmark_run_with_attempt_usage(
             raise ValueError("attempt belongs to an unexpected profile")
         if (attempt.review_head_sha, attempt.review_diff_sha256) != (run.head_sha, run.diff_sha256):
             raise ValueError("attempt does not match the pinned benchmark input")
+        if (attempt.source_packet_sha256 is not None
+                and attempt.source_packet_sha256 != run.evidence_packet_sha256):
+            raise ValueError("attempt does not match the benchmark evidence packet")
         groups[attempt.profile].append(attempt)
     if set(groups) != set(expected_profiles):
         raise ValueError("attempt ledger does not cover every expected profile")
@@ -347,7 +350,9 @@ def benchmark_run_with_attempt_usage(
             raise ValueError("each profile must have exactly one final completed attempt")
     def total(field: str) -> int | None:
         values = [getattr(attempt, field) for attempt in attempts]
-        return sum(values) if all(value is not None for value in values) else None
+        return sum(values) if all(
+            attempt.source_packet_sha256 is not None for attempt in attempts
+        ) and all(value is not None for value in values) else None
     return BenchmarkRun.model_validate({
         **run.model_dump(mode="python"),
         "input_tokens": total("input_tokens"),
