@@ -580,6 +580,24 @@ async def test_orchestration_tools_return_no_evidence_fields(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_triage_scope_guard_is_exposed_via_mcp(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    async with Client(build_server(service)) as client:
+        started = await client.call_tool("start_qa_orchestration", {"task_type": "other"})
+        args = {"run_id": started.structured_content["run_id"], "completed_step": "triage",
+                "status": "completed", "selected_profile": "pr_test_analyzer",
+                "implementation_review": True}
+        with pytest.raises(ToolError, match="cannot report implementation findings"):
+            await client.call_tool("advance_qa_orchestration", args)
+        current = await client.call_tool("get_qa_orchestration", {"run_id": args["run_id"]})
+        assert current.structured_content["current_step"] == "triage"
+        accepted = await client.call_tool("advance_qa_orchestration", {
+            **args, "acknowledge_limited_profile": True,
+        })
+        assert "cannot report implementation findings" in accepted.structured_content["route_warning"]
+
+
+@pytest.mark.asyncio
 async def test_orchestration_tools_advance_and_get_structured_state(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 

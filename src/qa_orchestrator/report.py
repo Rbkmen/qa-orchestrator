@@ -8,6 +8,7 @@ from typing import Literal
 
 from qa_orchestrator.contracts import (
     FinalReviewReport,
+    QaTaskOutcome,
     ReviewContext,
     ReviewVerificationRecord,
     review_changed_paths_sha256,
@@ -16,6 +17,7 @@ from qa_orchestrator.evidence import (
     complete_criterion_coverage,
     impact_coverage_status,
     input_manifest_completeness,
+    review_completion_gaps,
     validate_impact_coverage_context,
     validate_registered_locations,
 )
@@ -570,13 +572,43 @@ def _render_verification_records(
 
 
 def render_final_report(
-    report: FinalReviewReport, *, context: ReviewContext | None = None
+    report: FinalReviewReport, *, context: ReviewContext | None = None,
+    outcome: QaTaskOutcome | None = None,
 ) -> str:
     """Render findings and non-finding outcomes without inventing evidence."""
     if context is not None:
         report = complete_criterion_coverage(context, report)
     lines = ["# QA review", "", _text(report.summary), ""]
     input_summary = input_manifest_completeness(context)
+    manifest = context.input_manifest if context is not None else None
+    sources = manifest.sources if manifest is not None else ()
+    available = [source.source_id for source in sources if source.retrieval_status == "complete"]
+    incomplete = [item["source_id"] for item in input_summary["incomplete_sources"]]
+    limitations = [note.text for note in (*report.coverage_gaps, *report.unverified)]
+    completion_gaps = list(review_completion_gaps(context, report)) if context is not None else []
+    if report.coverage_ledger is not None:
+        missing_receipts = [
+            profile.profile.value for profile in report.coverage_ledger.profiles
+            if not profile.executor_input_receipt_verified
+        ]
+        if missing_receipts:
+            completion_gaps.append("executor input receipt unverified: " + ", ".join(missing_receipts))
+    lines.extend((
+        "## Review boundaries",
+        "",
+        "- **Outcome:** " + (_text(outcome) if outcome else "not provided"),
+        "- **Reported profiles:** " + (", ".join(_code(p.value) for p in report.profiles_reviewed) or "none recorded"),
+        "- **Sources retrieved:** " + (", ".join(_code(s) for s in available) or "none recorded"),
+        "- **Incomplete sources:** " + (", ".join(_code(s) for s in incomplete) or ("none declared" if manifest is not None else "unknown; manifest unavailable")),
+        "- **Reported limitations:** " + ("; ".join(_text(s) for s in limitations) or "none reported"),
+    ))
+    if outcome in {"partial", "blocked"}:
+        lines.append(
+            "- **Known completion gaps (host-selected outcome):** "
+            + ("; ".join(_text(gap) for gap in completion_gaps) if completion_gaps else
+               "no structured completion reason recorded; see reported limitations")
+        )
+    lines.append("")
     source_counts = input_summary["source_counts"]
     scope_categories = input_summary["scope_categories"]
     required_scope_kinds = input_summary["scope_required_source_kinds"]
@@ -963,6 +995,7 @@ def report_main(argv: list[str]) -> int:
     render.add_argument("--input", required=True, type=Path)
     render.add_argument("--output", type=Path, help="Write Markdown to this file instead of stdout")
     render.add_argument("--context", type=Path, help="Optional bound context for evidence locators")
+    render.add_argument("--outcome", choices=("completed", "partial", "blocked"), help="Recorded session outcome")
     args = parser.parse_args(argv)
     report = FinalReviewReport.model_validate_json(args.input.read_bytes())
     context = (
@@ -970,7 +1003,7 @@ def report_main(argv: list[str]) -> int:
     )
     if context is not None:
         validate_final_report_context(report, context)
-    output = render_final_report(report, context=context)
+    output = render_final_report(report, context=context, outcome=args.outcome)
     if args.output:
         args.output.write_text(output, encoding="utf-8")
     else:

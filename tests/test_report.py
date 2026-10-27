@@ -41,6 +41,59 @@ from qa_orchestrator.report import (
 )
 
 
+def test_review_boundaries_show_partial_and_reported_gaps(bound_review_context):
+    report = FinalReviewReport(
+        summary="Partial review.",
+        profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        coverage_gaps=(ReviewNote(text="Diff unavailable", evidence_refs=()),),
+        unverified=(ReviewNote(text="CI not checked", evidence_refs=()),),
+    )
+    rendered = render_final_report(report, context=bound_review_context, outcome="partial")
+    assert "## Review boundaries" in rendered
+    assert "**Outcome:** partial" in rendered
+    assert "code_reviewer" in rendered
+    assert "Diff unavailable" in rendered
+    assert "CI not checked" in rendered
+    assert "**Known completion gaps (host-selected outcome):**" in rendered
+
+
+def test_review_boundaries_do_not_invent_outcome_or_sources():
+    report = FinalReviewReport(summary="Legacy report", profiles_reviewed=(ReviewAgent.CODE_REVIEWER,))
+    rendered = render_final_report(report)
+    assert "**Outcome:** not provided" in rendered
+    assert "unknown; manifest unavailable" in rendered
+
+
+def test_review_boundaries_show_source_and_unverified_receipt(bound_review_context):
+    report = FinalReviewReport(
+        summary="Partial review", profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        coverage_ledger=ReviewCoverageLedger(
+            changed_paths_sha256=review_changed_paths_sha256(bound_review_context.changed_files),
+            changed_path_count=len(bound_review_context.changed_files),
+            profiles=(ProfileChangedPathCoverage(profile=ReviewAgent.CODE_REVIEWER, context_selection_recorded=False),),
+        ),
+    )
+    rendered = render_final_report(report, context=bound_review_context, outcome="partial")
+    assert "MR-123" in rendered
+    assert "executor input receipt unverified: code\\_reviewer" in rendered
+
+
+def test_review_boundaries_show_incomplete_diff_source(bound_review_context):
+    manifest = bound_review_context.input_manifest
+    failed = manifest.sources[0].model_copy(update={
+        "source_id": "DIFF", "retrieval_status": "failed", "extraction_status": "failed",
+    })
+    context = bound_review_context.model_copy(update={
+        "input_manifest": manifest.model_copy(update={"sources": (failed,)})
+    })
+    report = FinalReviewReport(
+        summary="Partial", profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+    )
+    rendered = render_final_report(report, context=context, outcome="partial")
+    assert "**Sources retrieved:** none recorded" in rendered
+    assert "**Incomplete sources:** `\"DIFF\"`" in rendered
+
+
 def _finding(candidate_id: str, *, severity: str, title: str, change_origin: str = "unknown"):
     return FinalReviewFinding(
         candidate_id=candidate_id,

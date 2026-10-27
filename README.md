@@ -78,6 +78,8 @@ Enabled signals require rationale and evidence refs. Missing CI, Stage, or devic
 
 Use one profile for a narrow, low-risk concern; use a bundle for broad or cross-concern work. File count alone does not define scope.
 
+At triage, set `implementation_review=true` when implementation behavior is in scope. A lone `pr_test_analyzer` or `code_explorer` cannot report implementation findings: choose an implementation profile or bundle, or explicitly set `acknowledge_limited_profile=true` to proceed with that limitation. Older callers may omit the intent; they receive an advisory `route_warning` instead. The host determines intent and remains responsible for choosing an adequate route.
+
 | Profile | Focus |
 |---|---|
 | `code_explorer` | Faraday — Evidence Investigator: paths, callers, dependencies and evidence map |
@@ -131,6 +133,8 @@ Explicit scoped `ReviewRuleset` rules can raise concerns or guard against known 
 ## Host execution
 
 `HostReviewAdapter` supervises an injected async `execute_profile(job)` for a bound session with triage complete. It enforces group barriers, concurrency/time limits, lease renewal and cancellation. It stops at deep review or synthesis; later stages and final decisions remain with the host.
+
+Rendered final reports include review boundaries: recorded outcome when supplied, reported profiles, retrieved/incomplete sources and reported limitations. For partial or blocked outcomes they also list known completion gaps; these are evidence of gaps, not necessarily the host's recorded reason. Standalone `qa-orch report render` accepts `--outcome` when the session outcome is known; otherwise it displays that outcome was not provided.
 
 Timeouts and explicit `RetryableProfileError` can be retried. Permanent failures are not replayed automatically. A failed group is never recorded as complete; the run becomes `partial`, retaining successful unsaved reports.
 

@@ -34,6 +34,10 @@ from qa_orchestrator.session_store import SqliteSessionStore
 
 
 class QaOrchestrationAdvanceResult(QaOrchestrationSession):
+    route_warning: str | None = Field(
+        default=None,
+        description="Advisory scope limitation for a selected single profile; not a finding.",
+    )
     selected_review_routes: ReviewRouteSelection | None = Field(
         default=None,
         description=(
@@ -99,6 +103,17 @@ class OrchestratorService:
         self,
         request: AdvanceQaOrchestrationRequest,
     ) -> QaOrchestrationAdvanceResult:
+        limited_profile = (
+            request.completed_step is OrchestrationStep.TRIAGE
+            and request.status == "completed"
+            and request.selected_profile in {ReviewAgent.PR_TEST_ANALYZER, ReviewAgent.CODE_EXPLORER}
+        )
+        warning = None
+        if limited_profile:
+            warning = (
+                "This profile cannot report implementation findings. For an implementation review, "
+                "choose an implementation reviewer or bundle, or explicitly acknowledge the limitation."
+            )
         selected_review_routes = None
         if request.completed_step is OrchestrationStep.TRIAGE and request.status == "completed":
             if request.selected_bundle is not None:
@@ -119,6 +134,7 @@ class OrchestratorService:
             {
                 **session.model_dump(),
                 "selected_review_routes": selected_review_routes,
+                "route_warning": warning,
             }
         )
 

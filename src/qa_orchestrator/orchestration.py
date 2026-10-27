@@ -734,6 +734,8 @@ class AdvanceQaOrchestrationRequest(BaseModel):
     expected_revision: int | None = Field(default=None, ge=0, strict=True)
     selected_bundle: ReviewBundle | None = None
     selected_profile: ReviewAgent | None = None
+    implementation_review: bool | None = None
+    acknowledge_limited_profile: bool = False
     completed_profile: ReviewAgent | None = None
     completed_profiles: list[ReviewAgent] | None = None
     profile_reports: list[ProfileReviewReport] | None = Field(
@@ -750,6 +752,10 @@ class AdvanceQaOrchestrationRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_transition_signal(self) -> "AdvanceQaOrchestrationRequest":
+        if (self.implementation_review is not None or self.acknowledge_limited_profile) and not (
+            self.completed_step is OrchestrationStep.TRIAGE and self.status == "completed"
+        ):
+            raise ValueError("implementation review intent is only valid for completed triage")
         if self.request_id is not None and self.expected_revision is None:
             raise ValueError("request_id requires expected_revision")
         if self.completed_profiles is not None and not self.completed_profiles:
@@ -977,6 +983,8 @@ class QaOrchestrator:
         expected_revision: int | None = None,
         selected_bundle: ReviewBundle | None = None,
         selected_profile: ReviewAgent | None = None,
+        implementation_review: bool | None = None,
+        acknowledge_limited_profile: bool = False,
         completed_profile: ReviewAgent | None = None,
         completed_profiles: list[ReviewAgent] | None = None,
         profile_reports: list[ProfileReviewReport] | None = None,
@@ -992,6 +1000,8 @@ class QaOrchestrator:
                 expected_revision=expected_revision,
                 selected_bundle=selected_bundle,
                 selected_profile=selected_profile,
+                implementation_review=implementation_review,
+                acknowledge_limited_profile=acknowledge_limited_profile,
                 completed_profile=completed_profile,
                 completed_profiles=completed_profiles,
                 profile_reports=profile_reports,
@@ -1005,8 +1015,13 @@ class QaOrchestrator:
             now = self._clock()
             self._purge_expired(now, keep_run_id=request.run_id)
             session = self._require_session(request.run_id, now)
+            excluded = set()
+            if request.implementation_review is None:
+                excluded.add("implementation_review")
+            if not request.acknowledge_limited_profile:
+                excluded.add("acknowledge_limited_profile")
             request_sha256 = hashlib.sha256(json.dumps(
-                request.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+                request.model_dump(mode="json", exclude=excluded), sort_keys=True, separators=(",", ":")
             ).encode("utf-8")).hexdigest()
             if request.request_id is not None:
                 receipt = next((r for r in session.transition_receipts
@@ -1646,6 +1661,15 @@ class QaOrchestrator:
         request: AdvanceQaOrchestrationRequest,
     ) -> QaOrchestrationSession:
         if session.current_step is OrchestrationStep.TRIAGE:
+            if (
+                request.implementation_review is True
+                and request.selected_profile in {ReviewAgent.PR_TEST_ANALYZER, ReviewAgent.CODE_EXPLORER}
+                and not request.acknowledge_limited_profile
+            ):
+                raise OrchestrationError(
+                    "This profile cannot report implementation findings. Choose an implementation "
+                    "reviewer or bundle, or explicitly acknowledge the limitation."
+                )
             if request.selected_bundle is not None:
                 selected_profiles = bundle_profiles(request.selected_bundle)
                 selected_profile = selected_profiles[0]

@@ -12,6 +12,65 @@ from qa_orchestrator.review_profiles import REVIEW_BUNDLES, bundle_execution_gro
 from qa_orchestrator.service import OrchestratorService
 
 
+@pytest.mark.parametrize("profile", [ReviewAgent.PR_TEST_ANALYZER, ReviewAgent.CODE_EXPLORER])
+def test_implementation_review_requires_acknowledging_limited_profile(tmp_path, profile):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review")
+    request = AdvanceQaOrchestrationRequest(
+        run_id=started.run_id, completed_step="triage", status="completed",
+        selected_profile=profile, implementation_review=True,
+    )
+    with pytest.raises(ValueError, match="cannot report implementation findings"):
+        service.advance_qa_orchestration(request)
+    assert service.get_qa_orchestration(started.run_id).current_step == "triage"
+    accepted = service.advance_qa_orchestration(
+        request.model_copy(update={"acknowledge_limited_profile": True})
+    )
+    assert accepted.current_step == "primary_review"
+    assert "cannot report implementation findings" in accepted.route_warning
+
+
+def test_limited_profile_warns_legacy_client_but_full_profile_does_not(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    for profile, warned in [(ReviewAgent.PR_TEST_ANALYZER, True), (ReviewAgent.CODE_REVIEWER, False)]:
+        started = service.start_qa_orchestration("ordinary_review")
+        result = service.advance_qa_orchestration(AdvanceQaOrchestrationRequest(
+            run_id=started.run_id, completed_step="triage", status="completed", selected_profile=profile
+        ))
+        assert bool(result.route_warning) is warned
+
+
+def test_implementation_review_can_select_bundle_after_warning(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review")
+    limited = AdvanceQaOrchestrationRequest(
+        run_id=started.run_id, completed_step="triage", status="completed",
+        selected_profile=ReviewAgent.PR_TEST_ANALYZER, implementation_review=True,
+    )
+    with pytest.raises(ValueError, match="cannot report implementation findings"):
+        service.advance_qa_orchestration(limited)
+    selected = service.advance_qa_orchestration(AdvanceQaOrchestrationRequest(
+        run_id=started.run_id, completed_step="triage", status="completed",
+        selected_bundle=ReviewBundle.ORDINARY_MR, implementation_review=True,
+    ))
+    assert selected.selected_bundle == ReviewBundle.ORDINARY_MR
+    assert selected.route_warning is None
+
+
+def test_triage_intent_is_part_of_retry_identity(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("other")
+    request = AdvanceQaOrchestrationRequest(
+        run_id=started.run_id, completed_step="triage", status="completed",
+        selected_profile=ReviewAgent.PR_TEST_ANALYZER, request_id="triage-1", expected_revision=0,
+        implementation_review=False,
+    )
+    first = service.advance_qa_orchestration(request)
+    assert service.advance_qa_orchestration(request).revision == first.revision
+    with pytest.raises(ValueError, match="request_id reused with a different transition"):
+        service.advance_qa_orchestration(request.model_copy(update={"implementation_review": None}))
+
+
 def _ready_for_host_outcome(service: OrchestratorService, task_type: str = "ordinary_review"):
     started = service.start_qa_orchestration(task_type)
     primary = service.advance_qa_orchestration(

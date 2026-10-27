@@ -334,6 +334,7 @@ async def test_finish_review_exports_markdown_with_the_accepted_outcome(
     assert finished.final_review_report is not None
     assert finished.final_review_report.model_copy(update={"coverage_ledger": None}) == final_report
     assert output.read_text(encoding="utf-8").startswith("# QA review\n")
+    assert "**Outcome:** completed" in output.read_text(encoding="utf-8")
     assert "Review completed against the pinned context" in output.read_text(encoding="utf-8")
     assert "provenance: host reported, unverified" in output.read_text(encoding="utf-8")
 

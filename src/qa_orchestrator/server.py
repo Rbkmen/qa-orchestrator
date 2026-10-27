@@ -364,6 +364,14 @@ def build_server(service: OrchestratorService) -> FastMCP:
                 "if stale; a recognized request_id replay remains safe."
             )),
         ] = None,
+        implementation_review: Annotated[
+            bool | None,
+            Field(description="At triage, whether the user's request includes review of implementation behavior. Unknown when omitted."),
+        ] = None,
+        acknowledge_limited_profile: Annotated[
+            bool,
+            Field(description="At triage, explicitly accept that the selected test analyzer or explorer cannot report implementation findings."),
+        ] = False,
     ) -> QaOrchestrationAdvanceResult:
         """Record one active QA step's result; return updated state and next_action instructions for the host.
 
@@ -412,7 +420,9 @@ def build_server(service: OrchestratorService) -> FastMCP:
                 skip_synthesis=skip_synthesis,
                 request_id=request_id,
                 expected_revision=expected_revision,
-            )
+                implementation_review=implementation_review,
+                acknowledge_limited_profile=acknowledge_limited_profile,
+            ),
         )
 
     @mcp.tool(title="Renew active QA session lease", annotations=STATE_TOOL_ANNOTATIONS)

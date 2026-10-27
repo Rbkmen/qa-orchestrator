@@ -423,13 +423,21 @@ class HostReviewAdapter:
                     raise ValueError(
                         "Markdown export requires a final report and bound review context"
                     )
+                from qa_orchestrator.orchestration import _build_review_coverage_ledger
                 from qa_orchestrator.report import (
                     render_final_report,
                     validate_final_report_context,
                 )
 
                 validate_final_report_context(final_report, current.review_context)
-                rendered = render_final_report(final_report, context=current.review_context)
+                render_report = final_report.model_copy(update={
+                    "coverage_ledger": _build_review_coverage_ledger(
+                        current.review_context, current.profile_reports, current.completed_profiles
+                    ),
+                })
+                rendered = render_final_report(
+                    render_report, context=current.review_context, outcome=outcome
+                )
                 if output_path.exists() and output_path.is_dir():
                     raise ValueError("Markdown output path must be a file")
                 descriptor, staged_path = tempfile.mkstemp(

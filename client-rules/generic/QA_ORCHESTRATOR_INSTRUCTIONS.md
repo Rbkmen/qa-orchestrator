@@ -19,6 +19,7 @@ orchestration/evidence/finding contract. Workspace and repository rules may add 
   repository name. A narrow, low-risk single concern uses one profile: behavior/callers → `code_reviewer`; test-only → `pr_test_analyzer`; TypeScript-only → `typescript_reviewer`;
   React-only → `react_reviewer`; Ruby-only → `ruby_reviewer`; Python/MCP-only → `python_reviewer`; React Native/native-platform-only → `mobile_reviewer`. Several changed files
   alone do not justify a bundle. Use a fixed bundle for broad, cross-concern, or high-risk work; risk signals affect only optional deep review after primary review.
+- At triage pass `implementation_review=true` when the request includes implementation behavior; pass false for explicitly test-only or evidence-only scope. A single `pr_test_analyzer` or `code_explorer` cannot report implementation findings: select an implementation reviewer or bundle, or deliberately accept the limitation with `acknowledge_limited_profile=true`. An omitted intent preserves older clients and returns `route_warning` for those profiles; do not interpret it as code review coverage.
 - Fixed routes and execution groups (groups are barriers; `→` is order, `+` means same group):
 
 | Bundle | Route and execution groups |
@@ -220,6 +221,7 @@ are confirmed, say so only for the reviewed scope; do not imply untested areas a
 - After synthesis or a valid clean single-profile path, call `finish_qa_orchestration` once with `run_id` and host-owned `completed`, `partial`, or `blocked`. Repeating the same
   outcome is idempotent; a conflicting outcome is rejected. Do not finalize tasks that were not orchestrated. Bound completed reviews require `final_review_report`.
 - The final outcome must match the `finish_qa_orchestration` call. For an early stop, use the same `partial`/`blocked` outcome sent to `advance_qa_orchestration`.
+- In the user-facing result briefly state the actual outcome, profiles reported as completed, available and incomplete sources, and material unverified items. For `partial` or `blocked`, state the recorded reason or explicitly say it was not recorded; never infer execution or successful checks from missing data.
 - Session state is in memory by default. With `QA_ORCHESTRATOR_SESSION_STORE_PATH`, unfinished structured state and finalized sessions with review artifacts can recover after
   restart subject to TTL/capacity; finalized legacy sessions without artifacts are removed. Reads do not refresh TTL. Use `delete_qa_orchestration(run_id)` only at the user's
   explicit request; it irreversibly deletes memory/recovery state, records no outcome, and does not stop host work. `deleted=true` confirms absence even for a missing ID; retries
