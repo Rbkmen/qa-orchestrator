@@ -146,6 +146,13 @@ class OrchestratorService:
                     execution_groups=[[profile] for profile in profiles],
                 )
         session = self.orchestrator.advance(**request.model_dump())
+        if selected_review_routes is not None and session.selected_bundle is None:
+            prepared_profiles = [route.profile for route in selected_review_routes.routes]
+            if prepared_profiles != session.review_profiles:
+                selected_review_routes = ReviewRouteSelection(
+                    routes=[self.prepare_review_route(profile) for profile in session.review_profiles],
+                    execution_groups=[[profile] for profile in session.review_profiles],
+                )
         return QaOrchestrationAdvanceResult.model_validate(
             {
                 **session.model_dump(),

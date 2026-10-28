@@ -1,5 +1,6 @@
 import pytest
 
+import qa_orchestrator.orchestration as orchestration_module
 from qa_orchestrator.config import Settings
 from qa_orchestrator.contracts import ReviewAgent, ReviewBundle
 from qa_orchestrator.orchestration import (
@@ -202,6 +203,43 @@ def test_service_adds_omission_auditor_to_single_profile_implementation_review(t
         [ReviewAgent.PYTHON_REVIEWER],
         [ReviewAgent.OMISSION_AUDITOR],
     ]
+
+
+def test_service_replay_returns_routes_persisted_by_older_triage_resolver(tmp_path, monkeypatch):
+    settings = Settings(
+        data_dir=tmp_path,
+        orchestration_session_store_path=tmp_path / "sessions.sqlite3",
+    )
+    service = OrchestratorService(settings)
+    started = service.start_qa_orchestration("ordinary_review")
+    request = AdvanceQaOrchestrationRequest(
+        run_id=started.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_profile=ReviewAgent.PYTHON_REVIEWER,
+        implementation_review=True,
+        request_id="triage-old-resolver",
+        expected_revision=0,
+    )
+
+    with monkeypatch.context() as old_resolver:
+        old_resolver.setattr(
+            orchestration_module,
+            "triage_review_profiles",
+            lambda **_kwargs: [ReviewAgent.PYTHON_REVIEWER],
+        )
+        first = service.advance_qa_orchestration(request)
+
+    assert first.review_profiles == [ReviewAgent.PYTHON_REVIEWER]
+
+    restored_service = OrchestratorService(settings)
+    restored = restored_service.get_qa_orchestration(started.run_id)
+    replay = restored_service.advance_qa_orchestration(request)
+
+    assert replay.review_profiles == [ReviewAgent.PYTHON_REVIEWER]
+    assert replay.revision == restored.revision == first.revision
+    assert [route.profile for route in replay.selected_review_routes.routes] == replay.review_profiles
+    assert replay.selected_review_routes.execution_groups == [[ReviewAgent.PYTHON_REVIEWER]]
 
 
 @pytest.mark.parametrize("implementation_review", [None, False])
