@@ -63,6 +63,15 @@ CompletableStep = Literal["triage", "primary_review", "deep_review", "synthesis"
 
 SERVER_INSTRUCTIONS = (
     "These instructions are advisory; the host owns review decisions and model execution. "
+    "Before calling start_qa_orchestration for ordinary_review or widget_review, complete review-context "
+    "preflight: resolve the authoritative task/MR and repository, exact base_sha and head_sha, inspect the diff "
+    "and changed paths, build the compact Evidence Packet and stable evidence_refs, compute diff_sha256 and "
+    "evidence_packet_sha256, and include input_manifest.schema_version=2 with source_inventory_status and "
+    "source_conflict_status. A task/MR URL alone is not enough. Keep raw source, diff, and packet content with "
+    "the host; send only identifiers, digests, and metadata. If repository, revisions, diff, or packet identity "
+    "cannot be pinned, do not start; resolve it or tell the user what is missing. Record unavailable requirement/spec "
+    "sources with partial or unknown manifest statuses; these gaps need not prevent review once the code input identity "
+    "is pinned. "
     "For a narrow, single-concern, low-risk change, use one profile; use a bundle for broad, "
     "cross-concern, or high-risk work. Several changed files alone do not require a bundle. "
     "After selecting a route at triage, use selected_review_routes from the advance response; it "
@@ -231,7 +240,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
         task/MR, pin exact base_sha and head_sha, inspect the exact diff, build the host-owned Evidence Packet and
         stable refs, compute diff_sha256 and evidence_packet_sha256, and provide input_manifest.schema_version=2
         with source_inventory_status and source_conflict_status. A task or MR URL alone is not enough. If an exact
-        source or required identity is unavailable, resolve or report that gap before starting a session.
+        repository, revisions, diff, or packet identity cannot be pinned, do not start; resolve it or tell the user
+        what is missing. Record unavailable requirement/spec sources with partial or unknown manifest statuses.
 
         Every call creates a separate session. Use prepare_qa_orchestration for a stateless profile
         checklist. `task_type` narrows the bundle shortlist; the host still selects the review route.

@@ -125,6 +125,16 @@ async def test_server_publishes_tool_descriptions(tmp_path):
     assert "input_manifest.schema_version=2" in start_description
 
 
+def test_server_startup_instructions_require_review_context_preflight(tmp_path):
+    server = build_server(OrchestratorService.from_settings(data_dir=tmp_path))
+    instructions = server.instructions
+
+    assert "Before calling start_qa_orchestration for ordinary_review or widget_review" in instructions
+    assert "exact base_sha and head_sha" in instructions
+    assert "diff_sha256 and evidence_packet_sha256" in instructions
+    assert "input_manifest.schema_version=2" in instructions
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("task_type", ["ordinary_review", "widget_review"])
 async def test_code_review_start_requires_bound_context_and_manifest_v2(
