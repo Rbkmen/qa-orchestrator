@@ -1096,6 +1096,64 @@ def test_legacy_results_wire_format_omits_task_context_hash(benchmark_inputs):
     assert "missed_gold_diagnoses" not in serialized["runs"][0]
 
 
+def test_results_schema_five_preserves_per_finding_provenance(benchmark_inputs):
+    dataset_data, results_data = deepcopy(benchmark_inputs)
+    results_data["schema_version"] = 5
+    results_data["runs"][0]["adjudications"][0].update(
+        found_by="profile:code_reviewer", judged_by="human:qa-reviewer"
+    )
+    results_data["runs"][0]["adjudications"][1].update(
+        found_by="profile:security_reviewer", judged_by="human:qa-reviewer"
+    )
+    results_data["runs"][0]["adjudications"][2].update(
+        found_by="profile:python_reviewer", judged_by="human:qa-reviewer"
+    )
+
+    results = BenchmarkResults.model_validate(results_data)
+    serialized = results.model_dump(mode="json")
+    score = score_benchmark(BenchmarkDataset.model_validate(dataset_data), results)
+
+    assert serialized["schema_version"] == 5
+    assert serialized["runs"][0]["adjudications"][0]["found_by"] == "profile:code_reviewer"
+    assert score["schema_version"] == 5
+    assert score["runs"][0]["finding_provenance"] == [
+        {
+            "candidate_id": "F-01",
+            "found_by": "profile:code_reviewer",
+            "judged_by": "human:qa-reviewer",
+        },
+        {
+            "candidate_id": "F-02",
+            "found_by": "profile:security_reviewer",
+            "judged_by": "human:qa-reviewer",
+        },
+        {
+            "candidate_id": "F-03",
+            "found_by": "profile:python_reviewer",
+            "judged_by": "human:qa-reviewer",
+        },
+    ]
+
+
+def test_finding_provenance_requires_results_schema_five(benchmark_inputs):
+    _, results_data = deepcopy(benchmark_inputs)
+    results_data["runs"][0]["adjudications"][0]["found_by"] = "profile:code_reviewer"
+
+    with pytest.raises(ValidationError, match="schema version 5"):
+        BenchmarkResults.model_validate(results_data)
+
+
+def test_schema_five_requires_provenance_for_each_adjudication(benchmark_inputs):
+    _, results_data = deepcopy(benchmark_inputs)
+    results_data["schema_version"] = 5
+    results_data["runs"][0]["adjudications"][0].update(
+        found_by="profile:code_reviewer", judged_by="human:qa-reviewer"
+    )
+
+    with pytest.raises(ValidationError, match="both found_by and judged_by"):
+        BenchmarkResults.model_validate(results_data)
+
+
 def test_benchmark_schedule_requires_unique_complete_run_order(benchmark_inputs):
     _, results_data = benchmark_inputs
     duplicate = deepcopy(results_data)

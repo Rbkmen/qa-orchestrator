@@ -101,14 +101,18 @@ def select_context(
     *,
     max_bytes: int,
     profile_override_refs: tuple[str, ...] = (),
+    required_refs: tuple[str, ...] = (),
 ) -> PackedContext:
     if not 1 <= max_bytes <= 2_000_000:
         raise ValueError("context byte budget outside supported bounds")
     profile = ReviewAgent(profile)
     override_refs = set(profile_override_refs)
+    required_ref_set = set(required_refs)
     packet_refs = {fragment.record.evidence_ref for fragment in packet.fragments}
     if override_refs - packet_refs:
         raise ValueError("profile override refs must belong to the context packet")
+    if required_ref_set - packet_refs:
+        raise ValueError("required refs must belong to the context packet")
     groups = {}
     omitted, budget_omitted = [], []
     for fragment in sorted(packet.fragments, key=lambda f: f.record.evidence_ref):
@@ -117,6 +121,7 @@ def select_context(
             and fragment.profiles
             and profile not in fragment.profiles
             and fragment.record.evidence_ref not in override_refs
+            and fragment.record.evidence_ref not in required_ref_set
         ):
             omitted.append(fragment.record.evidence_ref)
             continue
@@ -126,7 +131,12 @@ def select_context(
     ordered = sorted(
         groups.values(),
         key=lambda fs: (
-            not any(f.required or f.record.evidence_ref in override_refs for f in fs),
+            not any(
+                f.required
+                or f.record.evidence_ref in override_refs
+                or f.record.evidence_ref in required_ref_set
+                for f in fs
+            ),
             -max(f.priority for f in fs),
             fs[0].record.evidence_ref,
         ),
@@ -140,7 +150,10 @@ def select_context(
         cost = len(block.encode())
         refs = [f.record.evidence_ref for f in fragments]
         if size + cost > max_bytes:
-            if any(f.required for f in fragments):
+            if any(
+                f.required or f.record.evidence_ref in required_ref_set
+                for f in fragments
+            ):
                 raise ValueError("mandatory context exceeds budget; split the review explicitly")
             omitted.extend(refs)
             budget_omitted.extend(refs)

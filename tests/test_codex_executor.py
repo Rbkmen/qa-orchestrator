@@ -6,10 +6,44 @@ from dataclasses import replace
 
 import pytest
 
-from qa_orchestrator.contracts import ReviewAgent
+from qa_orchestrator.contracts import PriorReviewDecision, ReviewAgent
 from qa_orchestrator.host import HostProfileJob
 from qa_orchestrator.orchestration import QaOrchestrator
 from qa_orchestrator.review_profiles import build_review_route
+
+
+def test_prior_review_history_prompt_keeps_dispositions_as_context(executor_input):
+    from qa_orchestrator.codex_executor import prior_review_history_instruction
+
+    _, job, _ = executor_input
+    context = job.session.review_context.model_copy(update={
+        "prior_review_decisions": (
+            PriorReviewDecision(
+                merge_request_source_id="MR-123",
+                reviewed_head_sha="5" * 40,
+                revision_relation="verified_ancestor",
+                candidate_id="F-09",
+                disposition="resolved",
+                summary="Fixed with a regression test.",
+                evidence_ref="H1",
+            ),
+        ),
+    })
+
+    instruction = prior_review_history_instruction(context)
+
+    assert '"candidate_id":"F-09"' in instruction
+    assert '"disposition":"resolved"' in instruction
+    assert "Recheck every disposition against the current bound head and evidence" in instruction
+    assert "does not itself confirm a defect" in instruction
+
+
+def test_prior_review_history_prompt_is_empty_without_history(executor_input):
+    from qa_orchestrator.codex_executor import prior_review_history_instruction
+
+    _, job, _ = executor_input
+
+    assert prior_review_history_instruction(job.session.review_context) == ""
 
 
 @pytest.mark.parametrize("profile", list(ReviewAgent))
@@ -638,6 +672,19 @@ async def test_executor_selects_context_and_binds_actual_subset_hash(executor_in
                     source_text_available=kind == "source",
             ), text=text,
         ))
+    history_text = "Earlier review decision: F-09 was resolved."
+    fragments.append(ContextFragment(
+        record=EvidenceRecord(
+            evidence_ref="H1",
+            kind="prior_review",
+            revision="5" * 40,
+            locator="https://gitlab.example/group/service/-/merge_requests/123#note_9",
+            sha256=hashlib.sha256(history_text.encode()).hexdigest(),
+        ),
+        text=history_text,
+        required=False,
+        profiles=(ReviewAgent.PR_TEST_ANALYZER,),
+    ))
     packet.write_text(ContextPacket(fragments=fragments).model_dump_json())
     context = job.session.review_context.model_copy(update={
         "evidence_packet_sha256": hashlib.sha256(packet.read_bytes()).hexdigest(),
@@ -645,8 +692,20 @@ async def test_executor_selects_context_and_binds_actual_subset_hash(executor_in
         "diff_hunk_inventory_sha256": review_diff_hunk_inventory_sha256(
             hashlib.sha256(b"changed diff").hexdigest(), ()
         ),
-        "evidence_refs": ("E1", "E2", "E3", "E4", "E5"),
+        "evidence_refs": ("E1", "E2", "E3", "E4", "E5", "H1"),
         "evidence_registry": tuple(f.record for f in fragments),
+        "current_merge_request_source_id": "MR-123",
+        "prior_review_decisions": (
+            PriorReviewDecision(
+                merge_request_source_id="MR-123",
+                reviewed_head_sha="5" * 40,
+                revision_relation="verified_ancestor",
+                candidate_id="F-09",
+                disposition="resolved",
+                summary="Fixed with a regression test.",
+                evidence_ref="H1",
+            ),
+        ),
         "changed_files": (*job.session.review_context.changed_files, "src/omitted.py"),
     })
     job = replace(job, session=job.session.model_copy(update={"review_context": context}))
@@ -657,6 +716,7 @@ async def test_executor_selects_context_and_binds_actual_subset_hash(executor_in
         "prompt=sys.stdin.read()",
         "prompt=sys.stdin.read()\nassert 'OMITTED_TEST_ONLY' not in prompt\n"
         "assert 'BUDGET_OMITTED' not in prompt\nassert 'E2' not in prompt and 'E5' not in prompt\n"
+        "assert 'Earlier review decision: F-09 was resolved.' in prompt\n"
         "assert '1 of 2 changed paths have excerpts available' in prompt\n"
             "assert 'Inspect every changed path and indexed hunk' in prompt\n"
         "assert len(prompt.encode())<=12288\n"
@@ -664,7 +724,7 @@ async def test_executor_selects_context_and_binds_actual_subset_hash(executor_in
         "assert 'Evidence registry metadata for included refs' in prompt",
     ))
     report = await CodexProfileExecutor(packet, command=(sys.executable, str(script)))(job)
-    assert report.context_selection.included_refs == ("E1", "E3", "E4")
+    assert report.context_selection.included_refs == ("E1", "E3", "E4", "H1")
     assert report.context_selection.omitted_refs == ("E2", "E5")
     assert report.context_selection.budget_omitted_refs == ("E5",)
     assert report.context_selection.changed_files_count == 2
@@ -677,7 +737,7 @@ async def test_executor_selects_context_and_binds_actual_subset_hash(executor_in
     assert observation.prompt_bytes == observation.evidence_packet_bytes + observation.prompt_overhead_bytes
     assert observation.evidence_packet_bytes == report.context_selection.selected_bytes
     assert observation.prompt_write_status == "written"
-    assert observation.included_evidence_refs == ("E1", "E3", "E4")
+    assert observation.included_evidence_refs == ("E1", "E3", "E4", "H1")
     assert observation.omitted_evidence_refs == ("E2", "E5")
     assert observation.included_source_paths == ("src/service.py",)
     assert any(

@@ -820,6 +820,158 @@ class OrchestrationError(ValueError):
     """Raised when a host submits an invalid orchestration operation."""
 
 
+def validate_final_report_profile_links(
+    context: ReviewContext,
+    profile_reports: Sequence[ProfileReviewReport],
+    final_report: FinalReviewReport,
+    *,
+    allow_legacy: bool = False,
+) -> None:
+    """Validate synthesized candidate links against the fixed profile reports."""
+    reported_candidates = {
+        (report.profile, candidate.candidate_id): candidate
+        for report in profile_reports
+        for candidate in report.finding_candidates
+    }
+    if not allow_legacy and any(
+        not finding.source_candidates for finding in final_report.finding_candidates
+    ):
+        raise OrchestrationError(
+            "final findings require source candidates from profile reports"
+        )
+
+    source_candidates = {
+        (source.profile, source.candidate_id)
+        for finding in final_report.finding_candidates
+        for source in finding.source_candidates
+    }
+    if not source_candidates.issubset(reported_candidates):
+        raise OrchestrationError(
+            "final finding source candidates do not match profile reports"
+        )
+    for finding in final_report.finding_candidates:
+        if allow_legacy and not finding.source_candidates:
+            continue
+        source_findings = [
+            reported_candidates[(source.profile, source.candidate_id)]
+            for source in finding.source_candidates
+        ]
+        source_evidence_refs = {
+            reference
+            for source_finding in source_findings
+            for reference in source_finding.evidence_refs
+        }
+        if not set(finding.evidence_refs).issubset(source_evidence_refs):
+            raise OrchestrationError(
+                "final finding cites evidence absent from its source candidates"
+            )
+        source_locations = {
+            (location.path, location.start_line, location.end_line)
+            for source_finding in source_findings
+            for location in source_finding.source_locations
+        }
+        final_locations = {
+            (location.path, location.start_line, location.end_line)
+            for location in finding.source_locations
+        }
+        if not final_locations.issubset(source_locations):
+            raise OrchestrationError(
+                "final finding locations are absent from its source candidates"
+            )
+    if any(
+        not set(finding.source_profiles).issubset(final_report.profiles_reviewed)
+        for finding in final_report.finding_candidates
+    ):
+        raise OrchestrationError(
+            "final finding source profiles do not match profiles_reviewed"
+        )
+
+    if allow_legacy:
+        return
+    decisions = {
+        (decision.source.profile, decision.source.candidate_id): decision
+        for decision in final_report.candidate_decisions
+    }
+    if set(decisions) != set(reported_candidates):
+        raise OrchestrationError(
+            "final report requires exactly one decision per submitted candidate"
+        )
+    for source, decision in decisions.items():
+        candidate = reported_candidates[source]
+        if decision.refutation is None:
+            raise OrchestrationError("every candidate decision requires a refutation check")
+        expected_refutation_status = {
+            "confirmed": "not_refuted",
+            "duplicate": "not_refuted",
+            "rejected": "refuted",
+            "unverified": "unverified",
+        }[decision.verdict]
+        if decision.refutation.status != expected_refutation_status:
+            raise OrchestrationError(
+                f"{decision.verdict} decisions require a {expected_refutation_status} check"
+            )
+        if decision.verdict in {"rejected", "unverified"} and (
+            decision.candidate_snapshot != candidate
+        ):
+            raise OrchestrationError(
+                "rejected and unverified decisions require the original candidate snapshot"
+            )
+        try:
+            validate_refutation_check(context, candidate, decision.refutation)
+        except ValueError as exc:
+            raise OrchestrationError(str(exc)) from exc
+    for finding in final_report.finding_candidates:
+        linked = {
+            source
+            for source, decision in decisions.items()
+            if decision.final_finding_id == finding.candidate_id
+        }
+        declared = {(source.profile, source.candidate_id) for source in finding.source_candidates}
+        if linked != declared or not any(
+            decisions[source].verdict == "confirmed" for source in linked
+        ):
+            raise OrchestrationError(
+                "final finding sources must match confirmed and duplicate decisions"
+            )
+        if (
+            finding.severity is None
+            or not finding.source_locations
+            or not finding.affected_area
+            or not finding.affected_area.strip()
+            or not finding.impact
+            or not finding.impact.strip()
+            or not finding.failure_condition
+            or not finding.flip_condition
+            or not finding.expected_behavior
+            or not finding.actual_behavior
+        ):
+            raise OrchestrationError(
+                "confirmed findings require severity, expected/actual behavior, "
+                "failure/flip conditions, source locations, affected area, and impact"
+            )
+
+
+def validate_final_report_verification_records(
+    context: ReviewContext,
+    final_report: FinalReviewReport,
+) -> None:
+    """Require each verification receipt and its runtime evidence to match the pinned head."""
+    registry = {entry.evidence_ref: entry for entry in context.evidence_registry}
+    for verification in final_report.verification_records:
+        if verification.head_sha != context.head_sha:
+            raise OrchestrationError(
+                "verification record does not match the bound head revision"
+            )
+        for reference in verification.evidence_refs:
+            entry = registry.get(reference)
+            if entry is not None and (
+                entry.kind != "runtime" or entry.revision != context.head_sha
+            ):
+                raise OrchestrationError(
+                    "verification evidence must be a runtime record bound to the reviewed head"
+                )
+
+
 _NEXT_ACTIONS = MappingProxyType(
     {
         OrchestrationStep.TRIAGE: "Host performs triage and submits the selected review bundle or profile.",
@@ -1364,24 +1516,10 @@ class QaOrchestrator:
                             f"changed path; uncovered path indexes: {examples}"
                         )
                 context_refs = set(session.review_context.evidence_refs)
-                registry = {
-                    entry.evidence_ref: entry
-                    for entry in session.review_context.evidence_registry
-                }
-                for verification in validated_report.verification_records:
-                    if verification.head_sha != session.review_context.head_sha:
-                        raise OrchestrationError(
-                            "verification record does not match the bound head revision"
-                        )
-                    for reference in verification.evidence_refs:
-                        entry = registry.get(reference)
-                        if entry is not None and (
-                            entry.kind != "runtime"
-                            or entry.revision != session.review_context.head_sha
-                        ):
-                            raise OrchestrationError(
-                                "verification evidence must be a runtime record bound to the reviewed head"
-                            )
+                validate_final_report_verification_records(
+                    session.review_context,
+                    validated_report,
+                )
                 report_refs = {
                     reference
                     for finding in validated_report.finding_candidates
@@ -1435,116 +1573,12 @@ class QaOrchestrator:
                     validate_registered_locations(session.review_context, validated_report.finding_candidates)
                 except ValueError as exc:
                     raise OrchestrationError(str(exc)) from exc
-                reported_candidates = {
-                    (report.profile, candidate.candidate_id): candidate
-                    for report in session.profile_reports
-                    for candidate in report.finding_candidates
-                }
-                source_candidates = {
-                    (source.profile, source.candidate_id)
-                    for finding in validated_report.finding_candidates
-                    for source in finding.source_candidates
-                }
-                if not source_candidates.issubset(reported_candidates):
-                    raise OrchestrationError(
-                        "final finding source candidates do not match profile reports"
-                    )
-                for finding in validated_report.finding_candidates:
-                    if is_idempotent_legacy_replay and not finding.source_candidates:
-                        continue
-                    source_findings = [
-                        reported_candidates[(source.profile, source.candidate_id)]
-                        for source in finding.source_candidates
-                    ]
-                    source_evidence_refs = {
-                        reference
-                        for source_finding in source_findings
-                        for reference in source_finding.evidence_refs
-                    }
-                    if not set(finding.evidence_refs).issubset(source_evidence_refs):
-                        raise OrchestrationError(
-                            "final finding cites evidence absent from its source candidates"
-                        )
-                    source_locations = {
-                        (location.path, location.start_line, location.end_line)
-                        for source_finding in source_findings
-                        for location in source_finding.source_locations
-                    }
-                    final_locations = {
-                        (location.path, location.start_line, location.end_line)
-                        for location in finding.source_locations
-                    }
-                    if not final_locations.issubset(source_locations):
-                        raise OrchestrationError(
-                            "final finding locations are absent from its source candidates"
-                        )
-                if any(
-                    not set(finding.source_profiles).issubset(validated_report.profiles_reviewed)
-                    for finding in validated_report.finding_candidates
-                ):
-                    raise OrchestrationError(
-                        "final finding source profiles do not match profiles_reviewed"
-                    )
-                if not is_idempotent_legacy_replay:
-                    decisions = {
-                        (decision.source.profile, decision.source.candidate_id): decision
-                        for decision in validated_report.candidate_decisions
-                    }
-                    if set(decisions) != set(reported_candidates):
-                        raise OrchestrationError(
-                            "final report requires exactly one decision per submitted candidate"
-                        )
-                    for source, decision in decisions.items():
-                        candidate = reported_candidates[source]
-                        if decision.refutation is None:
-                            raise OrchestrationError(
-                                "every candidate decision requires a refutation check"
-                            )
-                        expected_refutation_status = {
-                            "confirmed": "not_refuted",
-                            "duplicate": "not_refuted",
-                            "rejected": "refuted",
-                            "unverified": "unverified",
-                        }[decision.verdict]
-                        if decision.refutation.status != expected_refutation_status:
-                            raise OrchestrationError(
-                                f"{decision.verdict} decisions require a "
-                                f"{expected_refutation_status} check"
-                            )
-                        if decision.verdict in {"rejected", "unverified"} and (
-                            decision.candidate_snapshot != candidate
-                        ):
-                            raise OrchestrationError(
-                                "rejected and unverified decisions require the original candidate snapshot"
-                            )
-                        if decision.refutation is not None:
-                            try:
-                                validate_refutation_check(
-                                    session.review_context, candidate, decision.refutation
-                                )
-                            except ValueError as exc:
-                                raise OrchestrationError(str(exc)) from exc
-                    for finding in validated_report.finding_candidates:
-                        linked = {
-                            source for source, decision in decisions.items()
-                            if decision.final_finding_id == finding.candidate_id
-                        }
-                        declared = {(s.profile, s.candidate_id) for s in finding.source_candidates}
-                        if linked != declared or not any(
-                            decisions[source].verdict == "confirmed" for source in linked
-                        ):
-                            raise OrchestrationError(
-                                "final finding sources must match confirmed and duplicate decisions"
-                            )
-                        if (finding.severity is None or not finding.source_locations
-                            or not finding.affected_area or not finding.affected_area.strip()
-                            or not finding.impact or not finding.impact.strip()
-                            or not finding.failure_condition or not finding.flip_condition
-                            or not finding.expected_behavior or not finding.actual_behavior):
-                            raise OrchestrationError(
-                                "confirmed findings require severity, expected/actual behavior, "
-                                "failure/flip conditions, source locations, affected area, and impact"
-                            )
+                validate_final_report_profile_links(
+                    session.review_context,
+                    session.profile_reports,
+                    validated_report,
+                    allow_legacy=is_idempotent_legacy_replay,
+                )
 
             finish_sha256 = _stable_json_sha256(
                 {

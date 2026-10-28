@@ -195,6 +195,18 @@ class CandidateAdjudication(BaseModel):
     rationale: str = Field(min_length=1, max_length=5000)
     evidence_valid: bool | None = None
     location_valid: bool | None = None
+    found_by: str | None = Field(default=None, min_length=1, max_length=256)
+    judged_by: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @field_validator("found_by", "judged_by")
+    @classmethod
+    def normalize_provenance_actor(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("finding provenance actor must not be blank")
+        return normalized
 
     @model_validator(mode="after")
     def match_requires_gold(self) -> "CandidateAdjudication":
@@ -206,6 +218,15 @@ class CandidateAdjudication(BaseModel):
         if len(set(all_gold)) != len(all_gold):
             raise ValueError("gold matches must be unique within an adjudication")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_optional_provenance(self, handler):
+        payload = handler(self)
+        if self.found_by is None:
+            payload.pop("found_by", None)
+        if self.judged_by is None:
+            payload.pop("judged_by", None)
+        return payload
 
 
 class MissedGoldDiagnosis(BaseModel):
@@ -432,7 +453,7 @@ class BenchmarkSchedule(BaseModel):
 class BenchmarkResults(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1, 2, 3, 4] = 1
+    schema_version: Literal[1, 2, 3, 4, 5] = 1
     runs: tuple[BenchmarkRun, ...] = Field(default=(), max_length=10000)
     failures: tuple[BenchmarkFailure, ...] = Field(default=(), max_length=10000)
     schedule: BenchmarkSchedule | None = None
@@ -449,10 +470,24 @@ class BenchmarkResults(BaseModel):
             run.queue_wait_ms is not None for run in self.runs
         )
         has_missed_gold_diagnoses = any(run.missed_gold_diagnoses for run in self.runs)
-        if has_missed_gold_diagnoses and self.schema_version != 4:
-            raise ValueError("missed gold diagnoses require schema version 4")
-        if has_schedule_metadata and self.schema_version not in {3, 4}:
-            raise ValueError("schedule and queue metadata require schema version 3 or 4")
+        if has_missed_gold_diagnoses and self.schema_version not in {4, 5}:
+            raise ValueError("missed gold diagnoses require schema version 4 or 5")
+        adjudications = [decision for run in self.runs for decision in run.adjudications]
+        has_finding_provenance = any(
+            decision.found_by is not None or decision.judged_by is not None
+            for decision in adjudications
+        )
+        if has_finding_provenance and self.schema_version != 5:
+            raise ValueError("per-finding provenance requires results schema version 5")
+        if self.schema_version == 5 and any(
+            decision.found_by is None or decision.judged_by is None
+            for decision in adjudications
+        ):
+            raise ValueError(
+                "schema version 5 requires both found_by and judged_by per adjudication"
+            )
+        if has_schedule_metadata and self.schema_version not in {3, 4, 5}:
+            raise ValueError("schedule and queue metadata require schema version 3, 4 or 5")
         if self.schedule is not None:
             run_order = self.schedule.run_order
             run_ids = tuple(run.run_id for run in self.runs)
@@ -650,6 +685,20 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
                 "confidence": confidence,
                 "evidence_validated": sum(d.evidence_valid is True for d in run.adjudications),
                 "location_validated": sum(d.location_valid is True for d in run.adjudications),
+                **(
+                    {
+                        "finding_provenance": [
+                            {
+                                "candidate_id": decision.candidate_id,
+                                "found_by": decision.found_by,
+                                "judged_by": decision.judged_by,
+                            }
+                            for decision in run.adjudications
+                        ]
+                    }
+                    if results.schema_version == 5
+                    else {}
+                ),
                 "elapsed_ms": run.elapsed_ms,
                 "input_tokens": run.input_tokens,
                 "output_tokens": run.output_tokens,
@@ -769,7 +818,9 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
                 failures_by_configuration[configuration]
             )
     payload = {
-        "schema_version": 4 if results.failures else 3,
+        "schema_version": (
+            5 if results.schema_version == 5 else 4 if results.failures else 3
+        ),
         "scoring": "local_explicit_adjudication",
         "dataset_kind": dataset.kind,
         "dataset_sha256": _benchmark_dataset_sha256(dataset),
@@ -1975,7 +2026,16 @@ async def run_repetitions(
             if run.attempt is None:
                 run = run.model_copy(update={"attempt": attempt})
             runs.append(run)
-    results = BenchmarkResults(schema_version=2, runs=tuple(runs), failures=tuple(failures))
+    has_provenance = any(
+        decision.found_by is not None or decision.judged_by is not None
+        for run in runs
+        for decision in run.adjudications
+    )
+    results = BenchmarkResults(
+        schema_version=5 if has_provenance else 2,
+        runs=tuple(runs),
+        failures=tuple(failures),
+    )
     score_reliability(dataset, results, expected_repetitions=repetitions)
     return results
 
