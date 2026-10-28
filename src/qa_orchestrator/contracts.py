@@ -117,7 +117,9 @@ class EvidenceRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     evidence_ref: EvidenceRefId
-    kind: Literal["source", "diff", "requirement", "claim", "runtime", "other"]
+    kind: Literal[
+        "source", "diff", "requirement", "claim", "runtime", "prior_review", "other"
+    ]
     sha256: Sha256Digest
     revision: GitObjectId | None = None
     path: ChangedFilePath | None = None
@@ -156,6 +158,8 @@ class EvidenceRecord(BaseModel):
             raise ValueError("source coordinates are allowed only for source evidence")
         if self.kind == "diff" and self.revision is None:
             raise ValueError("diff evidence requires a head revision")
+        if self.kind == "prior_review" and self.revision is None:
+            raise ValueError("prior review evidence requires the reviewed head revision")
         if self.kind not in {"source", "diff"} and not self.locator:
             raise ValueError("external evidence requires a stable locator")
         return self
@@ -375,6 +379,33 @@ def review_diff_hunk_inventory_sha256(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+class PriorReviewDecision(BaseModel):
+    """A same-MR historical disposition, supplied as context rather than proof."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    merge_request_source_id: EvidenceRefId
+    reviewed_head_sha: GitObjectId
+    revision_relation: Literal["same_head", "verified_ancestor"]
+    candidate_id: str = Field(min_length=1, max_length=128)
+    disposition: Literal["accepted", "resolved", "rejected", "unresolved", "outdated"]
+    summary: str = Field(min_length=1, max_length=1000)
+    evidence_ref: EvidenceRefId
+
+    @field_validator("reviewed_head_sha")
+    @classmethod
+    def normalize_reviewed_head(cls, value: str) -> str:
+        return value.lower()
+
+    @field_validator("summary")
+    @classmethod
+    def nonblank_summary(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("prior review summary must not be blank")
+        return value
+
+
 class ReviewContext(BaseModel):
     """Immutable identifiers for the exact source and evidence packet reviewed."""
 
@@ -387,6 +418,8 @@ class ReviewContext(BaseModel):
     evidence_packet_sha256: Sha256Digest
     changed_files: tuple[ChangedFilePath, ...] = Field(min_length=1, max_length=500)
     evidence_refs: tuple[EvidenceRefId, ...] = Field(min_length=1, max_length=1000)
+    current_merge_request_source_id: EvidenceRefId | None = None
+    prior_review_decisions: tuple[PriorReviewDecision, ...] = Field(default=(), max_length=50)
     review_rules: ReviewRuleset | None = None
     evidence_registry: tuple[EvidenceRecord, ...] = Field(
         default=(), max_length=1000,
@@ -460,6 +493,41 @@ class ReviewContext(BaseModel):
             raise ValueError("changed_files must be unique")
         if len(set(self.evidence_refs)) != len(self.evidence_refs):
             raise ValueError("evidence_refs must be unique")
+        history_keys = [
+            (decision.merge_request_source_id, decision.reviewed_head_sha, decision.candidate_id)
+            for decision in self.prior_review_decisions
+        ]
+        if len(set(history_keys)) != len(history_keys):
+            raise ValueError("prior review decisions must be unique per candidate and head")
+        if len({item.evidence_ref for item in self.prior_review_decisions}) != len(
+            self.prior_review_decisions
+        ):
+            raise ValueError("prior review decision evidence refs must be unique")
+        for decision in self.prior_review_decisions:
+            if decision.evidence_ref not in self.evidence_refs:
+                raise ValueError("prior review decision evidence ref is outside the bound packet")
+            if decision.reviewed_head_sha == self.head_sha:
+                if decision.revision_relation != "same_head":
+                    raise ValueError("same-head prior review must declare same_head")
+            elif decision.revision_relation != "verified_ancestor":
+                raise ValueError("prior review head must be the current head or a verified ancestor")
+        if self.prior_review_decisions and (
+            self.input_manifest is None or not self.evidence_registry
+        ):
+            raise ValueError(
+                "prior review decisions require a bound input manifest and evidence registry"
+            )
+        if self.current_merge_request_source_id is not None:
+            if self.input_manifest is None:
+                raise ValueError("current merge request source ID requires an input manifest")
+            sources_by_id = {
+                source.source_id: source for source in self.input_manifest.sources
+            }
+            current_merge_request = sources_by_id.get(self.current_merge_request_source_id)
+            if current_merge_request is None or current_merge_request.kind != "merge_request":
+                raise ValueError(
+                    "current merge request source ID must resolve to a merge request source"
+                )
         if (self.neighbor_discovery_candidate_count is None) != (
             self.neighbor_discovery_candidate_set_sha256 is None
         ):
@@ -522,12 +590,57 @@ class ReviewContext(BaseModel):
                     raise ValueError("diff evidence must match the bound head and diff hash")
             if self.input_manifest is not None:
                 records_by_ref = {entry.evidence_ref: entry for entry in self.evidence_registry}
+                sources_by_id = {
+                    source.source_id: source for source in self.input_manifest.sources
+                }
                 for source in self.input_manifest.sources:
                     for criterion_ref in source.criterion_refs:
                         record = records_by_ref.get(criterion_ref)
                         if record is not None and record.kind not in {"requirement", "claim"}:
                             raise ValueError(
                                 "input manifest criteria must resolve to requirement or claim evidence"
+                            )
+                if self.prior_review_decisions:
+                    source_ids = {
+                        decision.merge_request_source_id
+                        for decision in self.prior_review_decisions
+                    }
+                    if self.current_merge_request_source_id is None:
+                        raise ValueError(
+                            "prior review decisions require a bound current merge request source"
+                        )
+                    if source_ids != {self.current_merge_request_source_id}:
+                        raise ValueError(
+                            "prior review decisions must target the current merge request source"
+                        )
+                    source_id = self.current_merge_request_source_id
+                    merge_request = sources_by_id.get(source_id)
+                    if merge_request is None or merge_request.kind != "merge_request":
+                        raise ValueError("prior review decision does not match a merge request source")
+                    merge_request_locator = merge_request.locator.rstrip("/")
+                    for decision in self.prior_review_decisions:
+                        record = records_by_ref.get(decision.evidence_ref)
+                        same_merge_request = (
+                            record is not None
+                            and record.locator is not None
+                            and (
+                                record.locator == merge_request_locator
+                                or record.locator.startswith(
+                                    tuple(
+                                        merge_request_locator + separator
+                                        for separator in ("/", "#", "?")
+                                    )
+                                )
+                            )
+                        )
+                        if (
+                            record is None
+                            or record.kind != "prior_review"
+                            or record.revision != decision.reviewed_head_sha
+                            or not same_merge_request
+                        ):
+                            raise ValueError(
+                                "prior review evidence must resolve to the same merge request and head"
                             )
         return self
 
@@ -536,6 +649,10 @@ class ReviewContext(BaseModel):
         payload = handler(self)
         if self.input_manifest is None:
             payload.pop("input_manifest", None)
+        if self.current_merge_request_source_id is None:
+            payload.pop("current_merge_request_source_id", None)
+        if not self.prior_review_decisions:
+            payload.pop("prior_review_decisions", None)
         if self.neighbor_discovery_sha256 is None:
             payload.pop("neighbor_discovery_sha256", None)
         if self.neighbor_discovery_candidate_count is None:

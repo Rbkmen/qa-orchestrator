@@ -78,7 +78,7 @@ Triage → execution group 1 → ... → execution group N
 
 Transition identifiers are model-neutral, not model selectors: use the returned `model_policy` for each stage.
 
-Sessions are in memory by default, with a default TTL of `1800` seconds and a default limit of `100` active sessions. Successful transitions and finalization refresh the TTL; reads do not. Set `QA_ORCHESTRATOR_SESSION_STORE_PATH` to opt into a local SQLite file that restores unfinished structured state and finalized sessions with review artifacts after a restart. It contains no raw evidence, prompts, source, logs, model responses, or history; for bound reviews it stores identifiers and submitted structured reports, including the final outcome. Finalized legacy sessions without review artifacts are removed from the store. Use one server process per file. The shared cache is bounded, so older terminal sessions may be evicted when new sessions are created. Unknown runs, expired sessions, illegal or repeated transitions, and invalid signals are rejected without changing state. Without the optional store, the host starts a new session after a restart.
+Sessions are in memory by default, with a default TTL of `1800` seconds and a default limit of `100` active sessions. Successful transitions and finalization refresh the TTL; reads do not. Set `QA_ORCHESTRATOR_SESSION_STORE_PATH` to opt into a local SQLite file that restores unfinished structured state and finalized sessions with review artifacts after a restart. It contains no raw evidence, prompts, source, logs, model responses, or conversation history. For bound reviews it stores identifiers, submitted structured reports, and any bounded prior-review summaries explicitly supplied in the review context, including the final outcome. Finalized legacy sessions without review artifacts are removed from the store. Use one server process per file. The shared cache is bounded, so older terminal sessions may be evicted when new sessions are created. Unknown runs, expired sessions, illegal or repeated transitions, and invalid signals are rejected without changing state. Without the optional store, the host starts a new session after a restart.
 
 Normal execution schedule for `ordinary_mr`:
 
@@ -131,6 +131,21 @@ The `autotest` bundle includes `typescript_reviewer`; use it for broad TypeScrip
 ### Compact review context
 
 The host inspects the full diff once and keeps one per-task Evidence Packet with changed behavior, source locators, and verified facts. Give each profile only relevant sections; reopen source only to confirm a concrete candidate or resolve a named link. Evidence items use stable local references such as `E1`, and finding candidates use stable identifiers such as `F-01`. `code_explorer` returns an evidence map and unresolved links, not defect candidates. `code_reviewer` uses that map and reports only concrete candidates supported by the changed code and evidence. Test analysis reports coverage gaps; specialist profiles stay within their returned focus. A finding candidate includes evidence references, confidence, and a verification gap; when supported by the Evidence Packet, it also includes `source_locations`, `affected_area`, and concrete `impact`. Profiles do not assign severity. Profiles do not repeat the full diff or raw logs, and synthesis receives deduplicated candidates and references rather than full transcripts. Routes return only the sections relevant to their profile: evidence map, finding candidates, coverage gaps, and unverified items are separate outputs.
+
+An optional `review_context.prior_review_decisions` carries bounded dispositions
+from an earlier review of the same merge request. When present,
+`current_merge_request_source_id` must explicitly select the current
+`merge_request` source from the input manifest, and every prior item must name
+that same source. Each item also names the reviewed head, a candidate ID,
+the prior disposition, a short summary, and a `prior_review` evidence ref whose
+locator is under that MR and whose revision matches the reviewed head. For an
+older head, the host must verify it is an ancestor of the current head and set
+`revision_relation="verified_ancestor"`; otherwise the history is rejected.
+The prompt labels these items as historical data and requires checking them
+against current source. A previous status is not proof that a current finding
+exists or is resolved. History is supplied per session, retained only with that
+session's normal TTL when persistence is enabled, and is not automatically
+learned or shared across MRs.
 
 Profile reports also carry `scenario_coverage`: concise material behavior scenarios with a disposition (`candidate`, `refuted`, `unverified`, or `not_applicable_to_diff`), bound evidence refs, and rationale. The `omission_auditor` runs after specialist profiles in bundles and receives a bounded queue of prior candidate or unverified scenarios, unverified notes, and coverage gaps. For `implementation_review=true`, one eligible implementation reviewer always gets a final auditor pass, including when its first report is clean. Other single-profile routes get one targeted auditor pass only when they leave an unresolved item. Risk assessment runs after the auditor. It checks the queue against the same bound evidence before its independent omission sweep. Queue truncation must be reported as a gap. This adds one host model pass and can increase token use and elapsed time; it does not establish a recall improvement without a paired, adjudicated benchmark.
 

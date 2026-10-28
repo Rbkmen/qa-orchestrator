@@ -18,6 +18,31 @@ The adapter measures UTC start/completion time around actual executor calls. Its
 
 Continue from `result.session.current_step` with scoped deep review or host synthesis. Existing completed profiles are skipped when resuming a retained primary-review session. Partial runs keep the existing terminal semantics and require a new session to rerun the same pinned input.
 
+## Replay synthesis with fixed upstream results
+
+To compare synthesis prompts without rerunning profile reviewers, call
+`adapter.replay_synthesis(...)` after all selected profiles have completed. The
+host supplies its existing synthesis executor; the adapter sends it the exact
+saved context and profile reports plus the requested prompt text. The input
+snapshot excludes any previous final report, so one prompt variant cannot
+anchor the next. `inputs_sha256` stays the same across prompt variants when the
+upstream results are identical; `prompt_sha256` and `output_sha256` identify
+the prompt and report. The returned report is validated against the pinned
+review context, but is not written into the session or the final decision.
+
+```python
+replay = await adapter.replay_synthesis(
+    run_id,
+    prompt_id="synthesis-v2",
+    prompt=updated_synthesis_prompt,
+    executor=execute_synthesis,
+)
+```
+
+This is a host-side experiment hook, not a built-in model call. Keep the model,
+reasoning, review inputs and adjudication protocol fixed, compare report quality
+on a pinned benchmark, and only then decide whether to adopt a prompt change.
+
 After host synthesis, `adapter.finish_review(...)` can submit the final report and
 write its Markdown rendering to `markdown_output` in the same host flow. The
 helper checks report refs and source locations against the bound context before

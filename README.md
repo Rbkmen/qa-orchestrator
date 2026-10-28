@@ -39,7 +39,7 @@ Reference the [canonical host rules](client-rules/generic/QA_ORCHESTRATOR_INSTRU
 |---|---|
 | MCP server | Checklists, stage/group validation, fixed escalation rules, bounded session state |
 | Evidence utilities | Immutable Git source/diff hashes, citation coordinates, exact context packets |
-| `HostReviewAdapter` | Async executor supervision, concurrency/time budgets, group barriers and attempts |
+| `HostReviewAdapter` | Async executor supervision, concurrency/time budgets, group barriers, attempts, and fixed-input synthesis replay |
 | `CodexProfileExecutor` | Installed CLI execution, strict output schema, report validation and reported usage |
 | Benchmark tools | Snapshot identity and scoring of explicitly adjudicated runs |
 
@@ -132,7 +132,7 @@ Explicit scoped `ReviewRuleset` rules can raise concerns or guard against known 
 
 ## Host execution
 
-`HostReviewAdapter` supervises an injected async `execute_profile(job)` for a bound session with triage complete. It enforces group barriers, concurrency/time limits, lease renewal and cancellation. It stops at deep review or synthesis; later stages and final decisions remain with the host.
+`HostReviewAdapter` supervises an injected async `execute_profile(job)` for a bound session with triage complete. It enforces group barriers, concurrency/time limits, lease renewal and cancellation. It stops at deep review or synthesis; later stages and final decisions remain with the host. Its optional synthesis replay reruns only the host-supplied synthesis executor over fixed saved profile reports; it does not persist the replay result.
 
 Rendered final reports include review boundaries: recorded outcome when supplied, reported profiles, retrieved/incomplete sources and reported limitations. For partial or blocked outcomes they also list known completion gaps; these are evidence of gaps, not necessarily the host's recorded reason. Standalone `qa-orch report render` accepts `--outcome` when the session outcome is known; otherwise it displays that outcome was not provided.
 

@@ -58,6 +58,32 @@ def test_mandatory_overflow_fails_instead_of_summarizing_or_truncating():
         select_context(packet, "python_reviewer", max_bytes=100)
 
 
+def test_required_refs_bypass_profile_filters_and_fail_if_budget_cannot_fit():
+    from qa_orchestrator.context_pack import ContextPacket, select_context
+
+    optional = fragment(
+        "H1", "prior review summary", required=False, profiles=(ReviewAgent.PR_TEST_ANALYZER,)
+    )
+    packet = ContextPacket(fragments=(optional,))
+
+    packed = select_context(
+        packet,
+        ReviewAgent.PYTHON_REVIEWER,
+        max_bytes=2000,
+        required_refs=("H1",),
+    )
+    assert packed.included_refs == ("H1",)
+    assert packed.omitted_refs == ()
+
+    with pytest.raises(ValueError, match="mandatory context exceeds budget"):
+        select_context(
+            packet,
+            ReviewAgent.PYTHON_REVIEWER,
+            max_bytes=5,
+            required_refs=("H1",),
+        )
+
+
 def test_packet_rejects_tampered_content_and_duplicate_refs():
     from qa_orchestrator.context_pack import ContextPacket
 

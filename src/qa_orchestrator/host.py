@@ -1,6 +1,8 @@
 """Host-side supervision of injected read-only profile executors."""
 
 import asyncio
+import hashlib
+import json
 import os
 import tempfile
 from collections.abc import Awaitable, Callable
@@ -10,7 +12,7 @@ from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from qa_orchestrator.checkpoints import ProfileCheckpointStore, checkpoint_key
 from qa_orchestrator.contracts import (
@@ -22,7 +24,9 @@ from qa_orchestrator.contracts import (
     ProfileExecutionMetrics,
     ProfileReviewReport,
     QaTaskOutcome,
+    QaTaskType,
     ReviewAgent,
+    ReviewBundle,
     ReviewContext,
     ReviewNote,
     ReviewRoute,
@@ -30,11 +34,16 @@ from qa_orchestrator.contracts import (
 from qa_orchestrator.evidence import validate_context_selection, validate_registered_locations
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
+    DeepReviewAssessment,
     DeepReviewSignals,
     OrchestrationError,
+    OrchestrationReason,
     OrchestrationStatus,
     OrchestrationStep,
     QaOrchestrationSession,
+    StageModelPolicy,
+    validate_final_report_profile_links,
+    validate_final_report_verification_records,
 )
 from qa_orchestrator.review_profiles import needs_targeted_omission_audit
 from qa_orchestrator.review_rules import ReviewRuleset
@@ -120,8 +129,72 @@ class HostExecutionResult:
     retained_outputs: tuple[RetainedProfileOutput, ...] = field(default=(), repr=False)
 
 
+class SynthesisReplayInputs(BaseModel):
+    """Fixed upstream review results for an in-memory synthesis prompt experiment."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    task_type: QaTaskType
+    review_context: ReviewContext
+    review_profiles: tuple[ReviewAgent, ...]
+    completed_profiles: tuple[ReviewAgent, ...]
+    selected_bundle: ReviewBundle | None = None
+    selected_profile: ReviewAgent | None = None
+    profile_reports: tuple[ProfileReviewReport, ...]
+    risk_signals: DeepReviewSignals | None = None
+    deep_assessment: DeepReviewAssessment | None = None
+    deep_reason_code: OrchestrationReason | None = None
+    model_policy: StageModelPolicy | None = None
+
+
+class SynthesisReplayJob(BaseModel):
+    """One host-executed synthesis call over fixed upstream results."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: str
+    prompt_id: str = Field(min_length=1, max_length=128)
+    prompt: str = Field(min_length=1, max_length=256_000, repr=False)
+    prompt_sha256: str
+    inputs_sha256: str
+    inputs: SynthesisReplayInputs
+
+    @field_validator("prompt_id")
+    @classmethod
+    def normalize_prompt_id(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("prompt_id must not be blank")
+        return value
+
+
+class SynthesisReplayResult(BaseModel):
+    """Ephemeral, hash-bound result; replay does not update the stored session."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: str
+    prompt_id: str
+    prompt_sha256: str
+    inputs_sha256: str
+    output_sha256: str
+    final_review_report: FinalReviewReport
+
+
 ProfileExecutor = Callable[[HostProfileJob], Awaitable[ProfileReviewReport]]
+SynthesisReplayExecutor = Callable[[SynthesisReplayJob], Awaitable[FinalReviewReport]]
 RiskAssessor = Callable[[tuple[ProfileReviewReport, ...]], DeepReviewSignals]
+
+
+def _canonical_json_sha256(value: object) -> str:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class HostReviewAdapter:
@@ -459,6 +532,81 @@ class HostReviewAdapter:
             tuple(p for p in session.review_profiles if p in reused),
             tuple(ledger),
             tuple(retained_outputs),
+        )
+
+    async def replay_synthesis(
+        self,
+        run_id: str,
+        *,
+        prompt_id: str,
+        prompt: str,
+        executor: SynthesisReplayExecutor,
+    ) -> SynthesisReplayResult:
+        """Re-run only host synthesis over the saved profile reports without persisting it."""
+        session = self.service.get_qa_orchestration(run_id)
+        if (
+            session.current_step not in {
+                OrchestrationStep.SYNTHESIS,
+                OrchestrationStep.AWAITING_HOST_OUTCOME,
+            }
+            or session.review_context is None
+            or tuple(session.completed_profiles) != tuple(session.review_profiles)
+            or tuple(report.profile for report in session.profile_reports)
+            != tuple(session.review_profiles)
+        ):
+            raise ValueError(
+                "synthesis replay requires a bound session with all upstream profile reports"
+            )
+        inputs = SynthesisReplayInputs(
+            task_type=session.task_type,
+            review_context=session.review_context,
+            review_profiles=tuple(session.review_profiles),
+            completed_profiles=tuple(session.completed_profiles),
+            selected_bundle=session.selected_bundle,
+            selected_profile=session.selected_profile,
+            profile_reports=tuple(session.profile_reports),
+            risk_signals=session.risk_signals,
+            deep_assessment=session.deep_assessment,
+            deep_reason_code=session.deep_reason_code,
+            model_policy=session.model_policy,
+        )
+        inputs_sha256 = _canonical_json_sha256(inputs.model_dump(mode="json"))
+        prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        job = SynthesisReplayJob(
+            run_id=run_id,
+            prompt_id=prompt_id,
+            prompt=prompt,
+            prompt_sha256=prompt_sha256,
+            inputs_sha256=inputs_sha256,
+            inputs=inputs,
+        )
+        final_report = FinalReviewReport.model_validate(await executor(job))
+        if final_report.profiles_reviewed != inputs.completed_profiles:
+            raise ValueError("synthesis replay output does not match the fixed profile reports")
+        expected_rules = (
+            inputs.review_context.review_rules.digest
+            if inputs.review_context.review_rules
+            else None
+        )
+        if final_report.review_rules_sha256 != expected_rules:
+            raise ValueError("synthesis replay output rules digest mismatch")
+        from qa_orchestrator.report import validate_final_report_context
+
+        validate_final_report_context(final_report, inputs.review_context)
+        validate_final_report_verification_records(inputs.review_context, final_report)
+        validate_final_report_profile_links(
+            inputs.review_context,
+            inputs.profile_reports,
+            final_report,
+        )
+        output_sha256 = _canonical_json_sha256(final_report.model_dump(mode="json"))
+        return SynthesisReplayResult(
+            run_id=run_id,
+            prompt_id=job.prompt_id,
+            prompt_sha256=job.prompt_sha256,
+            inputs_sha256=job.inputs_sha256,
+            output_sha256=output_sha256,
+            final_review_report=final_report,
         )
 
     def finish_review(

@@ -75,6 +75,170 @@ def report(profile, context):
     )
 
 
+async def test_synthesis_replay_holds_upstream_reports_fixed_and_does_not_persist(
+    host_session, make_final_review_report,
+):
+    service, run_id = host_session(profile=ReviewAgent.PYTHON_REVIEWER)
+    adapter = HostReviewAdapter(service)
+
+    async def execute_profile(job):
+        return report(job.profile, job.session.review_context)
+
+    await adapter.run_primary_review(run_id, execute_profile, lambda _: DeepReviewSignals())
+    before = service.get_qa_orchestration(run_id)
+    replay_jobs = []
+
+    async def execute_synthesis(job):
+        replay_jobs.append(job)
+        return make_final_review_report(
+            job.inputs.completed_profiles, context=job.inputs.review_context
+        )
+
+    first = await adapter.replay_synthesis(
+        run_id,
+        prompt_id="synthesis-v1",
+        prompt="Original synthesis prompt",
+        executor=execute_synthesis,
+    )
+    second = await adapter.replay_synthesis(
+        run_id,
+        prompt_id="synthesis-v2",
+        prompt="Revised synthesis prompt",
+        executor=execute_synthesis,
+    )
+    after = service.get_qa_orchestration(run_id)
+
+    assert first.inputs_sha256 == second.inputs_sha256
+    assert first.prompt_sha256 != second.prompt_sha256
+    assert replay_jobs[0].inputs.profile_reports == tuple(before.profile_reports)
+    assert replay_jobs[0].inputs.review_context == before.review_context
+    assert not hasattr(replay_jobs[0].inputs, "final_review_report")
+    assert after == before
+
+
+async def test_synthesis_replay_rejects_a_report_for_another_profile(
+    host_session, make_final_review_report,
+):
+    service, run_id = host_session(profile=ReviewAgent.PYTHON_REVIEWER)
+    adapter = HostReviewAdapter(service)
+
+    async def execute_profile(job):
+        return report(job.profile, job.session.review_context)
+
+    await adapter.run_primary_review(run_id, execute_profile, lambda _: DeepReviewSignals())
+    before = service.get_qa_orchestration(run_id)
+
+    async def execute_synthesis(job):
+        return make_final_review_report(
+            (ReviewAgent.CODE_REVIEWER,), context=job.inputs.review_context
+        )
+
+    with pytest.raises(ValueError, match="fixed profile reports"):
+        await adapter.replay_synthesis(
+            run_id,
+            prompt_id="wrong-profile",
+            prompt="Test prompt",
+            executor=execute_synthesis,
+        )
+
+    assert service.get_qa_orchestration(run_id) == before
+
+
+async def test_synthesis_replay_rejects_a_report_with_wrong_rules_digest(
+    host_session, make_final_review_report,
+):
+    service, run_id = host_session(profile=ReviewAgent.PYTHON_REVIEWER)
+    adapter = HostReviewAdapter(service)
+
+    async def execute_profile(job):
+        return report(job.profile, job.session.review_context)
+
+    await adapter.run_primary_review(run_id, execute_profile, lambda _: DeepReviewSignals())
+
+    async def execute_synthesis(job):
+        valid = make_final_review_report(
+            job.inputs.completed_profiles, context=job.inputs.review_context
+        )
+        return FinalReviewReport.model_validate({
+            **valid.model_dump(mode="python"),
+            "review_rules_sha256": "a" * 64,
+        })
+
+    with pytest.raises(ValueError, match="rules digest mismatch"):
+        await adapter.replay_synthesis(
+            run_id,
+            prompt_id="wrong-rules-digest",
+            prompt="Test prompt",
+            executor=execute_synthesis,
+        )
+
+
+async def test_synthesis_replay_rejects_findings_not_linked_to_profile_reports(
+    host_session, make_final_review_report, review_finding_candidate,
+):
+    service, run_id = host_session(profile=ReviewAgent.PYTHON_REVIEWER)
+    adapter = HostReviewAdapter(service)
+
+    async def execute_profile(job):
+        return report(job.profile, job.session.review_context)
+
+    await adapter.run_primary_review(run_id, execute_profile, lambda _: DeepReviewSignals())
+
+    async def execute_synthesis(job):
+        return make_final_review_report(
+            job.inputs.completed_profiles,
+            findings=((review_finding_candidate, (ReviewAgent.CODE_REVIEWER,)),),
+            context=job.inputs.review_context,
+        )
+
+    with pytest.raises(ValueError, match="source candidates do not match profile reports"):
+        await adapter.replay_synthesis(
+            run_id,
+            prompt_id="unlinked-finding",
+            prompt="Test prompt",
+            executor=execute_synthesis,
+        )
+
+
+async def test_synthesis_replay_rejects_verification_for_another_head(
+    host_session, make_final_review_report,
+):
+    service, run_id = host_session(profile=ReviewAgent.PYTHON_REVIEWER)
+    adapter = HostReviewAdapter(service)
+
+    async def execute_profile(job):
+        return report(job.profile, job.session.review_context)
+
+    await adapter.run_primary_review(run_id, execute_profile, lambda _: DeepReviewSignals())
+
+    async def execute_synthesis(job):
+        valid = make_final_review_report(
+            job.inputs.completed_profiles, context=job.inputs.review_context
+        )
+        return FinalReviewReport.model_validate({
+            **valid.model_dump(mode="python"),
+            "verification_records": ({
+                "verification_id": "V-01",
+                "check_type": "runtime",
+                "scenario": "Service startup",
+                "status": "passed",
+                "head_sha": "9" * 40,
+                "environment": "local",
+                "source": "runtime_system",
+                "source_ref": "local-startup",
+                "evidence_refs": (),
+            },),
+        })
+
+    with pytest.raises(ValueError, match="verification record does not match the bound head"):
+        await adapter.replay_synthesis(
+            run_id,
+            prompt_id="wrong-verification-head",
+            prompt="Test prompt",
+            executor=execute_synthesis,
+        )
+
+
 async def test_host_reports_changed_paths_missing_from_profile_attestation(host_session):
     service, run_id = host_session(profile="python_reviewer")
 

@@ -86,6 +86,14 @@ The command does not launch a model.
 
 Adjudicator identity and decisions are reported data. The runner verifies structure and snapshot identity, not the correctness of the adjudication. Do not copy golden findings into reviewer output or count a reference round-trip as a model-quality run.
 
+Results schema version 5 adds per-candidate `found_by` and `judged_by` actor
+identifiers to each adjudication. Both are required for every adjudication in a
+v5 artifact; use stable labels such as `profile:code_reviewer` and
+`human:qa-reviewer`, without personal details. Scoring includes the finding ID
+and both actors in each run's `finding_provenance` while leaving precision,
+recall and quality gates unchanged. Results schemas v1-v4 remain readable and
+omit these fields.
+
 ```sh
 qa-orch benchmark score --dataset /path/to/run/dataset.json \
   --results /path/to/run/results.json --output /path/to/run/score.json
