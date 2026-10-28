@@ -208,8 +208,13 @@ def build_server(service: OrchestratorService) -> FastMCP:
             ReviewContext | None,
             Field(
                 description=(
-                    "Optional immutable repository, base/head, changed-file, diff, and Evidence Packet identity. "
-                    "Required for ordinary_review and widget_review, with an input_manifest using schema v2. "
+                    "May be omitted only for non-review task types. Required for ordinary_review and widget_review. "
+                    "Before calling for either review type, resolve the authoritative task/MR and exact base_sha "
+                    "and head_sha, inspect the diff, and provide changed_files, diff_sha256, "
+                    "evidence_packet_sha256, evidence_refs, and input_manifest.schema_version=2 with "
+                    "source_inventory_status and source_conflict_status. Do not use a URL or placeholder instead. "
+                    "Keep raw source, diff, and Evidence Packet contents with the host; pass only identifiers, "
+                    "digests, and metadata. "
                     "When supplied, every completed profile must include a structured report whose "
                     "evidence references belong to this packet; completed outcomes require a final report. "
                     "The response may include file-type-based recommended_profiles and stack-matched "
@@ -221,6 +226,12 @@ def build_server(service: OrchestratorService) -> FastMCP:
         ] = None,
     ) -> QaOrchestrationSession:
         """Create a QA session and bind code reviews to one immutable review input.
+
+        Before calling for ordinary_review or widget_review, complete review preflight: resolve the authoritative
+        task/MR, pin exact base_sha and head_sha, inspect the exact diff, build the host-owned Evidence Packet and
+        stable refs, compute diff_sha256 and evidence_packet_sha256, and provide input_manifest.schema_version=2
+        with source_inventory_status and source_conflict_status. A task or MR URL alone is not enough. If an exact
+        source or required identity is unavailable, resolve or report that gap before starting a session.
 
         Every call creates a separate session. Use prepare_qa_orchestration for a stateless profile
         checklist. `task_type` narrows the bundle shortlist; the host still selects the review route.
@@ -236,14 +247,17 @@ def build_server(service: OrchestratorService) -> FastMCP:
         if task_type in {"ordinary_review", "widget_review"}:
             if review_context is None:
                 raise ValueError(
-                    "ordinary_review and widget_review require a bound review_context"
+                    "ordinary_review and widget_review require a bound review_context before start: exact "
+                    "base_sha and head_sha, diff_sha256, evidence_packet_sha256, changed_files, evidence_refs, "
+                    "and input_manifest.schema_version=2"
                 )
             if (
                 review_context.input_manifest is None
                 or review_context.input_manifest.schema_version != 2
             ):
                 raise ValueError(
-                    "code review requires review_context.input_manifest schema_version=2"
+                    "code review requires input_manifest.schema_version=2 with source_inventory_status "
+                    "and source_conflict_status"
                 )
         return service.start_qa_orchestration(task_type, review_context)
 
