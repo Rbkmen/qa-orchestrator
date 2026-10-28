@@ -329,7 +329,7 @@ def test_readme_documents_pinned_installation_and_review_layers():
 
     from qa_orchestrator.contracts import ReviewAgent, ReviewBundle
 
-    for identifier in (*(p for p in ReviewAgent if p is not ReviewAgent.OMISSION_AUDITOR), *ReviewBundle):
+    for identifier in (*ReviewAgent, *ReviewBundle):
         assert f"`{identifier.value}`" in readme
 
 
@@ -493,3 +493,25 @@ main()
     assert result.structured_content == {"mode": "host_default"}
     assert not marker.exists(), "Server startup attempted an outbound request"
     assert not dependency_home.exists(), "Server startup created a dependency update cache"
+
+
+def test_readme_report_limits_match_enforced_limits():
+    import re
+
+    from qa_orchestrator.contracts import (
+        _MAX_FINAL_REVIEW_REPORT_BYTES,
+        _MAX_PROFILE_REVIEW_REPORT_BYTES,
+    )
+    from qa_orchestrator.orchestration import _MAX_SESSION_REVIEW_ARTIFACT_BYTES
+
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+    match = re.search(
+        r"Profile reports are limited to (\d+) KiB each, final reports to (\d+) KiB each, "
+        r"and combined review artifacts to (\d+) KiB per session", readme,
+    )
+    assert match is not None
+    assert tuple(int(value) * 1024 for value in match.groups()) == (
+        _MAX_PROFILE_REVIEW_REPORT_BYTES,
+        _MAX_FINAL_REVIEW_REPORT_BYTES,
+        _MAX_SESSION_REVIEW_ARTIFACT_BYTES,
+    )

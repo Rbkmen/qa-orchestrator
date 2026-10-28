@@ -297,32 +297,6 @@ async def test_host_assesses_risk_after_single_implementation_profile(host_sessi
     assert result.session.current_step == "synthesis"
 
 
-async def test_host_resumes_previously_scheduled_legacy_auditor(host_session, monkeypatch):
-    import qa_orchestrator.orchestration as orchestration_module
-
-    with monkeypatch.context() as old:
-        old.setattr(orchestration_module, "triage_review_profiles", lambda **_: (
-            ReviewAgent.PYTHON_REVIEWER, ReviewAgent.OMISSION_AUDITOR
-        ))
-        service, run_id = host_session(profile=ReviewAgent.PYTHON_REVIEWER)
-    session = service.get_qa_orchestration(run_id)
-    first = report(ReviewAgent.PYTHON_REVIEWER, session.review_context)
-    pending = service.advance_qa_orchestration(AdvanceQaOrchestrationRequest(
-        run_id=run_id, completed_step="primary_review", status="completed",
-        completed_profile=ReviewAgent.PYTHON_REVIEWER, profile_reports=[first],
-    ))
-    assert pending.current_profile is ReviewAgent.OMISSION_AUDITOR
-    executed = []
-
-    async def execute(job):
-        executed.append(job.profile)
-        return report(job.profile, job.session.review_context)
-
-    result = await HostReviewAdapter(service).run_primary_review(
-        run_id, execute, lambda _: DeepReviewSignals()
-    )
-    assert executed == [ReviewAgent.OMISSION_AUDITOR]
-    assert result.session.current_step == "synthesis"
 
 
 def test_host_rejects_attestation_for_path_outside_bound_change(bound_review_context):
@@ -947,8 +921,14 @@ async def test_a_stale_host_does_not_stop_a_session_advanced_by_another_host(hos
         run_id, fast, lambda reports: DeepReviewSignals()
     )
     release.set()
-    with pytest.raises(OrchestrationError, match="stale session revision"):
-        await older
+    result = await older
+    assert [failure.reason for failure in result.failures] == [
+        "report_or_assessment_error", "session_revision_conflict"
+    ]
+    assert len(result.unsaved_reports) == 1
+    assert result.unsaved_reports[0].profile == ReviewAgent.PYTHON_REVIEWER
+    assert result.session_snapshot_fresh is True
+    assert len(result.execution_attempts) == 1
     assert (
         service.get_qa_orchestration(run_id).current_step
         == newer.session.current_step
@@ -1021,3 +1001,152 @@ async def test_invalid_output_is_retained_privately_across_a_retry(host_session)
     assert result.retained_outputs[0].raw_output == secret
     assert secret.decode() not in repr(result)
     assert secret.decode() not in result.session.model_dump_json()
+
+
+async def test_stop_failure_returns_unsaved_reports_and_marks_snapshot_unavailable(host_session, monkeypatch):
+    service, run_id = host_session(profile="python_reviewer")
+    original_get = service.get_qa_orchestration
+    calls = 0
+
+    def unavailable_after_start(requested_run_id):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise ConnectionError("private details")
+        return original_get(requested_run_id)
+
+    monkeypatch.setattr(service, "get_qa_orchestration", unavailable_after_start)
+
+    async def execute(job):
+        return report(job.profile, job.session.review_context)
+
+    def fail_assessment(reports):
+        raise ValueError("private details")
+
+    result = await HostReviewAdapter(service).run_primary_review(run_id, execute, fail_assessment)
+    assert [failure.reason for failure in result.failures] == [
+        "report_or_assessment_error", "session_stop_failed", "session_unavailable"
+    ]
+    assert result.session_snapshot_fresh is False
+    assert len(result.unsaved_reports) == 1
+    assert len(result.execution_attempts) == 1
+    assert original_get(run_id).current_step == "primary_review"
+
+
+async def test_exhausted_lost_transition_response_returns_reports_without_stopping_new_state(host_session, monkeypatch):
+    service, run_id = host_session(profile="python_reviewer")
+    advance = service.advance_qa_orchestration
+
+    def lose_responses(request):
+        advance(request)
+        raise TimeoutError("private provider details")
+
+    monkeypatch.setattr(service, "advance_qa_orchestration", lose_responses)
+
+    async def execute(job):
+        return report(job.profile, job.session.review_context)
+
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, execute, lambda _: DeepReviewSignals()
+    )
+    assert result.failures[0].reason == "transition_response_unavailable"
+    assert result.session_snapshot_fresh is True
+    assert result.session.current_step == "synthesis"
+    assert len(result.unsaved_reports) == 1
+    assert len(result.execution_attempts) == 1
+
+
+async def test_cancellation_retains_completed_profiles_even_if_stop_fails(host_session, monkeypatch):
+    service, run_id = host_session(bundle="python_backend")
+    ready = asyncio.Event()
+    completed = 0
+    adapter = HostReviewAdapter(service)
+
+    async def execute(job):
+        nonlocal completed
+        if job.profile == ReviewAgent.PYTHON_REVIEWER:
+            await asyncio.Event().wait()
+        completed += 1
+        if completed == 2:
+            ready.set()
+        return report(job.profile, job.session.review_context)
+
+    def stop_fails(*args):
+        raise ConnectionError("private details")
+
+    monkeypatch.setattr(adapter, "_stop_partial", stop_fails)
+    task = asyncio.create_task(adapter.run_primary_review(run_id, execute, lambda _: DeepReviewSignals()))
+    await asyncio.wait_for(ready.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await task
+    assert len(caught.value.unsaved_reports) == 2
+    assert len(caught.value.execution_attempts) == 3
+
+
+async def test_expired_session_returns_reports_and_marks_snapshot_unavailable(host_session):
+    from datetime import timedelta
+
+    service, run_id = host_session(profile="python_reviewer")
+    current = service.get_qa_orchestration(run_id)
+
+    async def execute(job):
+        service.orchestrator._clock = lambda: current.expires_at + timedelta(seconds=1)
+        return report(job.profile, job.session.review_context)
+
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, execute, lambda _: DeepReviewSignals()
+    )
+    assert result.session_snapshot_fresh is False
+    assert result.failures[-1].reason == "session_unavailable"
+    assert len(result.unsaved_reports) == 1
+    assert len(result.execution_attempts) == 1
+
+
+async def test_storage_write_failure_returns_reports_and_fresh_session(host_session, monkeypatch):
+    service, run_id = host_session(profile="python_reviewer")
+
+    def fail_write(session, **kwargs):
+        raise ValueError("private storage details")
+
+    monkeypatch.setattr(service.orchestrator, "_save_session", fail_write)
+
+    async def execute(job):
+        return report(job.profile, job.session.review_context)
+
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, execute, lambda _: DeepReviewSignals()
+    )
+    assert [failure.reason for failure in result.failures] == [
+        "report_or_assessment_error", "session_stop_failed"
+    ]
+    assert result.session_snapshot_fresh is True
+    assert result.session.current_step == "primary_review"
+    assert len(result.unsaved_reports) == 1
+    assert len(result.execution_attempts) == 1
+
+
+async def test_concurrent_terminal_transition_is_reported_as_conflict(host_session):
+    service, run_id = host_session(profile="python_reviewer")
+    ready, release = asyncio.Event(), asyncio.Event()
+
+    async def execute(job):
+        ready.set()
+        await release.wait()
+        return report(job.profile, job.session.review_context)
+
+    task = asyncio.create_task(HostReviewAdapter(service).run_primary_review(
+        run_id, execute, lambda _: DeepReviewSignals()
+    ))
+    await asyncio.wait_for(ready.wait(), 1)
+    current = service.get_qa_orchestration(run_id)
+    terminal = service.advance_qa_orchestration(AdvanceQaOrchestrationRequest(
+        run_id=run_id, completed_step="primary_review", status="partial",
+        expected_revision=current.revision,
+    ))
+    release.set()
+    result = await task
+    assert result.session.status == "partial"
+    assert result.session.revision == terminal.revision
+    assert any(failure.reason == "session_revision_conflict" for failure in result.failures)
+    assert len(result.unsaved_reports) == 1

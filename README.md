@@ -204,9 +204,9 @@ Pass overrides through the MCP client's environment. Restart the server connecti
 
 ## Storage and trust boundaries
 
-Session state is bounded and in memory by default. Optional SQLite restores non-expired unfinished sessions and finalized bound reviews with structured reports. Finalized legacy sessions without artifacts are removed. Checkpoints use a separate opt-in store; use one server process per session-store file.
+Session state is bounded and in memory by default. Optional SQLite restores non-expired unfinished sessions and finalized bound reviews with structured reports. Finalized legacy sessions without artifacts are removed. Checkpoints use a separate opt-in store; use one server process per session-store file. Persisted sessions containing the removed `omission_auditor` profile or its report fields are incompatible with this version and cause the configured session store to fail validation; use a different store path if needed.
 
-Stored reports can contain source-derived findings and descriptions. Raw packets, prompts, transcripts and benchmark artifacts are managed separately by the host. Reports are limited to 64 KiB each and 256 KiB combined per session. Normal MCP calls need no network; installation, evidence tools and model execution may need it.
+Stored reports can contain source-derived findings and descriptions. Raw packets, prompts, transcripts and benchmark artifacts are managed separately by the host. Profile reports are limited to 72 KiB each, final reports to 80 KiB each, and combined review artifacts to 288 KiB per session. Normal MCP calls need no network; installation, evidence tools and model execution may need it.
 
 Validation proves structure, identity and reported sequence, not source completeness, defect truth or runtime success. The CLI read-only sandbox restricts writes, not all reads; strict read isolation needs an OS/container boundary. Forbidden-action detection cannot prove an action never started. No autonomous external writes or learned persistent QA memory are added.
 

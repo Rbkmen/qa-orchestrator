@@ -472,10 +472,6 @@ for incomplete gold sets. Diagnoses are post-run annotations: they do not alter
 precision or recall and must never be passed into the blind review input. Score
 reports use schema `3` (or `4` when failed attempts are included).
 
-## 13. Legacy omission-audit reports
-
-New review routes do not schedule an omission auditor. Previously persisted sessions and reports retain their auditor profile and prior-finding validation data for recovery; these model-reported dispositions remain subject to host validation.
-
 ## 14. Preserve and audit material behavior scenarios
 
 Profile and final reports now include a bounded `scenario_coverage` matrix. Each
@@ -485,7 +481,7 @@ Unknown refs and duplicate scenario rows are rejected. Finalization carries any
 scenario omitted from synthesis forward as `unverified`, or exposes it as a
 coverage gap when the matrix is full.
 
-New routes leave unresolved scenarios in the profile reports for the host to assess during synthesis. Previously stored `targeted_scenario_audit` records remain readable.
+Unresolved scenarios remain in profile reports for the host to assess during synthesis.
 
 ### Preview profile context before execution
 

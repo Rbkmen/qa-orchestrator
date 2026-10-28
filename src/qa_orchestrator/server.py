@@ -309,8 +309,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
             Field(
                 description=(
                     "For completed triage, default to one allowed profile for a narrow, single-concern, "
-                    "low-risk review. The legacy omission_auditor value is retained only to read "
-                    "older sessions and cannot be selected for a new review. "
+                    "low-risk review. "
                     "It is mutually exclusive with selected_bundle."
                 )
             ),

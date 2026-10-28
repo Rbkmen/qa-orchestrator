@@ -20,7 +20,6 @@ from pydantic import (
 )
 
 from qa_orchestrator.contracts import (
-    EvidenceRefId,
     FinalReviewReport,
     ProfileChangedPathCoverage,
     ProfileReviewReport,
@@ -31,6 +30,13 @@ from qa_orchestrator.contracts import (
     ReviewContext,
     ReviewCoverageLedger,
     review_changed_paths_sha256,
+)
+from qa_orchestrator.deep_review import (
+    DeepReviewAssessment,
+    DeepReviewRule,  # noqa: F401 -- preserve the existing public import
+    DeepReviewSignals,
+    OrchestrationReason,
+    assess_deep_review,
 )
 from qa_orchestrator.evidence import (
     complete_criterion_coverage,
@@ -83,85 +89,6 @@ class OrchestrationModel(StrEnum):
     SOL = "gpt-6-sol"
 
 
-class OrchestrationReason(StrEnum):
-    EVIDENCE_GAP = "evidence_gap"
-    CROSS_REPOSITORY = "cross_repository"
-    ROOT_CAUSE = "root_cause"
-    HIGH_BLAST_RADIUS = "high_blast_radius"
-    HIGH_RISK_DOMAIN = "high_risk_domain"
-    EVIDENCE_CONFLICT = "evidence_conflict"
-    NON_REPRODUCIBLE = "non_reproducible"
-
-
-class DeepReviewRule(StrEnum):
-    HIGH_RISK_WITH_UNCERTAINTY = "high_risk_with_uncertainty"
-    MULTIPLE_COMPLEXITY_SIGNALS = "multiple_complexity_signals"
-    CRITICAL_EVIDENCE_CONFLICT = "critical_evidence_conflict"
-
-
-class DeepReviewSignals(BaseModel):
-    """Host-supplied escalation signals with the rationale and refs that support them."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    high_risk_domain: bool = Field(
-        default=False,
-        description="The change affects a sensitive security, identity, payment, fraud, privacy, or access-control area.",
-    )
-    evidence_uncertain: bool = Field(
-        default=False,
-        description=(
-            "A specific material conclusion remains uncertain, and a scoped read-only review "
-            "could plausibly resolve it. Do not set solely because CI, Stage, or runtime checks "
-            "were not run."
-        ),
-    )
-    cross_system_scope: bool = Field(
-        default=False,
-        description="The relevant behavior crosses repository, service, or system boundaries.",
-    )
-    multiple_plausible_causes: bool = Field(
-        default=False,
-        description="More than one plausible cause remains after investigation.",
-    )
-    evidence_conflict: bool = Field(
-        default=False,
-        description="Relevant authoritative evidence sources disagree.",
-    )
-    non_reproducible: bool = Field(
-        default=False,
-        description="The reported behavior cannot be reproduced under expected conditions.",
-    )
-    high_blast_radius: bool = Field(
-        default=False,
-        description="The change could affect many consumers, services, or data records.",
-    )
-    rationale: str | None = Field(
-        default=None,
-        max_length=2000,
-        description="Short explanation for the enabled signals; required when any signal is true.",
-    )
-    evidence_refs: tuple[EvidenceRefId, ...] = Field(
-        default=(),
-        max_length=32,
-        description="Evidence Packet references supporting the enabled signals.",
-    )
-
-    @model_validator(mode="after")
-    def validate_signal_evidence(self) -> "DeepReviewSignals":
-        signal_values = self.model_dump(exclude={"rationale", "evidence_refs"})
-        any_signal = any(signal_values.values())
-        if any_signal and (
-            not self.rationale or not self.rationale.strip() or not self.evidence_refs
-        ):
-            raise ValueError("enabled risk signals require rationale and evidence_refs")
-        if not any_signal and (self.rationale is not None or self.evidence_refs):
-            raise ValueError("rationale and evidence_refs require an enabled risk signal")
-        if len(set(self.evidence_refs)) != len(self.evidence_refs):
-            raise ValueError("risk signal evidence_refs must be unique")
-        return self
-
-
 # Keep headroom for defaulted fields added to each persisted candidate.
 _MAX_SESSION_REVIEW_ARTIFACT_BYTES = 288 * 1024
 
@@ -174,62 +101,6 @@ def _review_artifact_payload_size(
     if final_review_report is not None:
         size += len(final_review_report.model_dump_json().encode("utf-8"))
     return size
-
-
-class DeepReviewAssessment(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    should_escalate: bool
-    triggered_rules: tuple[DeepReviewRule, ...] = ()
-    reason_codes: tuple[OrchestrationReason, ...] = ()
-    complexity_signal_count: int = Field(ge=0, le=4)
-
-
-_COMPLEXITY_SIGNAL_REASONS = (
-    ("cross_system_scope", OrchestrationReason.CROSS_REPOSITORY),
-    ("multiple_plausible_causes", OrchestrationReason.ROOT_CAUSE),
-    ("non_reproducible", OrchestrationReason.NON_REPRODUCIBLE),
-    ("high_blast_radius", OrchestrationReason.HIGH_BLAST_RADIUS),
-)
-
-
-def assess_deep_review(signals: DeepReviewSignals) -> DeepReviewAssessment:
-    """Apply the fixed deep-review rules to structured host signals."""
-    complexity_signal_count = sum(
-        getattr(signals, field_name) for field_name, _ in _COMPLEXITY_SIGNAL_REASONS
-    )
-    triggered_rules: list[DeepReviewRule] = []
-    reason_codes: list[OrchestrationReason] = []
-
-    def add_reason(reason: OrchestrationReason) -> None:
-        if reason not in reason_codes:
-            reason_codes.append(reason)
-
-    if signals.high_risk_domain and signals.evidence_uncertain:
-        triggered_rules.append(DeepReviewRule.HIGH_RISK_WITH_UNCERTAINTY)
-        add_reason(OrchestrationReason.HIGH_RISK_DOMAIN)
-        add_reason(OrchestrationReason.EVIDENCE_GAP)
-
-    if complexity_signal_count >= 2:
-        triggered_rules.append(DeepReviewRule.MULTIPLE_COMPLEXITY_SIGNALS)
-        for field_name, reason in _COMPLEXITY_SIGNAL_REASONS:
-            if getattr(signals, field_name):
-                add_reason(reason)
-
-    if signals.evidence_conflict and (
-        signals.high_risk_domain or signals.cross_system_scope or signals.high_blast_radius
-    ):
-        triggered_rules.append(DeepReviewRule.CRITICAL_EVIDENCE_CONFLICT)
-        add_reason(OrchestrationReason.EVIDENCE_CONFLICT)
-        if signals.high_blast_radius:
-            add_reason(OrchestrationReason.HIGH_BLAST_RADIUS)
-
-    return DeepReviewAssessment(
-        should_escalate=bool(triggered_rules),
-        triggered_rules=tuple(triggered_rules),
-        reason_codes=tuple(reason_codes),
-        complexity_signal_count=complexity_signal_count,
-    )
 
 
 class ModelPolicy(BaseModel):
@@ -556,9 +427,7 @@ class QaOrchestrationSession(BaseModel):
     task_type: QaTaskType
     status: OrchestrationStatus
     current_step: OrchestrationStep
-    allowed_profiles: list[ReviewAgent] = Field(default_factory=lambda: [
-        profile for profile in ReviewAgent if profile is not ReviewAgent.OMISSION_AUDITOR
-    ])
+    allowed_profiles: list[ReviewAgent] = Field(default_factory=lambda: list(ReviewAgent))
     allowed_bundles: list[ReviewBundle] = Field(default_factory=lambda: list(REVIEW_BUNDLES))
     recommended_bundles: list[ReviewBundle] = Field(
         default_factory=list,
@@ -1078,7 +947,7 @@ class QaOrchestrator:
                 task_type=validated_task_type,
                 status=OrchestrationStatus.ACTIVE,
                 current_step=OrchestrationStep.TRIAGE,
-                allowed_profiles=[p for p in ReviewAgent if p is not ReviewAgent.OMISSION_AUDITOR],
+                allowed_profiles=list(ReviewAgent),
                 allowed_bundles=list(REVIEW_BUNDLES),
                 recommended_bundles=list(
                     recommended_bundles_for(
@@ -1696,8 +1565,6 @@ class QaOrchestrator:
         request: AdvanceQaOrchestrationRequest,
     ) -> QaOrchestrationSession:
         if session.current_step is OrchestrationStep.TRIAGE:
-            if request.selected_profile is ReviewAgent.OMISSION_AUDITOR:
-                raise OrchestrationError("omission_auditor is no longer available for new reviews")
             if (
                 request.implementation_review is True
                 and request.selected_profile in {ReviewAgent.PR_TEST_ANALYZER, ReviewAgent.CODE_EXPLORER}
@@ -1744,8 +1611,6 @@ class QaOrchestrator:
             if request.completed_profiles is not None:
                 if session.selected_bundle is not None:
                     groups = bundle_execution_groups(session.selected_bundle)
-                    if session.review_profiles[-1:] == [ReviewAgent.OMISSION_AUDITOR]:
-                        groups = (*groups, (ReviewAgent.OMISSION_AUDITOR,))
                 elif session.selected_profile is not None:
                     groups = tuple((profile,) for profile in session.review_profiles)
                 else:
@@ -1822,7 +1687,7 @@ class QaOrchestrator:
                     )
                     report_refs.update(
                         reference
-                        for item in (*report.scenario_coverage, *report.targeted_scenario_audit)
+                        for item in report.scenario_coverage
                         for reference in item.evidence_refs
                     )
                     report_refs.update(entry.evidence_ref for entry in report.evidence_map)
@@ -1851,7 +1716,7 @@ class QaOrchestrator:
                 or report.unverified
                 or any(
                     item.disposition in {"candidate", "unverified"}
-                    for item in (*report.scenario_coverage, *report.targeted_scenario_audit)
+                    for item in report.scenario_coverage
                 )
                 for report in transition_reports
             ):

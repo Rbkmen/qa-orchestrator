@@ -96,7 +96,6 @@ class RetainedProfileOutput:
     review_head_sha: str | None = None
     review_diff_sha256: str | None = None
     source_packet_sha256: str | None = None
-    previous_reports: tuple[ProfileReviewReport, ...] | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -126,6 +125,7 @@ class HostExecutionResult:
     reused_profiles: tuple[ReviewAgent, ...] = ()
     execution_attempts: tuple[ProfileAttemptMetrics, ...] = ()
     retained_outputs: tuple[RetainedProfileOutput, ...] = field(default=(), repr=False)
+    session_snapshot_fresh: bool = True
 
 
 class SynthesisReplayInputs(BaseModel):
@@ -331,7 +331,6 @@ class HostReviewAdapter:
                             profile, attempt, exc.retained_output, exc.context_selection,
                             exc.missing_source_paths, exc.review_head_sha,
                             exc.review_diff_sha256, exc.source_packet_sha256,
-                            tuple(session.profile_reports),
                         ))
                     outcome = "timeout" if isinstance(exc, TimeoutError) else "retryable_error"
                     if isinstance(exc, TimeoutError) and observation.failure_kind is None:
@@ -350,7 +349,6 @@ class HostReviewAdapter:
                             profile, attempt, exc.retained_output, exc.context_selection,
                             exc.missing_source_paths, exc.review_head_sha,
                             exc.review_diff_sha256, exc.source_packet_sha256,
-                            tuple(session.profile_reports),
                         ))
                     observation.failure_kind = observation.failure_kind or "executor_error"
                     failure = HostProfileFailure(profile, "executor_error")
@@ -410,8 +408,6 @@ class HostReviewAdapter:
             self.evidence_verifier(session.review_context)
         if session.selected_bundle is not None:
             groups = self.service.prepare_review_bundle(session.selected_bundle).execution_groups
-            if session.review_profiles[-1:] == [ReviewAgent.OMISSION_AUDITOR]:
-                groups.append([ReviewAgent.OMISSION_AUDITOR])
         else:
             if session.selected_profile is None or not session.review_profiles:
                 raise ValueError("host adapter requires a scheduled profile route or bundle")
@@ -465,18 +461,22 @@ class HostReviewAdapter:
                         if is_last
                         else None
                     )
-                    session = self._submit_transition(
-                        AdvanceQaOrchestrationRequest(
-                            run_id=run_id,
-                            completed_step="primary_review",
-                            status="completed",
-                            completed_profiles=remaining,
-                            profile_reports=list(unsaved),
-                            risk_signals=signals,
-                            request_id=f"host-{uuid4().hex}",
-                            expected_revision=session.revision,
+                    try:
+                        session = self._submit_transition(
+                            AdvanceQaOrchestrationRequest(
+                                run_id=run_id,
+                                completed_step="primary_review",
+                                status="completed",
+                                completed_profiles=remaining,
+                                profile_reports=list(unsaved),
+                                risk_signals=signals,
+                                request_id=f"host-{uuid4().hex}",
+                                expected_revision=session.revision,
+                            )
                         )
-                    )
+                    except (ConnectionError, TimeoutError):
+                        failures = (HostProfileFailure(None, "transition_response_unavailable"),)
+                        break
                     unsaved = ()
                     if (
                         session.current_step is OrchestrationStep.PRIMARY_REVIEW
@@ -488,11 +488,11 @@ class HostReviewAdapter:
             failures = (HostProfileFailure(None, "run_timeout"),)
         except asyncio.CancelledError as exc:
             cancellation = exc
+            cancellation.session_stop_failed = False
             try:
                 self._stop_partial(run_id, session.revision)
-            except OrchestrationError:
-                # Cancellation must not mutate a session advanced by another host.
-                pass
+            except Exception:  # noqa: BLE001 -- cancellation must remain observable
+                cancellation.session_stop_failed = True
             raise
         except Exception:  # noqa: BLE001 -- isolate host assessment and report submission failures
             if not failures:
@@ -509,9 +509,7 @@ class HostReviewAdapter:
             await asyncio.gather(heartbeat, return_exceptions=True)
             if wave is not None:
                 await asyncio.gather(wave, return_exceptions=True)
-            if cancellation is not None:
-                cancellation.execution_attempts = tuple(ledger)
-            if failures and not unsaved:
+            if (failures or cancellation is not None) and not unsaved:
                 unsaved = tuple(
                     task.result()
                     for task in tasks
@@ -519,8 +517,26 @@ class HostReviewAdapter:
                     and task.exception() is None
                     and isinstance(task.result(), ProfileReviewReport)
                 )
+            if cancellation is not None:
+                cancellation.execution_attempts = tuple(ledger)
+                cancellation.unsaved_reports = unsaved
+                cancellation.retained_outputs = tuple(retained_outputs)
+        session_snapshot_fresh = True
         if failures:
-            session = self._stop_partial(run_id, session.revision)
+            try:
+                session = self._stop_partial(run_id, session.revision)
+            except Exception as exc:  # noqa: BLE001 -- preserve outputs without leaking error bodies
+                reason = (
+                    "session_revision_conflict"
+                    if isinstance(exc, OrchestrationError) and str(exc) == "stale session revision"
+                    else "session_stop_failed"
+                )
+                failures += (HostProfileFailure(None, reason),)
+                try:
+                    session = self.service.get_qa_orchestration(run_id)
+                except Exception:  # noqa: BLE001 -- return the last observed snapshot
+                    session_snapshot_fresh = False
+                    failures += (HostProfileFailure(None, "session_unavailable"),)
         return HostExecutionResult(
             session,
             unsaved,
@@ -530,6 +546,7 @@ class HostReviewAdapter:
             tuple(p for p in session.review_profiles if p in reused),
             tuple(ledger),
             tuple(retained_outputs),
+            session_snapshot_fresh,
         )
 
     async def replay_synthesis(
@@ -776,6 +793,8 @@ class HostReviewAdapter:
 
     def _stop_partial(self, run_id: str, expected_revision: int) -> QaOrchestrationSession:
         current = self.service.get_qa_orchestration(run_id)
+        if current.revision != expected_revision:
+            raise OrchestrationError("stale session revision")
         if current.status is OrchestrationStatus.ACTIVE:
             return self._submit_transition(
                 AdvanceQaOrchestrationRequest(

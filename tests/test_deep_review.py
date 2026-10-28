@@ -79,3 +79,12 @@ def test_single_low_risk_signal_does_not_require_deep_review():
     assert decision.triggered_rules == ()
     assert decision.reason_codes == ()
     assert decision.complexity_signal_count == 1
+
+
+def test_deep_review_module_preserves_existing_public_contract():
+    from qa_orchestrator import deep_review, orchestration
+
+    assert orchestration.DeepReviewSignals is deep_review.DeepReviewSignals
+    assert orchestration.DeepReviewAssessment is deep_review.DeepReviewAssessment
+    assert orchestration.assess_deep_review is deep_review.assess_deep_review
+    assert orchestration.OrchestrationReason is deep_review.OrchestrationReason

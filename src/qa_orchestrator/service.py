@@ -146,15 +146,6 @@ class OrchestratorService:
                     execution_groups=[[profile] for profile in profiles],
                 )
         session = self.orchestrator.advance(**request.model_dump())
-        if (selected_review_routes is not None and session.selected_bundle is not None
-                and session.review_profiles[-1:] == [ReviewAgent.OMISSION_AUDITOR]):
-            selected_review_routes = ReviewRouteSelection(
-                routes=[self.prepare_review_route(profile) for profile in session.review_profiles],
-                execution_groups=[
-                    *self.prepare_review_bundle(session.selected_bundle).execution_groups,
-                    [ReviewAgent.OMISSION_AUDITOR],
-                ],
-            )
         if selected_review_routes is not None and session.selected_bundle is None:
             prepared_profiles = [route.profile for route in selected_review_routes.routes]
             if prepared_profiles != session.review_profiles:

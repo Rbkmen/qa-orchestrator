@@ -219,7 +219,7 @@ def test_changed_source_can_be_omitted_by_profile_or_budget(pinned_evidence):
 
     shared = select_context(
         packet,
-        ReviewAgent.OMISSION_AUDITOR,
+        ReviewAgent.CODE_EXPLORER,
         max_bytes=2_000_000,
         profile_override_refs=("S1",),
     )
@@ -228,7 +228,7 @@ def test_changed_source_can_be_omitted_by_profile_or_budget(pinned_evidence):
 
     shared_budget_limited = select_context(
         packet,
-        ReviewAgent.OMISSION_AUDITOR,
+        ReviewAgent.CODE_EXPLORER,
         max_bytes=budget,
         profile_override_refs=("S1",),
     )
@@ -559,23 +559,3 @@ def test_selection_preview_uses_host_plan_and_preserves_bound_inputs(pinned_evid
     packet_path.write_bytes(packet_bytes + b" ")
     with pytest.raises(ValueError, match="hash mismatch"):
         evidence_main(args)
-
-
-def test_auditor_targeted_scenario_refs_must_be_in_selected_packet(bound_review_context):
-    from qa_orchestrator.contracts import ProfileContextSelection, ReviewScenarioDisposition
-    from qa_orchestrator.evidence import validate_context_selection
-
-    selection = ProfileContextSelection(
-        source_packet_sha256=bound_review_context.evidence_packet_sha256,
-        selected_packet_sha256="a" * 64, included_refs=("E2",), omitted_refs=("E1",),
-        max_bytes=1000, selected_bytes=10,
-    )
-    report = ProfileReviewReport(
-        profile=ReviewAgent.OMISSION_AUDITOR, scope="Checked.", context_selection=selection,
-        targeted_scenario_audit=(ReviewScenarioDisposition(
-            scenario="A prior scenario", disposition="unverified", evidence_refs=("E1",),
-            rationale="Evidence omitted.",
-        ),),
-    )
-    with pytest.raises(ValueError, match="omitted"):
-        validate_context_selection(bound_review_context, report)

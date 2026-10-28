@@ -41,7 +41,6 @@ class ReviewAgent(StrEnum):
     RUBY_REVIEWER = "ruby_reviewer"
     PYTHON_REVIEWER = "python_reviewer"
     MOBILE_REVIEWER = "mobile_reviewer"
-    OMISSION_AUDITOR = "omission_auditor"
 
 
 class ReviewBundle(StrEnum):
@@ -1483,22 +1482,11 @@ class ProfileReviewReport(BaseModel):
             "Evidence-backed dispositions for the material behavior scenarios this profile checked."
         ),
     )
-    targeted_scenario_audit: tuple[ReviewScenarioDisposition, ...] = Field(
-        default=(), max_length=MAX_REVIEW_SCENARIOS,
-        description="Prior queued scenario dispositions, only for the omission auditor.",
-    )
     evidence_map: tuple[ReviewEvidenceMapEntry, ...] = Field(default=(), max_length=500)
     execution_metrics: ProfileExecutionMetrics | None = Field(
         default=None,
         description="Optional host-reported execution data; the orchestrator does not verify it.",
     )
-
-    @model_serializer(mode="wrap")
-    def serialize_optional_targeted_audit(self, handler):
-        payload = handler(self)
-        if not self.targeted_scenario_audit:
-            payload.pop("targeted_scenario_audit", None)
-        return payload
 
     @field_validator("review_rules_sha256")
     @classmethod
@@ -1512,13 +1500,6 @@ class ProfileReviewReport(BaseModel):
             and self.finding_candidates
         ):
             raise ValueError(f"{self.profile.value} cannot report implementation findings")
-        if self.targeted_scenario_audit and self.profile != ReviewAgent.OMISSION_AUDITOR:
-            raise ValueError("targeted scenario audit is reserved for omission_auditor")
-        audit_keys = {
-            " ".join(item.scenario.split()).casefold() for item in self.targeted_scenario_audit
-        }
-        if len(audit_keys) != len(self.targeted_scenario_audit):
-            raise ValueError("targeted scenario audit scenarios must be unique")
         if len({entry.evidence_ref for entry in self.evidence_map}) != len(self.evidence_map):
             raise ValueError("evidence_map references must be unique")
         if len({finding.candidate_id for finding in self.finding_candidates}) != len(

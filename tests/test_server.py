@@ -417,7 +417,7 @@ async def test_catalog_discovers_profiles_and_ordered_bundles_without_a_session(
         )
 
     assert sessions["sessions"] == []
-    assert set(profiles) == {profile.value for profile in ReviewAgent if profile is not ReviewAgent.OMISSION_AUDITOR}
+    assert set(profiles) == {profile.value for profile in ReviewAgent}
     assert set(bundles) == {bundle.value for bundle in ReviewBundle}
     assert profiles["python_reviewer"]["display_name"] == "Python Reviewer"
     assert profiles["python_reviewer"]["focus"] == prepared.structured_content["focus"]
@@ -583,7 +583,7 @@ async def test_orchestration_tools_return_no_evidence_fields(tmp_path):
     assert payload["model_policy"] == {"mode": "host_default"}
     assert payload["read_only"] is True
     assert payload["host_owns_decisions"] is True
-    assert payload["allowed_profiles"] == [profile.value for profile in ReviewAgent if profile is not ReviewAgent.OMISSION_AUDITOR]
+    assert payload["allowed_profiles"] == [profile.value for profile in ReviewAgent]
     assert payload["allowed_bundles"] == [bundle.value for bundle in ReviewBundle]
     assert payload["recommended_bundles"] == []
     assert payload["recommended_profiles"] == []

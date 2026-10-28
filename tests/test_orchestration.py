@@ -1511,7 +1511,7 @@ def test_structured_signals_are_sent_with_the_final_bundle_profile():
     assert session.deep_assessment.should_escalate is False
 
 
-@pytest.mark.parametrize("profile", [p for p in ReviewAgent if p is not ReviewAgent.OMISSION_AUDITOR])
+@pytest.mark.parametrize("profile", list(ReviewAgent))
 def test_all_review_profiles_are_retained_after_triage(profile: ReviewAgent):
     orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
     session = orchestrator.start("ordinary_review")

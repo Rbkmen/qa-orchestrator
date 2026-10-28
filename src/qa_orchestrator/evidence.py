@@ -833,7 +833,7 @@ def validate_registered_locations(
 
 def validate_context_selection(context: ReviewContext, report: ProfileReviewReport) -> None:
     scenario_refs = {
-        ref for item in (*report.scenario_coverage, *report.targeted_scenario_audit) for ref in item.evidence_refs
+        ref for item in report.scenario_coverage for ref in item.evidence_refs
     }
     if scenario_refs - set(context.evidence_refs):
         raise ValueError("scenario coverage cites refs outside the bound context")
@@ -853,7 +853,7 @@ def validate_context_selection(context: ReviewContext, report: ProfileReviewRepo
     cited = {ref for f in report.finding_candidates for ref in f.evidence_refs}
     cited.update(ref for note in (*report.coverage_gaps, *report.unverified) for ref in note.evidence_refs)
     cited.update(
-        ref for item in (*report.scenario_coverage, *report.targeted_scenario_audit) for ref in item.evidence_refs
+        ref for item in report.scenario_coverage for ref in item.evidence_refs
     )
     cited.update(item.evidence_ref for item in report.evidence_map)
     if cited - set(selection.included_refs):
@@ -1319,7 +1319,7 @@ def complete_scenario_coverage(
     missing: list[tuple[ReviewAgent, ReviewScenarioDisposition]] = []
     seen = set(supplied_keys)
     for profile_report in profile_reports:
-        for item in (*profile_report.scenario_coverage, *profile_report.targeted_scenario_audit):
+        for item in profile_report.scenario_coverage:
             if set(item.evidence_refs) - packet_refs:
                 raise ValueError("profile scenario coverage cites evidence outside the bound packet")
             key = " ".join(item.scenario.split()).casefold()

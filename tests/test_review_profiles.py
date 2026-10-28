@@ -60,15 +60,6 @@ def test_every_review_profile_returns_read_only_route(tmp_path):
             "Coverage Gaps",
             "Unverified",
         ],
-        ReviewAgent.OMISSION_AUDITOR: [
-            "Scope",
-            "Finding Candidates",
-            "Scenario Disposition Audit",
-            "Prior Finding Validation",
-            "Removed Behavior Audit",
-            "Coverage Gaps",
-            "Unverified",
-        ],
     }
 
     for profile in ReviewAgent:
@@ -316,40 +307,6 @@ def test_unknown_review_profile_is_rejected(tmp_path):
         service.prepare_review_route("unknown_profile")
 
 
-def test_omission_auditor_challenges_prior_reports_without_repeating_them(tmp_path):
-    service = OrchestratorService.from_settings(data_dir=tmp_path)
-    focus = service.prepare_review_route(ReviewAgent.OMISSION_AUDITOR).focus.lower()
-
-    assert "prior profile reports" in focus
-    assert "failure modes" in focus
-    assert "may have missed" in focus
-    assert "do not repeat existing candidates" in focus
-    assert "evidence-backed findings" in focus
-    assert "behaviorally relevant removals" in focus
-    assert "callers and consumers" in focus
-    assert "replacement path or none" in focus
-    assert "missing replacement is a coverage gap" in focus
-    assert "Prior Finding Validation" in review_profiles.REVIEW_PROFILES[
-        ReviewAgent.OMISSION_AUDITOR
-    ].required_sections
-    assert "supported, refuted, or unverified" in focus
-    assert "counterevidence" in focus
-    assert "candidate-id" in focus
-    assert "source-profile/candidate-id pair" in focus
-    assert "budget prevents exhaustive validation" in focus
-    assert "unreviewed pair as a coverage gap" in focus
-    assert "scenario_coverage" in focus
-    assert "unverified scenario" in focus
-    for check in (
-        "same path does not close a different failure mechanism",
-        "linear whole-input scans can exhaust memory without an ingress limit",
-        "trace url parsing through the real update trigger",
-        "helper output alone does not prove a navigation refresh",
-    ):
-        assert check in focus
-    assert "Scenario Disposition Audit" in review_profiles.REVIEW_PROFILES[
-        ReviewAgent.OMISSION_AUDITOR
-    ].required_sections
 
 
 def test_review_profiles_expose_the_approved_display_names(tmp_path):
@@ -365,7 +322,6 @@ def test_review_profiles_expose_the_approved_display_names(tmp_path):
         ReviewAgent.RUBY_REVIEWER: "Ruby Reviewer",
         ReviewAgent.PYTHON_REVIEWER: "Python Reviewer",
         ReviewAgent.MOBILE_REVIEWER: "Mobile Reviewer",
-        ReviewAgent.OMISSION_AUDITOR: "Omission Auditor",
     }
 
     for profile, expected_name in expected_names.items():

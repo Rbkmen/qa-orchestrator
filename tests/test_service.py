@@ -116,7 +116,7 @@ def test_service_exposes_fixed_profiles_and_bundles(tmp_path):
 
     session = service.start_qa_orchestration("ordinary_review")
 
-    assert session.allowed_profiles == [p for p in ReviewAgent if p is not ReviewAgent.OMISSION_AUDITOR]
+    assert session.allowed_profiles == list(ReviewAgent)
     assert session.allowed_bundles == list(ReviewBundle)
     assert session.recommended_bundles == [ReviewBundle.ORDINARY_MR]
     assert session.selected_bundle is None
@@ -138,27 +138,8 @@ def test_review_profiles_require_evidence_backed_impact_tracing(tmp_path):
     assert "source locations covered by cited head-source evidence" in combined
 
 
-def test_new_routes_do_not_offer_or_schedule_the_legacy_auditor(tmp_path):
-    service = OrchestratorService.from_settings(data_dir=tmp_path)
-    catalog = service.get_qa_orchestration_catalog()
-    assert ReviewAgent.OMISSION_AUDITOR not in [item.profile for item in catalog.profiles]
-    for bundle in ReviewBundle:
-        assert all(
-            route.profile is not ReviewAgent.OMISSION_AUDITOR
-            for route in service.prepare_review_bundle(bundle).routes
-        )
-    assert ReviewAgent.OMISSION_AUDITOR not in service.start_qa_orchestration("ordinary_review").allowed_profiles
 
 
-def test_new_triage_rejects_explicit_legacy_auditor(tmp_path):
-    service = OrchestratorService.from_settings(data_dir=tmp_path)
-    started = service.start_qa_orchestration("ordinary_review")
-    with pytest.raises(ValueError, match="no longer available"):
-        service.advance_qa_orchestration(AdvanceQaOrchestrationRequest(
-            run_id=started.run_id, completed_step="triage", status="completed",
-            selected_profile=ReviewAgent.OMISSION_AUDITOR,
-        ))
-    assert service.get_qa_orchestration(started.run_id).current_step == "triage"
 
 
 def test_service_advances_with_a_fixed_bundle(tmp_path):
@@ -176,7 +157,6 @@ def test_service_advances_with_a_fixed_bundle(tmp_path):
 
     assert advanced.selected_bundle is ReviewBundle.ORDINARY_MR
     assert advanced.review_profiles == list(REVIEW_BUNDLES[ReviewBundle.ORDINARY_MR])
-    assert ReviewAgent.OMISSION_AUDITOR not in advanced.review_profiles
     assert [route.profile for route in advanced.selected_review_routes.routes] == list(
         REVIEW_BUNDLES[ReviewBundle.ORDINARY_MR]
     )
@@ -459,3 +439,10 @@ def test_service_rejects_a_conflicting_finalized_outcome(tmp_path):
 
     retained = service.get_qa_orchestration(started.run_id)
     assert retained.status.value == "completed"
+
+
+def test_removed_auditor_is_not_an_accepted_review_profile():
+    from pydantic import TypeAdapter, ValidationError
+
+    with pytest.raises(ValidationError):
+        TypeAdapter(ReviewAgent).validate_python("omission_auditor")
