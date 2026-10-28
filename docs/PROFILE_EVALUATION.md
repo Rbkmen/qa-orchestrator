@@ -72,6 +72,10 @@ currently checked into this repository.
 
 Use a fixed set of real, completed changes with human-adjudicated expected findings. Keep the same source snapshot, Evidence Packet, host instructions, profile checklists, model, and reasoning for each schedule under comparison. Match findings by the underlying failure mode, not wording; have a reviewer confirm evidence before counting a match.
 
+### Single-profile omission-audit comparison
+
+To evaluate the implementation-aware single-profile route, compare `code_reviewer` with `code_reviewer` followed by `omission_auditor` on the same pinned, adjudicated cases. Keep model, reasoning, packet, instructions, and case order balanced across paired attempts. Compare recall, precision, missed high-impact findings, evidence/location validity, elapsed time, and total tokens. The auditor adds one host model pass, so include its cost in the result. A partial or unpaired baseline cannot support a recall-improvement claim; wait for a complete paired run and report its dataset digest and attempt count.
+
 Record per case:
 
 - valid matched findings, unsupported candidates, and expected findings missed;

@@ -1084,6 +1084,36 @@ def test_clean_single_profile_can_skip_standalone_synthesis():
     )
 
 
+def test_clean_implementation_review_with_auditor_cannot_skip_synthesis():
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
+    session = orchestrator.start("ordinary_review")
+    session = orchestrator.advance(
+        run_id=session.run_id,
+        completed_step=OrchestrationStep.TRIAGE,
+        status="completed",
+        selected_profile=ReviewAgent.CODE_REVIEWER,
+        implementation_review=True,
+    )
+
+    assert session.review_profiles == [
+        ReviewAgent.CODE_REVIEWER,
+        ReviewAgent.OMISSION_AUDITOR,
+    ]
+    with pytest.raises(OrchestrationError, match="only for a clean single-profile review"):
+        orchestrator.advance(
+            run_id=session.run_id,
+            completed_step=OrchestrationStep.PRIMARY_REVIEW,
+            status="completed",
+            completed_profile=ReviewAgent.CODE_REVIEWER,
+            risk_signals=DeepReviewSignals(),
+            skip_synthesis=True,
+        )
+
+    current = orchestrator.get(session.run_id)
+    assert current.current_profile is ReviewAgent.CODE_REVIEWER
+    assert current.completed_profiles == []
+
+
 def test_bundle_cannot_skip_synthesis():
     orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
     session = orchestrator.start("ordinary_review")

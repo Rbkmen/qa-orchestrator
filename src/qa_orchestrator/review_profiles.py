@@ -482,6 +482,29 @@ def bundle_profiles(bundle: ReviewBundle) -> tuple[ReviewAgent, ...]:
     return REVIEW_BUNDLES[bundle]
 
 
+def triage_review_profiles(
+    *,
+    selected_bundle: ReviewBundle | None,
+    selected_profile: ReviewAgent | None,
+    implementation_review: bool | None,
+) -> tuple[ReviewAgent, ...]:
+    """Resolve the exact primary-review route selected during triage."""
+    if selected_bundle is not None:
+        return bundle_profiles(selected_bundle)
+    if selected_profile is None:
+        return ()
+
+    selected_profiles = (selected_profile,)
+    limited_or_auditor_profiles = {
+        ReviewAgent.CODE_EXPLORER,
+        ReviewAgent.PR_TEST_ANALYZER,
+        ReviewAgent.OMISSION_AUDITOR,
+    }
+    if implementation_review is True and selected_profile not in limited_or_auditor_profiles:
+        return (*selected_profiles, ReviewAgent.OMISSION_AUDITOR)
+    return selected_profiles
+
+
 def bundle_execution_groups(
     bundle: ReviewBundle,
 ) -> tuple[tuple[ReviewAgent, ...], ...]:

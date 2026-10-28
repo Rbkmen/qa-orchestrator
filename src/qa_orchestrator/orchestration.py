@@ -54,10 +54,10 @@ from qa_orchestrator.refutation import validate_refutation_check
 from qa_orchestrator.review_profiles import (
     REVIEW_BUNDLES,
     bundle_execution_groups,
-    bundle_profiles,
     needs_targeted_omission_audit,
     recommended_bundles_for,
     recommended_profiles_for_changed_files,
+    triage_review_profiles,
 )
 from qa_orchestrator.session_store import SqliteSessionStore
 
@@ -1670,14 +1670,14 @@ class QaOrchestrator:
                     "This profile cannot report implementation findings. Choose an implementation "
                     "reviewer or bundle, or explicitly acknowledge the limitation."
                 )
-            if request.selected_bundle is not None:
-                selected_profiles = bundle_profiles(request.selected_bundle)
-                selected_profile = selected_profiles[0]
-            elif request.selected_profile is not None:
-                selected_profiles = (request.selected_profile,)
-                selected_profile = request.selected_profile
-            else:
+            selected_profiles = triage_review_profiles(
+                selected_bundle=request.selected_bundle,
+                selected_profile=request.selected_profile,
+                implementation_review=request.implementation_review,
+            )
+            if not selected_profiles:
                 raise OrchestrationError("missing profile or bundle after triage")
+            selected_profile = selected_profiles[0]
             return session.model_copy(
                 update={
                     "current_step": OrchestrationStep.PRIMARY_REVIEW,

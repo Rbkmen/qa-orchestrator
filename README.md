@@ -60,7 +60,7 @@ Pinned evidence → triage → primary review groups → optional deep review
 
 Use the session returned by each transition. Read/recover with `get_qa_orchestration` or `list_qa_orchestrations`. Revision checks and request keys protect against stale submissions and lost-response retries.
 
-`completed` records workflow completion; it is not a CI pass or release approval. For a clean **single-profile** route, `skip_synthesis=true` skips the separate synthesis stage, but still requires host validation and a final report. Findings, material unresolved questions, coverage gaps, unverified notes, or risk signals prevent the shortcut. Bundles retain synthesis.
+`completed` records workflow completion; it is not a CI pass or release approval. For a clean route containing exactly one profile, `skip_synthesis=true` skips the separate synthesis stage, but still requires host validation and a final report. An implementation-aware selection of one eligible reviewer adds `omission_auditor`, so it uses normal synthesis. Findings, material unresolved questions, coverage gaps, unverified notes, or risk signals also prevent the shortcut. Bundles retain synthesis.
 
 ### Deep-review rules
 

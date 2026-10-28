@@ -339,9 +339,9 @@ class HostReviewAdapter:
         if session.selected_bundle is not None:
             groups = self.service.prepare_review_bundle(session.selected_bundle).execution_groups
         else:
-            if session.selected_profile is None:
-                raise ValueError("host adapter requires a selected profile or bundle")
-            groups = [[session.selected_profile]]
+            if session.selected_profile is None or not session.review_profiles:
+                raise ValueError("host adapter requires a scheduled profile route or bundle")
+            groups = [[profile] for profile in session.review_profiles]
         semaphore = asyncio.Semaphore(self.policy.max_concurrency)
         unsaved: tuple[ProfileReviewReport, ...] = ()
         failures: tuple[HostProfileFailure, ...] = ()

@@ -152,6 +152,7 @@ def test_service_advances_with_a_fixed_bundle(tmp_path):
 
     assert advanced.selected_bundle is ReviewBundle.ORDINARY_MR
     assert advanced.review_profiles == list(REVIEW_BUNDLES[ReviewBundle.ORDINARY_MR])
+    assert advanced.review_profiles.count(ReviewAgent.OMISSION_AUDITOR) == 1
     assert [route.profile for route in advanced.selected_review_routes.routes] == list(
         REVIEW_BUNDLES[ReviewBundle.ORDINARY_MR]
     )
@@ -178,6 +179,89 @@ def test_service_returns_single_profile_checklist_with_triage_selection(tmp_path
     ]
     assert advanced.selected_review_routes.execution_groups == [[ReviewAgent.PYTHON_REVIEWER]]
     assert not hasattr(service.get_qa_orchestration(started.run_id), "selected_review_routes")
+
+
+def test_service_adds_omission_auditor_to_single_profile_implementation_review(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review")
+
+    advanced = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=OrchestrationStep.TRIAGE,
+            status="completed",
+            selected_profile=ReviewAgent.PYTHON_REVIEWER,
+            implementation_review=True,
+        )
+    )
+
+    expected_profiles = [ReviewAgent.PYTHON_REVIEWER, ReviewAgent.OMISSION_AUDITOR]
+    assert advanced.review_profiles == expected_profiles
+    assert [route.profile for route in advanced.selected_review_routes.routes] == expected_profiles
+    assert advanced.selected_review_routes.execution_groups == [
+        [ReviewAgent.PYTHON_REVIEWER],
+        [ReviewAgent.OMISSION_AUDITOR],
+    ]
+
+
+@pytest.mark.parametrize("implementation_review", [None, False])
+@pytest.mark.parametrize(
+    "profile",
+    [
+        ReviewAgent.CODE_REVIEWER,
+        ReviewAgent.PR_TEST_ANALYZER,
+        ReviewAgent.CODE_EXPLORER,
+        ReviewAgent.OMISSION_AUDITOR,
+    ],
+)
+def test_service_preserves_non_implementation_review_single_profile_routes(
+    tmp_path, profile, implementation_review
+):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review")
+
+    advanced = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=OrchestrationStep.TRIAGE,
+            status="completed",
+            selected_profile=profile,
+            implementation_review=implementation_review,
+        )
+    )
+
+    assert advanced.review_profiles == [profile]
+    assert [route.profile for route in advanced.selected_review_routes.routes] == [profile]
+    assert advanced.selected_review_routes.execution_groups == [[profile]]
+
+
+@pytest.mark.parametrize(
+    "profile,acknowledge",
+    [
+        (ReviewAgent.PR_TEST_ANALYZER, True),
+        (ReviewAgent.CODE_EXPLORER, True),
+        (ReviewAgent.OMISSION_AUDITOR, False),
+    ],
+)
+def test_service_does_not_duplicate_limited_or_auditor_profiles(
+    tmp_path, profile, acknowledge
+):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review")
+
+    advanced = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=started.run_id,
+            completed_step=OrchestrationStep.TRIAGE,
+            status="completed",
+            selected_profile=profile,
+            implementation_review=True,
+            acknowledge_limited_profile=acknowledge,
+        )
+    )
+
+    assert advanced.review_profiles == [profile]
+    assert [route.profile for route in advanced.selected_review_routes.routes] == [profile]
 
 
 def test_service_prepares_triage_routes_before_advancing_session(tmp_path, monkeypatch):

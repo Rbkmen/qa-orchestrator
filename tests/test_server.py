@@ -170,6 +170,7 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
     )
     assert "skip_synthesis" in advance_properties
     assert "no findings" in advance_properties["skip_synthesis"]["description"].lower()
+    assert "omission_auditor" in advance_properties["implementation_review"]["description"]
     advance_output = tools["advance_qa_orchestration"].outputSchema
     assert advance_output is not None
     selected_routes_schema = advance_output["properties"]["selected_review_routes"]
