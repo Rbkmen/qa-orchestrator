@@ -11,6 +11,7 @@ from qa_orchestrator.benchmark import (
     BenchmarkFailure,
     BenchmarkQualityGatePolicy,
     BenchmarkResults,
+    assign_benchmark_splits,
     benchmark_main,
     check_diff_budget,
     compare_speed,
@@ -2137,3 +2138,540 @@ def test_benchmark_usage_is_derived_from_complete_profile_attempt_ledger(benchma
         ),), expected_profiles=(ReviewAgent.CODE_REVIEWER,),
     )
     assert unbound.input_tokens is None and unbound.output_tokens is None
+
+
+def _benchmark_split_inputs(benchmark_inputs):
+    dataset_data, results_data = deepcopy(benchmark_inputs)
+    template = dataset_data["cases"][0]
+    cases = []
+    for number in range(1, 6):
+        case = deepcopy(template)
+        case["case_id"] = f"case-{number}"
+        case["repository"] = "github.com/acme/repo"
+        case["pull_request_url"] = f"https://github.com/acme/repo/pull/{number}"
+        cases.append(case)
+
+    second_review = deepcopy(cases[0])
+    second_review["case_id"] = "case-1-second-review"
+    second_review["pull_request_url"] += "/"
+    dataset_data.update(
+        {
+            "schema_version": 3,
+            "source_revision_status": "checkout_verified",
+            "kind": "curated",
+            "cases": [*cases, second_review],
+        }
+    )
+    return dataset_data, results_data
+
+
+def _runs_for_split_cases(results_data, cases, *, omit_case_id=None):
+    results_data = deepcopy(results_data)
+    template = results_data["runs"][0]
+    results_data["runs"] = []
+    for case in cases:
+        if case["case_id"] == omit_case_id:
+            continue
+        run = deepcopy(template)
+        run["run_id"] = f"run-{case['case_id']}"
+        run["case_id"] = case["case_id"]
+        results_data["runs"].append(run)
+    return results_data
+
+
+def test_assign_benchmark_splits_keeps_pull_request_cases_together_and_is_repeatable(
+    benchmark_inputs,
+):
+    dataset_data, _ = _benchmark_split_inputs(benchmark_inputs)
+    dataset = BenchmarkDataset.model_validate(dataset_data)
+
+    assigned = assign_benchmark_splits(dataset, check_fraction=0.4, seed="reviewbench-check-v1")
+    repeated = assign_benchmark_splits(dataset, check_fraction=0.4, seed="reviewbench-check-v1")
+
+    assert assigned.model_dump(mode="json") == repeated.model_dump(mode="json")
+    assert assigned.schema_version == 4
+    assert assigned.source_revision_status == "checkout_verified"
+    assert {case.split for case in assigned.cases} == {"tune", "check"}
+    assert len({case.split_group_id for case in assigned.cases if case.split == "check"}) == 2
+    first_pr_cases = [
+        case
+        for case in assigned.cases
+        if case.pull_request_url.endswith("/1") or case.pull_request_url.endswith("/1/")
+    ]
+    assert len(first_pr_cases) == 2
+    assert len({case.split for case in first_pr_cases}) == 1
+    assert len({case.split_group_id for case in first_pr_cases}) == 1
+
+
+def test_assign_benchmark_splits_groups_identical_urls_across_repository_labels(
+    benchmark_inputs,
+):
+    dataset_data, _ = _benchmark_split_inputs(benchmark_inputs)
+    second_review = next(
+        case for case in dataset_data["cases"] if case["case_id"] == "case-1-second-review"
+    )
+    second_review["repository"] = "github.com/acme/alias"
+    assigned = assign_benchmark_splits(
+        BenchmarkDataset.model_validate(dataset_data),
+        check_fraction=0.5,
+        seed="1",
+    )
+
+    first_pr_cases = [
+        case for case in assigned.cases if case.pull_request_url.rstrip("/").endswith("/pull/1")
+    ]
+    assert len(first_pr_cases) == 2
+    assert len({case.split for case in first_pr_cases}) == 1
+    assert len({case.split_group_id for case in first_pr_cases}) == 1
+
+
+def test_assign_benchmark_splits_ignores_pull_request_query_and_fragment(benchmark_inputs):
+    dataset_data, _ = _benchmark_split_inputs(benchmark_inputs)
+    second_review = next(
+        case for case in dataset_data["cases"] if case["case_id"] == "case-1-second-review"
+    )
+    second_review["pull_request_url"] = (
+        "https://github.com/acme/repo/pull/1?tab=files#discussion_r123"
+    )
+    assigned = assign_benchmark_splits(
+        BenchmarkDataset.model_validate(dataset_data),
+        check_fraction=0.4,
+        seed="url-variants-v1",
+    )
+
+    first_pr_cases = [
+        case
+        for case in assigned.cases
+        if case.pull_request_url.split("?")[0].split("#")[0].rstrip("/").endswith("/pull/1")
+    ]
+    assert len(first_pr_cases) == 2
+    assert len({case.split for case in first_pr_cases}) == 1
+    assert len({case.split_group_id for case in first_pr_cases}) == 1
+
+
+def test_assign_benchmark_splits_bounds_derived_id_for_long_pull_request_url(
+    benchmark_inputs,
+):
+    dataset_data, _ = _benchmark_split_inputs(benchmark_inputs)
+    long_url = "https://github.com/acme/repo/pull/1/" + "segment" * 100
+    for case in dataset_data["cases"]:
+        if case["case_id"] in {"case-1", "case-1-second-review"}:
+            case["pull_request_url"] = long_url
+
+    assigned = assign_benchmark_splits(
+        BenchmarkDataset.model_validate(dataset_data),
+        check_fraction=0.4,
+        seed="long-url-v1",
+    )
+
+    first_pr_cases = [
+        case for case in assigned.cases if case.case_id in {"case-1", "case-1-second-review"}
+    ]
+    assert len({case.split_group_id for case in first_pr_cases}) == 1
+    assert len(first_pr_cases[0].split_group_id) <= 512
+    assert len(first_pr_cases[0].split_group_id.removeprefix("pr:")) == 64
+
+
+def test_assign_benchmark_splits_rejects_unidentified_or_single_group_corpora(
+    benchmark_inputs,
+):
+    dataset_data, _ = benchmark_inputs
+    unidentified = BenchmarkDataset.model_validate(dataset_data)
+    with pytest.raises(ValueError, match="pull_request_url or split_group_id"):
+        assign_benchmark_splits(unidentified)
+
+    one_group_data, _ = _benchmark_split_inputs(benchmark_inputs)
+    one_group_data["cases"] = one_group_data["cases"][:1]
+    one_group_data["cases"][0]["pull_request_url"] = "https://github.com/acme/repo/pull/1"
+    one_group = BenchmarkDataset.model_validate(one_group_data)
+    with pytest.raises(ValueError, match="at least two distinct pull-request groups"):
+        assign_benchmark_splits(one_group)
+
+    with pytest.raises(ValueError, match="greater than 0 and less than 1"):
+        assign_benchmark_splits(
+            BenchmarkDataset.model_validate(_benchmark_split_inputs(benchmark_inputs)[0]),
+            check_fraction=0,
+        )
+
+
+def test_assign_benchmark_splits_supports_private_group_ids(benchmark_inputs):
+    dataset_data, _ = _benchmark_split_inputs(benchmark_inputs)
+    cases = dataset_data["cases"][:2]
+    for number, case in enumerate(cases, start=1):
+        case.pop("pull_request_url")
+        case["split_group_id"] = f"private-project/pr-{number}"
+    dataset_data["cases"] = cases
+    dataset = BenchmarkDataset.model_validate(dataset_data)
+
+    assigned = assign_benchmark_splits(dataset, check_fraction=0.5, seed="private-corpus")
+
+    assert {case.split_group_id for case in assigned.cases} == {
+        "private-project/pr-1",
+        "private-project/pr-2",
+    }
+    assert {case.split for case in assigned.cases} == {"tune", "check"}
+
+
+def test_assign_benchmark_splits_prefers_explicit_group_ids_over_pull_request_urls(
+    benchmark_inputs,
+):
+    dataset_data, _ = _benchmark_split_inputs(benchmark_inputs)
+    for case in dataset_data["cases"]:
+        if case["case_id"] in {"case-1", "case-2"}:
+            case["split_group_id"] = "release-train-1"
+    assigned = assign_benchmark_splits(
+        BenchmarkDataset.model_validate(dataset_data),
+        check_fraction=0.5,
+        seed="explicit-group-v1",
+    )
+
+    related_cases = [
+        case
+        for case in assigned.cases
+        if case.case_id in {"case-1", "case-1-second-review", "case-2"}
+    ]
+    assert {case.split_group_id for case in related_cases} == {"release-train-1"}
+    assert len({case.split for case in related_cases}) == 1
+
+
+def test_assign_benchmark_splits_uses_private_group_id_across_repository_labels(
+    benchmark_inputs,
+):
+    dataset_data, _ = _benchmark_split_inputs(benchmark_inputs)
+    cases = dataset_data["cases"][:3]
+    for case in cases:
+        case.pop("pull_request_url")
+    cases[0]["split_group_id"] = "shared-release-train"
+    cases[1]["split_group_id"] = "shared-release-train"
+    cases[2]["split_group_id"] = "other-release-train"
+    cases[1]["repository"] = "github.com/acme/alias"
+    dataset_data["cases"] = cases
+
+    assigned = assign_benchmark_splits(
+        BenchmarkDataset.model_validate(dataset_data),
+        check_fraction=0.5,
+        seed="1",
+    )
+
+    shared_cases = [
+        case for case in assigned.cases if case.split_group_id == "shared-release-train"
+    ]
+    assert len(shared_cases) == 2
+    assert len({case.split for case in shared_cases}) == 1
+
+
+def test_benchmark_dataset_rejects_split_conflicts_for_same_pull_request(benchmark_inputs):
+    dataset_data, _ = _benchmark_split_inputs(benchmark_inputs)
+    assigned = assign_benchmark_splits(
+        BenchmarkDataset.model_validate(dataset_data),
+        check_fraction=0.4,
+        seed="reviewbench-check-v1",
+    )
+    conflicting = assigned.model_dump(mode="json")
+    first = next(case for case in conflicting["cases"] if case["case_id"] == "case-1")
+    second = next(
+        case for case in conflicting["cases"] if case["case_id"] == "case-1-second-review"
+    )
+    second["split"] = "tune" if first["split"] == "check" else "check"
+
+    with pytest.raises(ValidationError, match="same split group must share one split"):
+        BenchmarkDataset.model_validate(conflicting)
+
+
+def test_benchmark_dataset_rejects_different_group_ids_for_same_pull_request(benchmark_inputs):
+    dataset_data, _ = _benchmark_split_inputs(benchmark_inputs)
+    assigned = assign_benchmark_splits(
+        BenchmarkDataset.model_validate(dataset_data),
+        check_fraction=0.4,
+        seed="reviewbench-check-v1",
+    )
+    conflicting = assigned.model_dump(mode="json")
+    first = next(case for case in conflicting["cases"] if case["case_id"] == "case-1")
+    second = next(
+        case for case in conflicting["cases"] if case["case_id"] == "case-1-second-review"
+    )
+    second["split_group_id"] = "a-different-group"
+    second["split"] = first["split"]
+
+    with pytest.raises(
+        ValidationError, match="same pull request must share one split and group ID"
+    ):
+        BenchmarkDataset.model_validate(conflicting)
+
+
+def test_benchmark_dataset_rejects_same_url_split_across_repository_labels(benchmark_inputs):
+    dataset_data, _ = _benchmark_split_inputs(benchmark_inputs)
+    assigned = assign_benchmark_splits(
+        BenchmarkDataset.model_validate(dataset_data),
+        check_fraction=0.4,
+        seed="reviewbench-check-v1",
+    )
+    conflicting = assigned.model_dump(mode="json")
+    first = next(case for case in conflicting["cases"] if case["case_id"] == "case-1")
+    second = next(
+        case for case in conflicting["cases"] if case["case_id"] == "case-1-second-review"
+    )
+    second["repository"] = "github.com/acme/alias"
+    second["split"] = "tune" if first["split"] == "check" else "check"
+
+    with pytest.raises(ValidationError, match="same split"):
+        BenchmarkDataset.model_validate(conflicting)
+
+
+def test_benchmark_dataset_requires_cases_in_both_splits(benchmark_inputs):
+    dataset_data, _ = _benchmark_split_inputs(benchmark_inputs)
+    assigned = assign_benchmark_splits(
+        BenchmarkDataset.model_validate(dataset_data),
+        check_fraction=0.4,
+        seed="reviewbench-check-v1",
+    )
+    check_only = assigned.model_dump(mode="json")
+    for case in check_only["cases"]:
+        case["split"] = "check"
+
+    with pytest.raises(ValidationError, match="both tune and check splits"):
+        BenchmarkDataset.model_validate(check_only)
+
+
+def test_score_benchmark_filters_cases_to_split_but_keeps_full_dataset_digest(benchmark_inputs):
+    dataset_data, results_template = _benchmark_split_inputs(benchmark_inputs)
+    dataset = assign_benchmark_splits(
+        BenchmarkDataset.model_validate(dataset_data),
+        check_fraction=0.4,
+        seed="reviewbench-check-v1",
+    )
+    check_case_ids = sorted(case.case_id for case in dataset.cases if case.split == "check")
+    omitted_case_id = check_case_ids[0]
+    results_data = _runs_for_split_cases(
+        results_template,
+        [case.model_dump(mode="json") for case in dataset.cases],
+        omit_case_id=omitted_case_id,
+    )
+    results = BenchmarkResults.model_validate(results_data)
+
+    check_score = score_benchmark(dataset, results, split="check")
+    full_score = score_benchmark(dataset, results)
+
+    aggregate = check_score["configurations"]["baseline"]
+    assert check_score["dataset_schema_version"] == 4
+    assert check_score["dataset_split"] == "check"
+    assert check_score["dataset_cases"] == check_case_ids
+    assert aggregate["cases"] == [
+        case_id for case_id in check_case_ids if case_id != omitted_case_id
+    ]
+    assert aggregate["missing_cases"] == [omitted_case_id]
+    assert check_score["dataset_sha256"] == full_score["dataset_sha256"]
+
+
+def test_quality_gates_require_check_split_for_split_aware_datasets(benchmark_inputs):
+    dataset_data, results_template = _benchmark_split_inputs(benchmark_inputs)
+    dataset = assign_benchmark_splits(
+        BenchmarkDataset.model_validate(dataset_data),
+        check_fraction=0.4,
+        seed="reviewbench-check-v1",
+    )
+    results = BenchmarkResults.model_validate(
+        _runs_for_split_cases(
+            results_template,
+            [case.model_dump(mode="json") for case in dataset.cases],
+        )
+    )
+    check_score = score_benchmark(dataset, results, split="check")
+    tune_score = score_benchmark(dataset, results, split="tune")
+    full_score = score_benchmark(dataset, results)
+    policy = _quality_policy(check_score)
+
+    assert (
+        evaluate_quality_policy(check_score, policy, configuration_id="baseline")["state"]
+        == "passed"
+    )
+    for score in (tune_score, full_score):
+        result = evaluate_quality_policy(score, policy, configuration_id="baseline")
+        assert result["state"] == "blocked"
+        assert any("check split" in reason for reason in result["reasons"])
+
+    experimental = evaluate_quality_gate(
+        tune_score,
+        configuration_id="baseline",
+        min_precision=0,
+        min_recall=0,
+    )
+    assert experimental["passed"] is False
+    assert any("check split" in reason for reason in experimental["reasons"])
+
+
+def test_benchmark_split_and_score_cli_select_check_cases(tmp_path, benchmark_inputs):
+    dataset_data, results_template = _benchmark_split_inputs(benchmark_inputs)
+    dataset_path = tmp_path / "dataset.json"
+    assigned_path = tmp_path / "assigned.json"
+    results_path = tmp_path / "results.json"
+    score_path = tmp_path / "check-score.json"
+    dataset_path.write_text(json.dumps(dataset_data), encoding="utf-8")
+
+    assert (
+        benchmark_main(
+            [
+                "split",
+                "--dataset",
+                str(dataset_path),
+                "--check-fraction",
+                "0.4",
+                "--seed",
+                "reviewbench-check-v1",
+                "--output",
+                str(assigned_path),
+            ]
+        )
+        == 0
+    )
+
+    assigned = BenchmarkDataset.model_validate_json(assigned_path.read_bytes())
+    results_path.write_text(
+        json.dumps(
+            _runs_for_split_cases(
+                results_template,
+                [case.model_dump(mode="json") for case in assigned.cases],
+            )
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        benchmark_main(
+            [
+                "score",
+                "--dataset",
+                str(assigned_path),
+                "--results",
+                str(results_path),
+                "--split",
+                "check",
+                "--output",
+                str(score_path),
+            ]
+        )
+        == 0
+    )
+
+    score = json.loads(score_path.read_text(encoding="utf-8"))
+    assert score["dataset_split"] == "check"
+    assert score["dataset_cases"] == sorted(
+        case.case_id for case in assigned.cases if case.split == "check"
+    )
+
+
+def test_speed_quality_policy_requires_check_split_for_split_aware_dataset(
+    tmp_path, benchmark_inputs
+):
+    from qa_orchestrator.benchmark import evaluate_speed_candidate
+
+    original_dataset, original_results = _speed_fixture(benchmark_inputs)
+    dataset_data = original_dataset.model_dump(mode="json")
+    base_case = dataset_data["cases"][0]
+    tune_case = deepcopy(base_case)
+    tune_case.update(
+        case_id="case-tune",
+        split="tune",
+        split_group_id="private-pr-tune",
+    )
+    check_case = deepcopy(base_case)
+    check_case.update(
+        case_id="case-check",
+        split="check",
+        split_group_id="private-pr-check",
+    )
+    dataset_data.update(
+        schema_version=4,
+        source_revision_status="checkout_verified",
+        cases=[tune_case, check_case],
+    )
+    dataset = BenchmarkDataset.model_validate(dataset_data)
+    results_data = original_results.model_dump(mode="json")
+    for run in results_data["runs"]:
+        run["case_id"] = "case-check"
+    tune_runs = []
+    for run in results_data["runs"]:
+        tune_run = deepcopy(run)
+        tune_run["run_id"] = f"tune-{run['run_id']}"
+        tune_run["case_id"] = "case-tune"
+        tune_runs.append(tune_run)
+    results_data["runs"].extend(tune_runs)
+    results_data["schedule"]["run_order"].extend(run["run_id"] for run in tune_runs)
+    tune_baseline_run = next(run for run in tune_runs if run["configuration_id"] == "baseline")
+    results_data["failures"] = [
+        {
+            "case_id": "case-tune",
+            "configuration_id": "baseline",
+            "model": tune_baseline_run["model"],
+            "reasoning": tune_baseline_run["reasoning"],
+            "checklist_sha256": tune_baseline_run["checklist_sha256"],
+            "host_instructions_sha256": tune_baseline_run["host_instructions_sha256"],
+            "attempt": 4,
+            "failure_code": "host_timeout",
+            "error_type": "TimeoutError",
+        }
+    ]
+    results = BenchmarkResults.model_validate(results_data)
+
+    comparison = compare_speed(
+        dataset,
+        results,
+        baseline_configuration="baseline",
+        candidate_configuration="candidate",
+        repetitions=3,
+        split="check",
+    )
+    with pytest.raises(ValueError, match="failed benchmark attempts in the selected split"):
+        compare_speed(
+            dataset,
+            results,
+            baseline_configuration="baseline",
+            candidate_configuration="candidate",
+            repetitions=3,
+            split="tune",
+        )
+    policy = _speed_policy(dataset, results)
+    accepted = evaluate_speed_candidate(comparison, policy)
+    unfiltered = deepcopy(comparison)
+    unfiltered["dataset_split"] = None
+    blocked = evaluate_speed_candidate(unfiltered, policy)
+
+    assert comparison["dataset_cases"] == ["case-check"]
+    assert comparison["dataset_split"] == "check"
+    assert accepted["state"] == "passed"
+    assert accepted["dataset_schema_version"] == 4
+    assert accepted["dataset_split"] == "check"
+    assert blocked["state"] == "blocked"
+    assert blocked["baseline_quality"]["state"] == "blocked"
+    assert blocked["candidate_quality"]["state"] == "blocked"
+    assert any("check split" in reason for reason in blocked["reasons"])
+
+    dataset_path = tmp_path / "split-dataset.json"
+    results_path = tmp_path / "split-results.json"
+    comparison_path = tmp_path / "split-comparison.json"
+    dataset_path.write_text(dataset.model_dump_json(), encoding="utf-8")
+    results_path.write_text(results.model_dump_json(), encoding="utf-8")
+    assert (
+        benchmark_main(
+            [
+                "compare",
+                "--dataset",
+                str(dataset_path),
+                "--results",
+                str(results_path),
+                "--baseline",
+                "baseline",
+                "--candidate",
+                "candidate",
+                "--repetitions",
+                "3",
+                "--split",
+                "check",
+                "--output",
+                str(comparison_path),
+            ]
+        )
+        == 0
+    )
+    cli_comparison = json.loads(comparison_path.read_text(encoding="utf-8"))
+    assert cli_comparison["dataset_split"] == "check"
+    assert cli_comparison["dataset_cases"] == ["case-check"]

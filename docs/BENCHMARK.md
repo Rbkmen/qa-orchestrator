@@ -74,6 +74,48 @@ qa-orch benchmark diff-budget --dataset reviewbench-dev.json \
 packet serialization, and the full executor prompt still need to be checked.
 The command does not launch a model.
 
+## Keep tuning and evaluation cases separate
+
+Use schema version 4 to assign complete pull-request groups to `tune` and
+`check`. The split command uses an explicit `split_group_id` when present, even
+when cases have different pull-request URLs. Reuse an ID only for cases that
+should stay together across tuning and evaluation. Otherwise it groups cases by
+normalized `pull_request_url`, ignoring query strings, fragments, and trailing
+slashes. Private cases without a URL must include the same explicit
+`split_group_id` on every related case. A URL-derived group ID uses the SHA-256
+digest of the normalized URL, keeping IDs bounded. The command uses the
+provided seed and a stable SHA-256 ordering, assigns approximately the requested
+fraction of groups to `check`, and requires at least one group in each split.
+With fewer than five pull requests, adjust the fraction to get a useful check
+set. Freeze and review the assignment before tuning against the dataset.
+
+```sh
+qa-orch benchmark split --dataset curated-cases.json \
+  --check-fraction 0.2 --seed qa-review-corpus-v1 \
+  --output curated-cases-split.json
+```
+
+The command keeps the source revision status; a legacy dataset without one is
+upgraded as `caller_supplied_unverified`. The split command does not create gold
+findings or mark them complete. Human reviewers must supply the complete gold
+set and adjudication source before the corpus can support recall claims.
+
+Score one split at a time. The score's `dataset_sha256` still fingerprints the
+whole corpus, while `dataset_cases` and coverage metrics describe the selected
+split. Named and experimental quality gates block schema-version-4 scores
+unless they were produced with `--split check`.
+
+```sh
+qa-orch benchmark score --dataset curated-cases-split.json \
+  --results check-runs.json --split check --output check-score.json
+```
+
+Use `--split tune` while adjusting prompts, then run the frozen `check` cases
+only for evaluation. `benchmark compare` also accepts `--split` for paired
+speed runs; quality policies require `--split check`. Keep prior/no-prior or
+other configuration comparisons paired on the same case snapshots and Evidence
+Packets.
+
 ## Record and score a run
 
 `BenchmarkDataset` and `BenchmarkResults` in `qa_orchestrator.benchmark` publish their Pydantic JSON schemas. A run records its case ID, exact base/head/diff, task-context and Evidence Packet hashes, model/reasoning, checklist and host-instruction hashes, elapsed milliseconds, optional token counts, candidate reports, and explicit adjudications. Repeated runs and speed comparisons require identical task-context hashes for the same case. Every candidate must have exactly one adjudication with a rationale:
@@ -96,7 +138,8 @@ omit these fields.
 
 ```sh
 qa-orch benchmark score --dataset /path/to/run/dataset.json \
-  --results /path/to/run/results.json --output /path/to/run/score.json
+  --results /path/to/run/results.json [--split tune|check] \
+  --output /path/to/run/score.json
 ```
 
 The output reports precision, recall against complete reference sets, missed high-impact findings, correctness by confidence tier, validated evidence/locations, time, and token counts. It also breaks gold recall down by severity, category, PR scope, difficulty, and required context so misses can guide the next prompt or evidence change. Missing token usage stays unknown. Aggregates stay separate by configuration and explicitly list unreviewed cases; overall and stratified recall are unavailable for incomplete case coverage or incomplete gold.
