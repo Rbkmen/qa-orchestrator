@@ -472,60 +472,22 @@ def test_review_bound_fast_path_cannot_skip_reported_coverage_gaps(
         )
 
 
-def test_single_profile_unverified_scenario_schedules_targeted_omission_auditor(
+def test_unverified_scenario_is_retained_without_an_extra_profile(
     bound_review_context, make_profile_review_report
 ):
     orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
     session = orchestrator.start("ordinary_review", bound_review_context)
-    session = orchestrator.advance(
-        run_id=session.run_id,
-        completed_step=OrchestrationStep.TRIAGE,
-        status="completed",
-        selected_profile=ReviewAgent.CODE_REVIEWER,
-    )
-    primary_report = make_profile_review_report(
-        ReviewAgent.CODE_REVIEWER,
-        scenario_coverage=(
-            ReviewScenarioDisposition(
-                scenario="A retry can execute the write twice.",
-                disposition="unverified",
-                evidence_refs=("E1",),
-                rationale="The downstream idempotency behavior is not in the packet.",
-            ),
-        ),
-    )
-
-    session = orchestrator.advance(
-        run_id=session.run_id,
-        completed_step=OrchestrationStep.PRIMARY_REVIEW,
-        status="completed",
-        completed_profile=ReviewAgent.CODE_REVIEWER,
-        profile_reports=[primary_report],
-    )
-
-    assert session.current_step is OrchestrationStep.PRIMARY_REVIEW
-    assert session.current_profile is ReviewAgent.OMISSION_AUDITOR
-    assert session.review_profiles == [
-        ReviewAgent.CODE_REVIEWER,
-        ReviewAgent.OMISSION_AUDITOR,
-    ]
-    assert session.completed_profiles == [ReviewAgent.CODE_REVIEWER]
-    assert session.profile_reports == [primary_report]
-
-    auditor_report = make_profile_review_report(ReviewAgent.OMISSION_AUDITOR)
-    session = orchestrator.advance(
-        run_id=session.run_id,
-        completed_step=OrchestrationStep.PRIMARY_REVIEW,
-        status="completed",
-        completed_profile=ReviewAgent.OMISSION_AUDITOR,
-        profile_reports=[auditor_report],
-        risk_signals=DeepReviewSignals(),
-    )
+    session = orchestrator.advance(run_id=session.run_id, completed_step="triage",
+        status="completed", selected_profile=ReviewAgent.CODE_REVIEWER)
+    report = make_profile_review_report(ReviewAgent.CODE_REVIEWER, scenario_coverage=(
+        ReviewScenarioDisposition(scenario="A retry can execute the write twice.",
+            disposition="unverified", evidence_refs=("E1",), rationale="Idempotency is unknown."),))
+    session = orchestrator.advance(run_id=session.run_id, completed_step="primary_review",
+        status="completed", completed_profile=ReviewAgent.CODE_REVIEWER,
+        profile_reports=[report], risk_signals=DeepReviewSignals())
     assert session.current_step is OrchestrationStep.SYNTHESIS
-    assert session.completed_profiles == [
-        ReviewAgent.CODE_REVIEWER,
-        ReviewAgent.OMISSION_AUDITOR,
-    ]
+    assert session.profile_reports == [report]
+    assert session.review_profiles == [ReviewAgent.CODE_REVIEWER]
 
 
 def test_finish_replaces_coverage_ledger_with_host_observed_path_coverage(
@@ -641,24 +603,9 @@ def test_finish_replaces_coverage_ledger_with_host_observed_path_coverage(
         )
 
     session = orchestrator.advance(
-        run_id=session.run_id,
-        completed_step=OrchestrationStep.PRIMARY_REVIEW,
-        status="completed",
-        completed_profile=ReviewAgent.CODE_REVIEWER,
-        profile_reports=[profile_report],
-    )
-    auditor_report = make_profile_review_report(
-        ReviewAgent.OMISSION_AUDITOR,
-        context=context,
-        reviewed_changed_paths=("src/service.py",),
-    )
-    session = orchestrator.advance(
-        run_id=session.run_id,
-        completed_step=OrchestrationStep.PRIMARY_REVIEW,
-        status="completed",
-        completed_profile=ReviewAgent.OMISSION_AUDITOR,
-        profile_reports=[auditor_report],
-        risk_signals=DeepReviewSignals(),
+        run_id=session.run_id, completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed", completed_profile=ReviewAgent.CODE_REVIEWER,
+        profile_reports=[profile_report], risk_signals=DeepReviewSignals(),
     )
     session = orchestrator.advance(
         run_id=session.run_id,
@@ -666,7 +613,7 @@ def test_finish_replaces_coverage_ledger_with_host_observed_path_coverage(
         status="completed",
     )
     final_report = make_final_review_report(
-        (ReviewAgent.CODE_REVIEWER, ReviewAgent.OMISSION_AUDITOR), context=context
+        (ReviewAgent.CODE_REVIEWER,), context=context
     ).model_copy(
         update={
             "coverage_ledger": ReviewCoverageLedger(
@@ -1012,7 +959,7 @@ def test_finish_rejects_review_artifacts_over_the_session_size_limit(
         selected_bundle=ReviewBundle.WIDGET,
     )
     groups = bundle_execution_groups(ReviewBundle.WIDGET)
-    large_profile_gaps = tuple(ReviewNote(text="x" * 2000) for _ in range(25))
+    large_profile_gaps = tuple(ReviewNote(text="x" * 2000) for _ in range(32))
 
     for index, group in enumerate(groups):
         session = orchestrator.advance(
@@ -1084,34 +1031,16 @@ def test_clean_single_profile_can_skip_standalone_synthesis():
     )
 
 
-def test_clean_implementation_review_with_auditor_cannot_skip_synthesis():
+def test_clean_single_implementation_review_can_skip_synthesis():
     orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
     session = orchestrator.start("ordinary_review")
-    session = orchestrator.advance(
-        run_id=session.run_id,
-        completed_step=OrchestrationStep.TRIAGE,
-        status="completed",
-        selected_profile=ReviewAgent.CODE_REVIEWER,
-        implementation_review=True,
-    )
-
-    assert session.review_profiles == [
-        ReviewAgent.CODE_REVIEWER,
-        ReviewAgent.OMISSION_AUDITOR,
-    ]
-    with pytest.raises(OrchestrationError, match="only for a clean single-profile review"):
-        orchestrator.advance(
-            run_id=session.run_id,
-            completed_step=OrchestrationStep.PRIMARY_REVIEW,
-            status="completed",
-            completed_profile=ReviewAgent.CODE_REVIEWER,
-            risk_signals=DeepReviewSignals(),
-            skip_synthesis=True,
-        )
-
-    current = orchestrator.get(session.run_id)
-    assert current.current_profile is ReviewAgent.CODE_REVIEWER
-    assert current.completed_profiles == []
+    session = orchestrator.advance(run_id=session.run_id, completed_step="triage",
+        status="completed", selected_profile=ReviewAgent.CODE_REVIEWER, implementation_review=True)
+    assert session.review_profiles == [ReviewAgent.CODE_REVIEWER]
+    session = orchestrator.advance(run_id=session.run_id, completed_step="primary_review",
+        status="completed", completed_profile=ReviewAgent.CODE_REVIEWER,
+        risk_signals=DeepReviewSignals(), skip_synthesis=True)
+    assert session.current_step is OrchestrationStep.AWAITING_HOST_OUTCOME
 
 
 def test_bundle_cannot_skip_synthesis():
@@ -1582,7 +1511,7 @@ def test_structured_signals_are_sent_with_the_final_bundle_profile():
     assert session.deep_assessment.should_escalate is False
 
 
-@pytest.mark.parametrize("profile", list(ReviewAgent))
+@pytest.mark.parametrize("profile", [p for p in ReviewAgent if p is not ReviewAgent.OMISSION_AUDITOR])
 def test_all_review_profiles_are_retained_after_triage(profile: ReviewAgent):
     orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=10)
     session = orchestrator.start("ordinary_review")
@@ -1680,18 +1609,8 @@ def test_bundle_requires_each_profile_in_fixed_order_before_synthesis():
     assert session.current_profile is ReviewAgent.PR_TEST_ANALYZER
 
     session = orchestrator.advance(
-        run_id=session.run_id,
-        completed_step=OrchestrationStep.PRIMARY_REVIEW,
-        status="completed",
-        completed_profile=ReviewAgent.PR_TEST_ANALYZER,
-    )
-    assert session.current_profile is ReviewAgent.OMISSION_AUDITOR
-
-    session = orchestrator.advance(
-        run_id=session.run_id,
-        completed_step=OrchestrationStep.PRIMARY_REVIEW,
-        status="completed",
-        completed_profile=ReviewAgent.OMISSION_AUDITOR,
+        run_id=session.run_id, completed_step=OrchestrationStep.PRIMARY_REVIEW,
+        status="completed", completed_profile=ReviewAgent.PR_TEST_ANALYZER,
         risk_signals=DeepReviewSignals(),
     )
     assert session.current_step is OrchestrationStep.SYNTHESIS
@@ -1808,32 +1727,12 @@ def test_group_transition_requires_risk_signals_for_the_final_group():
         completed_profiles=[ReviewAgent.CODE_EXPLORER],
     )
 
-    session = orchestrator.advance(
-        run_id=session.run_id,
-        completed_step=OrchestrationStep.PRIMARY_REVIEW,
-        status="completed",
-        completed_profiles=[
-            ReviewAgent.CODE_REVIEWER,
-            ReviewAgent.PR_TEST_ANALYZER,
-        ],
-    )
-    assert session.current_profile is ReviewAgent.OMISSION_AUDITOR
-
+    final_group = [ReviewAgent.CODE_REVIEWER, ReviewAgent.PR_TEST_ANALYZER]
     with pytest.raises(OrchestrationError, match="risk_signals are required"):
-        orchestrator.advance(
-            run_id=session.run_id,
-            completed_step=OrchestrationStep.PRIMARY_REVIEW,
-            status="completed",
-            completed_profiles=[ReviewAgent.OMISSION_AUDITOR],
-        )
-
-    session = orchestrator.advance(
-        run_id=session.run_id,
-        completed_step=OrchestrationStep.PRIMARY_REVIEW,
-        status="completed",
-        completed_profiles=[ReviewAgent.OMISSION_AUDITOR],
-        risk_signals=DeepReviewSignals(),
-    )
+        orchestrator.advance(run_id=session.run_id, completed_step="primary_review",
+            status="completed", completed_profiles=final_group)
+    session = orchestrator.advance(run_id=session.run_id, completed_step="primary_review",
+        status="completed", completed_profiles=final_group, risk_signals=DeepReviewSignals())
 
     assert session.current_step is OrchestrationStep.SYNTHESIS
 

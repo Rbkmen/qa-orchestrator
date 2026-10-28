@@ -239,6 +239,32 @@ async def test_synthesis_replay_rejects_verification_for_another_head(
         )
 
 
+async def test_unresolved_single_profile_finishes_without_scheduling_auditor(host_session):
+    service, run_id = host_session(profile=ReviewAgent.PYTHON_REVIEWER, implementation_review=True)
+    executed = []
+
+    async def execute(job):
+        executed.append(job.profile)
+        return ProfileReviewReport(
+            profile=job.profile,
+            scope="Reviewed retry behavior.",
+            reviewed_changed_paths=job.session.review_context.changed_files,
+            scenario_coverage=(ReviewScenarioDisposition(
+                scenario="A retry executes the write twice.", disposition="unverified",
+                evidence_refs=("E1",), rationale="Idempotency is not established.",
+            ),),
+        )
+
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, execute, lambda _: DeepReviewSignals()
+    )
+
+    assert executed == [ReviewAgent.PYTHON_REVIEWER]
+    assert not result.failures
+    assert result.session.current_step == "synthesis"
+    assert result.session.profile_reports[0].scenario_coverage[0].disposition == "unverified"
+
+
 async def test_host_reports_changed_paths_missing_from_profile_attestation(host_session):
     service, run_id = host_session(profile="python_reviewer")
 
@@ -255,134 +281,48 @@ async def test_host_reports_changed_paths_missing_from_profile_attestation(host_
     )
 
 
-async def test_host_runs_targeted_auditor_for_unverified_single_profile_scenario(host_session):
-    service, run_id = host_session(profile=ReviewAgent.PYTHON_REVIEWER)
-    executed = []
-    assessed = []
+async def test_host_assesses_risk_after_single_implementation_profile(host_session):
+    service, run_id = host_session(profile=ReviewAgent.PYTHON_REVIEWER, implementation_review=True)
+    seen = []
 
     async def execute(job):
-        executed.append(job)
-        if job.profile is ReviewAgent.PYTHON_REVIEWER:
-            return ProfileReviewReport(
-                profile=job.profile,
-                scope="Reviewed the retry behavior.",
-                reviewed_changed_paths=job.session.review_context.changed_files,
-                scenario_coverage=(
-                    ReviewScenarioDisposition(
-                        scenario="A retry can execute the write twice.",
-                        disposition="unverified",
-                        evidence_refs=("E1",),
-                        rationale="The downstream idempotency behavior is not in the packet.",
-                    ),
-                ),
-            )
-        return ProfileReviewReport(
-            profile=job.profile,
-            scope="Audited the unresolved retry behavior.",
-            reviewed_changed_paths=job.session.review_context.changed_files,
-        )
-
-    def assess_risk(reports):
-        assessed.append(reports)
-        assert [item.profile for item in reports] == [
-            ReviewAgent.PYTHON_REVIEWER,
-            ReviewAgent.OMISSION_AUDITOR,
-        ]
-        return DeepReviewSignals()
-
-    result = await HostReviewAdapter(service).run_primary_review(run_id, execute, assess_risk)
-
-    assert [job.profile for job in executed] == [
-        ReviewAgent.PYTHON_REVIEWER,
-        ReviewAgent.OMISSION_AUDITOR,
-    ]
-    assert len(executed[1].previous_reports) == 1
-    assert executed[1].previous_reports[0].scenario_coverage[0].scenario == (
-        "A retry can execute the write twice."
-    )
-    assert len(assessed) == 1
-    assert result.session.completed_profiles == [
-        ReviewAgent.PYTHON_REVIEWER,
-        ReviewAgent.OMISSION_AUDITOR,
-    ]
-
-
-async def test_host_runs_auditor_before_risk_assessment_for_clean_implementation_review(
-    host_session,
-):
-    service, run_id = host_session(
-        profile=ReviewAgent.PYTHON_REVIEWER,
-        implementation_review=True,
-    )
-    executed = []
-    assessed = []
-
-    async def execute(job):
-        executed.append(job)
         return report(job.profile, job.session.review_context)
 
-    def assess_risk(reports):
-        assessed.append(reports)
-        assert [job.profile for job in executed] == [
-            ReviewAgent.PYTHON_REVIEWER,
-            ReviewAgent.OMISSION_AUDITOR,
-        ]
+    def assess(reports):
+        seen.extend(item.profile for item in reports)
         return DeepReviewSignals()
 
-    result = await HostReviewAdapter(service).run_primary_review(run_id, execute, assess_risk)
-
-    assert len(assessed) == 1
-    assert len(assessed[0]) == 2
-    assert len(executed[1].previous_reports) == 1
-    assert executed[1].previous_reports[0].profile is ReviewAgent.PYTHON_REVIEWER
-    assert result.session.completed_profiles == [
-        ReviewAgent.PYTHON_REVIEWER,
-        ReviewAgent.OMISSION_AUDITOR,
-    ]
+    result = await HostReviewAdapter(service).run_primary_review(run_id, execute, assess)
+    assert seen == [ReviewAgent.PYTHON_REVIEWER]
+    assert result.session.current_step == "synthesis"
 
 
-async def test_host_resumes_scheduled_auditor_after_single_profile_completion(host_session):
-    service, run_id = host_session(
-        profile=ReviewAgent.PYTHON_REVIEWER,
-        implementation_review=True,
-    )
+async def test_host_resumes_previously_scheduled_legacy_auditor(host_session, monkeypatch):
+    import qa_orchestrator.orchestration as orchestration_module
+
+    with monkeypatch.context() as old:
+        old.setattr(orchestration_module, "triage_review_profiles", lambda **_: (
+            ReviewAgent.PYTHON_REVIEWER, ReviewAgent.OMISSION_AUDITOR
+        ))
+        service, run_id = host_session(profile=ReviewAgent.PYTHON_REVIEWER)
     session = service.get_qa_orchestration(run_id)
-    first_report = report(ReviewAgent.PYTHON_REVIEWER, session.review_context)
-    pending_audit = service.advance_qa_orchestration(
-        AdvanceQaOrchestrationRequest(
-            run_id=run_id,
-            completed_step="primary_review",
-            status="completed",
-            completed_profile=ReviewAgent.PYTHON_REVIEWER,
-            profile_reports=[first_report],
-        )
-    )
-    assert pending_audit.current_profile is ReviewAgent.OMISSION_AUDITOR
-
+    first = report(ReviewAgent.PYTHON_REVIEWER, session.review_context)
+    pending = service.advance_qa_orchestration(AdvanceQaOrchestrationRequest(
+        run_id=run_id, completed_step="primary_review", status="completed",
+        completed_profile=ReviewAgent.PYTHON_REVIEWER, profile_reports=[first],
+    ))
+    assert pending.current_profile is ReviewAgent.OMISSION_AUDITOR
     executed = []
-    assessed = []
 
     async def execute(job):
-        executed.append(job)
+        executed.append(job.profile)
         return report(job.profile, job.session.review_context)
 
-    def assess_risk(reports):
-        assessed.append(reports)
-        assert [item.profile for item in reports] == [
-            ReviewAgent.PYTHON_REVIEWER,
-            ReviewAgent.OMISSION_AUDITOR,
-        ]
-        return DeepReviewSignals()
-
-    result = await HostReviewAdapter(service).run_primary_review(run_id, execute, assess_risk)
-
-    assert [job.profile for job in executed] == [ReviewAgent.OMISSION_AUDITOR]
-    assert executed[0].previous_reports == (first_report,)
-    assert len(assessed) == 1
-    assert result.session.completed_profiles == [
-        ReviewAgent.PYTHON_REVIEWER,
-        ReviewAgent.OMISSION_AUDITOR,
-    ]
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, execute, lambda _: DeepReviewSignals()
+    )
+    assert executed == [ReviewAgent.OMISSION_AUDITOR]
+    assert result.session.current_step == "synthesis"
 
 
 def test_host_rejects_attestation_for_path_outside_bound_change(bound_review_context):
@@ -673,7 +613,7 @@ async def test_attempt_ledger_reports_semaphore_wait(host_session):
     result = await HostReviewAdapter(
         service, HostExecutionPolicy(max_concurrency=1)
     ).run_primary_review(run_id, execute, lambda _: DeepReviewSignals())
-    assert len(result.execution_attempts) == 4
+    assert len(result.execution_attempts) == 3
     assert max(a.queue_seconds for a in result.execution_attempts) >= 0.01
     assert all(a.executor_seconds >= 0.01 for a in result.execution_attempts)
 
@@ -739,7 +679,7 @@ async def test_successful_profile_is_checkpointed_before_its_wave_finishes(host_
     assert not recovered.failures
     assert ReviewAgent.CODE_EXPLORER not in called
     assert recovered.reused_profiles == (ReviewAgent.CODE_EXPLORER,)
-    assert len(recovered.session.profile_reports) == 4
+    assert len(recovered.session.profile_reports) == 3
 
 
 async def test_checkpoint_rejects_different_executor_identity(host_session, tmp_path):
@@ -779,8 +719,8 @@ async def test_retry_gets_a_fresh_checklist_after_executor_mutation(host_session
 
 async def test_wave_barriers_and_fixed_order_are_enforced(host_session):
     service, run_id = host_session(bundle="ordinary_mr")
-    explorer_started, release_explorer, release_second, omission_started = (
-        asyncio.Event() for _ in range(4)
+    explorer_started, release_explorer, release_second = (
+        asyncio.Event() for _ in range(3)
     )
     second_started = {
         p: asyncio.Event() for p in (ReviewAgent.CODE_REVIEWER, ReviewAgent.PR_TEST_ANALYZER)
@@ -790,13 +730,6 @@ async def test_wave_barriers_and_fixed_order_are_enforced(host_session):
         if job.profile == ReviewAgent.CODE_EXPLORER:
             explorer_started.set()
             await release_explorer.wait()
-        elif job.profile == ReviewAgent.OMISSION_AUDITOR:
-            assert [report.profile for report in job.previous_reports] == [
-                ReviewAgent.CODE_EXPLORER,
-                ReviewAgent.CODE_REVIEWER,
-                ReviewAgent.PR_TEST_ANALYZER,
-            ]
-            omission_started.set()
         else:
             assert job.previous_reports[0].profile == ReviewAgent.CODE_EXPLORER
             second_started[job.profile].set()
@@ -810,19 +743,16 @@ async def test_wave_barriers_and_fixed_order_are_enforced(host_session):
     )
     await asyncio.wait_for(explorer_started.wait(), 1)
     assert not any(event.is_set() for event in second_started.values())
-    assert not omission_started.is_set()
     release_explorer.set()
     await asyncio.wait_for(asyncio.gather(*(e.wait() for e in second_started.values())), 1)
     assert service.get_qa_orchestration(run_id).completed_profiles == [ReviewAgent.CODE_EXPLORER]
     release_second.set()
-    await asyncio.wait_for(omission_started.wait(), 1)
     result = await task
     assert result.session.current_step == "synthesis"
     assert result.session.completed_profiles == [
         ReviewAgent.CODE_EXPLORER,
         ReviewAgent.CODE_REVIEWER,
         ReviewAgent.PR_TEST_ANALYZER,
-        ReviewAgent.OMISSION_AUDITOR,
     ]
     assert all(r.execution_metrics for r in result.session.profile_reports)
 
@@ -843,7 +773,7 @@ async def test_host_concurrency_limit_bounds_the_python_single_wave(host_session
         service, HostExecutionPolicy(max_concurrency=2)
     ).run_primary_review(run_id, execute, lambda reports: DeepReviewSignals())
     assert peak == 2
-    assert len(result.session.completed_profiles) == 4
+    assert len(result.session.completed_profiles) == 3
 
 
 async def test_only_explicit_transient_failures_retry_and_retry_tokens_stay_unknown(host_session):

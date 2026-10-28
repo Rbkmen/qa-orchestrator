@@ -45,7 +45,6 @@ from qa_orchestrator.orchestration import (
     validate_final_report_profile_links,
     validate_final_report_verification_records,
 )
-from qa_orchestrator.review_profiles import needs_targeted_omission_audit
 from qa_orchestrator.review_rules import ReviewRuleset
 from qa_orchestrator.service import OrchestratorService
 
@@ -411,6 +410,8 @@ class HostReviewAdapter:
             self.evidence_verifier(session.review_context)
         if session.selected_bundle is not None:
             groups = self.service.prepare_review_bundle(session.selected_bundle).execution_groups
+            if session.review_profiles[-1:] == [ReviewAgent.OMISSION_AUDITOR]:
+                groups.append([ReviewAgent.OMISSION_AUDITOR])
         else:
             if session.selected_profile is None or not session.review_profiles:
                 raise ValueError("host adapter requires a scheduled profile route or bundle")
@@ -459,12 +460,9 @@ class HostReviewAdapter:
                         session.review_profiles
                     )
                     reports_for_assessment = tuple(session.profile_reports) + unsaved
-                    needs_omission_audit = is_last and needs_targeted_omission_audit(
-                        reports_for_assessment, session.review_profiles
-                    )
                     signals = (
                         assess_risk(reports_for_assessment)
-                        if is_last and not needs_omission_audit
+                        if is_last
                         else None
                     )
                     session = self._submit_transition(

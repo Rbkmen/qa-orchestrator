@@ -309,7 +309,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
             Field(
                 description=(
                     "For completed triage, default to one allowed profile for a narrow, single-concern, "
-                    "low-risk review. "
+                    "low-risk review. The legacy omission_auditor value is retained only to read "
+                    "older sessions and cannot be selected for a new review. "
                     "It is mutually exclusive with selected_bundle."
                 )
             ),
@@ -392,9 +393,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
             bool | None,
             Field(description=(
                 "At triage, whether the user's request includes review of implementation behavior. "
-                "Unknown when omitted. When true with one eligible implementation reviewer "
-                "(not code_explorer, pr_test_analyzer, or omission_auditor), the selected route "
-                "also includes one final omission_auditor pass."
+                "Unknown when omitted. Limited profiles require explicit acknowledgement "
+                "when implementation behavior is in scope."
             )),
         ] = None,
         acknowledge_limited_profile: Annotated[
@@ -414,8 +414,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
         after early stops, match the recorded outcome.
 
         - Triage: select exactly one bundle or profile; default to one profile for narrow work.
-          When implementation_review=true and one eligible implementation reviewer is selected, the
-          returned route appends one final omission_auditor pass; bundles already contain that pass.
+          Set implementation_review=true when implementation behavior is in scope.
         - Every call requires run_id, completed_step, and status. Copy completed_step from the latest
           session's current_step; use status=completed after a successful stage.
         - Primary review: after a whole execution group finishes, report its ordered profiles together

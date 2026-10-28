@@ -20,7 +20,7 @@ OpenAI recommends evaluating prompting guidance with the selected model and work
 | Broad React + TypeScript widget change | `widget` | Includes React and TypeScript review. |
 | Broad JavaScript React widget change | `widget_js` | Includes React and general code review, without TypeScript review. |
 | Broad Ruby backend change | `ruby_backend` | Includes evidence mapping, Ruby-specific review, and test analysis. |
-| Broad Python or MCP service change | `python_backend` | Runs Python-specific async, schema, error, and test review, followed by an omission audit over those reports. |
+| Broad Python or MCP service change | `python_backend` | Runs Python-specific async, schema, error, and test review. |
 | Broad React Native or native mobile change | `mobile` | Includes mobile platform review and test analysis without assuming web-only behavior. |
 | Narrow test-only change | `pr_test_analyzer` | Uses the compatibility profile instead of a full bundle. |
 | Narrow React-only change | `react_reviewer` | Uses the compatibility profile instead of a full bundle. |
@@ -54,7 +54,7 @@ These checks validate host scheduling semantics, not model quality or elapsed-ti
 4. Disable worker support and confirm the same groups use the sequential fallback without changing profile order or checklists.
 5. Make one worker fail; confirm it is retried or run in the parent before the group is recorded, and an unresolved failure ends as `partial` or `blocked` rather than a false completion.
 
-Every broad bundle now ends with a sequential `omission_auditor` pass that receives prior profile reports and searches for distinct missed failure modes. The MCP server only publishes the schedule and validates reported transition order; it does not launch workers or verify concurrency. Run these checks in a client adapter or host that can expose worker-start and completion events.
+The MCP server only publishes the schedule and validates reported transition order; it does not launch workers or verify concurrency. Run these checks in a client adapter or host that can expose worker-start and completion events.
 
 ## Representative quality and speed benchmark
 
@@ -72,9 +72,9 @@ currently checked into this repository.
 
 Use a fixed set of real, completed changes with human-adjudicated expected findings. Keep the same source snapshot, Evidence Packet, host instructions, profile checklists, model, and reasoning for each schedule under comparison. Match findings by the underlying failure mode, not wording; have a reviewer confirm evidence before counting a match.
 
-### Single-profile omission-audit comparison
+### Historical single-profile omission-audit comparison
 
-To evaluate the implementation-aware single-profile route, compare `code_reviewer` with `code_reviewer` followed by `omission_auditor` on the same pinned, adjudicated cases. Keep model, reasoning, packet, instructions, and case order balanced across paired attempts. Compare recall, precision, missed high-impact findings, evidence/location validity, elapsed time, and total tokens. The auditor adds one host model pass, so include its cost in the result. A partial or unpaired baseline cannot support a recall-improvement claim; wait for a complete paired run and report its dataset digest and attempt count.
+Historical evaluation compared `code_reviewer` with an additional `omission_auditor` on pinned cases. The auditor is no longer scheduled in new reviews. Existing runs do not establish that removing it preserves recall; future evaluation should compare the old and new routes on the same adjudicated cases and include latency and token cost.
 
 Record per case:
 

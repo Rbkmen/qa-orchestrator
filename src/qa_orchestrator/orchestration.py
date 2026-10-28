@@ -54,7 +54,6 @@ from qa_orchestrator.refutation import validate_refutation_check
 from qa_orchestrator.review_profiles import (
     REVIEW_BUNDLES,
     bundle_execution_groups,
-    needs_targeted_omission_audit,
     recommended_bundles_for,
     recommended_profiles_for_changed_files,
     triage_review_profiles,
@@ -557,7 +556,9 @@ class QaOrchestrationSession(BaseModel):
     task_type: QaTaskType
     status: OrchestrationStatus
     current_step: OrchestrationStep
-    allowed_profiles: list[ReviewAgent] = Field(default_factory=lambda: list(ReviewAgent))
+    allowed_profiles: list[ReviewAgent] = Field(default_factory=lambda: [
+        profile for profile in ReviewAgent if profile is not ReviewAgent.OMISSION_AUDITOR
+    ])
     allowed_bundles: list[ReviewBundle] = Field(default_factory=lambda: list(REVIEW_BUNDLES))
     recommended_bundles: list[ReviewBundle] = Field(
         default_factory=list,
@@ -1077,7 +1078,7 @@ class QaOrchestrator:
                 task_type=validated_task_type,
                 status=OrchestrationStatus.ACTIVE,
                 current_step=OrchestrationStep.TRIAGE,
-                allowed_profiles=list(ReviewAgent),
+                allowed_profiles=[p for p in ReviewAgent if p is not ReviewAgent.OMISSION_AUDITOR],
                 allowed_bundles=list(REVIEW_BUNDLES),
                 recommended_bundles=list(
                     recommended_bundles_for(
@@ -1695,6 +1696,8 @@ class QaOrchestrator:
         request: AdvanceQaOrchestrationRequest,
     ) -> QaOrchestrationSession:
         if session.current_step is OrchestrationStep.TRIAGE:
+            if request.selected_profile is ReviewAgent.OMISSION_AUDITOR:
+                raise OrchestrationError("omission_auditor is no longer available for new reviews")
             if (
                 request.implementation_review is True
                 and request.selected_profile in {ReviewAgent.PR_TEST_ANALYZER, ReviewAgent.CODE_EXPLORER}
@@ -1741,6 +1744,8 @@ class QaOrchestrator:
             if request.completed_profiles is not None:
                 if session.selected_bundle is not None:
                     groups = bundle_execution_groups(session.selected_bundle)
+                    if session.review_profiles[-1:] == [ReviewAgent.OMISSION_AUDITOR]:
+                        groups = (*groups, (ReviewAgent.OMISSION_AUDITOR,))
                 elif session.selected_profile is not None:
                     groups = tuple((profile,) for profile in session.review_profiles)
                 else:
@@ -1868,38 +1873,6 @@ class QaOrchestrator:
                         "profile_reports": profile_reports,
                         "model_policy": self._model_policies[OrchestrationStep.PRIMARY_REVIEW],
                         "next_action": _NEXT_ACTIONS[OrchestrationStep.PRIMARY_REVIEW],
-                    }
-                )
-
-            if needs_targeted_omission_audit(profile_reports, session.review_profiles):
-                if request.risk_signals is not None:
-                    raise OrchestrationError(
-                        "risk signals must be assessed after the targeted omission audit"
-                    )
-                if request.skip_synthesis:
-                    raise OrchestrationError(
-                        "synthesis cannot be skipped while unresolved scenarios require an omission audit"
-                    )
-                return session.model_copy(
-                    update={
-                        "current_step": OrchestrationStep.PRIMARY_REVIEW,
-                        "review_profiles": [
-                            *session.review_profiles,
-                            ReviewAgent.OMISSION_AUDITOR,
-                        ],
-                        "current_profile": ReviewAgent.OMISSION_AUDITOR,
-                        "completed_profiles": completed_profiles,
-                        "profile_reports": profile_reports,
-                        "risk_signals": None,
-                        "deep_assessment": None,
-                        "deep_reason_code": None,
-                        "model_policy": self._model_policies[
-                            OrchestrationStep.PRIMARY_REVIEW
-                        ],
-                        "next_action": (
-                            "Run one targeted read-only omission_auditor pass over the unresolved "
-                            "scenarios before final risk assessment."
-                        ),
                     }
                 )
 

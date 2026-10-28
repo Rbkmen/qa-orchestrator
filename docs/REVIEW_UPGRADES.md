@@ -472,23 +472,9 @@ for incomplete gold sets. Diagnoses are post-run annotations: they do not alter
 precision or recall and must never be passed into the blind review input. Score
 reports use schema `3` (or `4` when failed attempts are included).
 
-## 13. Validate prior findings in the existing omission audit
+## 13. Legacy omission-audit reports
 
-The final `OMISSION_AUDITOR` now emits a `Prior Finding Validation` row for each
-source-profile/candidate-ID pair from earlier implementation-review profiles.
-Each row records the pair, `supported` / `refuted` / `unverified` disposition,
-bound evidence refs, and rationale. The auditor must independently trace the
-reachable trigger and consequence, check callers or consumers and compensating
-controls, and cite counterevidence when refuting a candidate. Missing required
-evidence remains `unverified`. If the report budget prevents exhaustive
-validation, each unreviewed pair must be listed as a coverage gap. Dispositions
-annotate candidates; they do not accept, remove, rewrite, or change the host's
-final decision.
-
-This reuses the existing final omission-audit call, so it adds no profile,
-execution group, provider, or scheduled job. It is still a model-reported
-validation: the host and orchestrator do not independently prove the semantic
-disposition or that the requested reasoning took place.
+New review routes do not schedule an omission auditor. Previously persisted sessions and reports retain their auditor profile and prior-finding validation data for recovery; these model-reported dispositions remain subject to host validation.
 
 ## 14. Preserve and audit material behavior scenarios
 
@@ -499,10 +485,7 @@ Unknown refs and duplicate scenario rows are rejected. Finalization carries any
 scenario omitted from synthesis forward as `unverified`, or exposes it as a
 coverage gap when the matrix is full.
 
-Bundles already place `OMISSION_AUDITOR` after specialist profiles. Its prompt
-now gives it a bounded queue of candidate/unverified scenarios, prior
-unverified notes, and coverage gaps, then requires it to preserve exact scenario
-text in `targeted_scenario_audit` while checking the bound packet; newly discovered scenarios use `scenario_coverage` with separate capacity. Both sets are carried into synthesis or exposed as gaps. An eligible implementation reviewer selected alone with `implementation_review=true` gets one auditor pass even when the first report is clean. Other single-profile routes add one auditor pass when unresolved items exist. Risk assessment waits until the pass finishes. This improves traceability and makes omissions visible; it does not prove model reasoning or guarantee that the queue is semantically complete.
+New routes leave unresolved scenarios in the profile reports for the host to assess during synthesis. Previously stored `targeted_scenario_audit` records remain readable.
 
 ### Preview profile context before execution
 
@@ -510,4 +493,4 @@ text in `targeted_scenario_audit` while checking the bound packet; newly discove
 
 For structured packets, included evidence metadata appears with each packet fragment rather than being duplicated in the bound-context JSON sent to the model. The full bound registry remains available to host validation. Legacy packets retain the original context representation.
 
-The Codex executor's omission-audit queue uses zero-based references to entries in prior reports rather than duplicating scenario text and rationale. Each grouped queue item retains references to all matching entries; the first entry supplies the canonical text. Full prior reports remain in the prompt. The existing 25-item queue limit and explicit truncation warning still apply.
+For a recovered legacy session, the Codex executor's omission-audit queue uses zero-based references to entries in prior reports rather than duplicating scenario text and rationale. Each grouped queue item retains references to all matching entries; the first entry supplies the canonical text. Full prior reports remain in the prompt. The existing 25-item queue limit and explicit truncation warning still apply.

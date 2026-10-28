@@ -2,7 +2,7 @@
 
 [![QA Orchestrator MCP server – quality and maintenance score on Glama](https://glama.ai/mcp/servers/Rbkmen/qa-orchestrator/badges/card.svg)](https://glama.ai/mcp/servers/Rbkmen/qa-orchestrator)
 
-A Python/FastMCP toolkit for evidence-bound code and QA reviews: deterministic workflow, eleven specialist profiles, nine fixed bundles, structured findings, and optional execution and evaluation tools.
+A Python/FastMCP toolkit for evidence-bound code and QA reviews: deterministic workflow, ten specialist profiles, nine fixed bundles, structured findings, and optional execution and evaluation tools.
 
 The **host** (Codex, Claude Code, or another integration) retrieves evidence, runs models, validates findings, and owns the final QA decision. The MCP server checks workflow and report contracts. Optional Python tools supervise actual execution; connecting the MCP server alone does not activate them.
 
@@ -60,7 +60,7 @@ Pinned evidence → triage → primary review groups → optional deep review
 
 Use the session returned by each transition. Read/recover with `get_qa_orchestration` or `list_qa_orchestrations`. Revision checks and request keys protect against stale submissions and lost-response retries.
 
-`completed` records workflow completion; it is not a CI pass or release approval. For a clean route containing exactly one profile, `skip_synthesis=true` skips the separate synthesis stage, but still requires host validation and a final report. An implementation-aware selection of one eligible reviewer adds `omission_auditor`, so it uses normal synthesis. Findings, material unresolved questions, coverage gaps, unverified notes, or risk signals also prevent the shortcut. Bundles retain synthesis.
+`completed` records workflow completion; it is not a CI pass or release approval. For a clean route containing exactly one profile, `skip_synthesis=true` skips the separate synthesis stage, but still requires host validation and a final report. Findings, material unresolved questions, coverage gaps, unverified notes, or risk signals also prevent the shortcut. Bundles retain synthesis.
 
 ### Deep-review rules
 
@@ -92,7 +92,6 @@ At triage, set `implementation_review=true` when implementation behavior is in s
 | `ruby_reviewer` | Ruby semantics, exceptions, persistence and relevant jobs |
 | `python_reviewer` | Validation, serialization, cancellation, cleanup and MCP contracts |
 | `mobile_reviewer` | React Native/native lifecycle, navigation and platform contracts |
-| `omission_auditor` | Final evidence-backed search for distinct failure modes missed by earlier profiles |
 
 Test Analyzer returns coverage gaps; Evidence Investigator returns an evidence map and unresolved links. Both are prohibited from returning implementation findings, enforced by server validation and the Codex output schema.
 
@@ -100,17 +99,17 @@ In the schedules below, `+` means one concurrent-capable group; `→` means a ba
 
 | Bundle | Execution groups |
 |---|---|
-| `ordinary_mr` | `code_explorer` → `code_reviewer` + `pr_test_analyzer` → `omission_auditor` |
-| `widget` | `code_explorer` → `react_reviewer` + `typescript_reviewer` + `pr_test_analyzer` → `omission_auditor` |
-| `widget_js` | `code_explorer` → `code_reviewer` + `react_reviewer` + `pr_test_analyzer` → `omission_auditor` |
-| `ruby_backend` | `code_explorer` → `ruby_reviewer` + `pr_test_analyzer` → `omission_auditor` |
-| `python_backend` | `code_explorer` + `python_reviewer` + `pr_test_analyzer` → `omission_auditor` |
-| `mobile` | `code_explorer` → `mobile_reviewer` + `pr_test_analyzer` → `omission_auditor` |
-| `security` | `code_explorer` → `security_reviewer` + `silent_failure_hunter` → `omission_auditor` |
-| `autotest` | `code_reviewer` + `typescript_reviewer` + `pr_test_analyzer` → `omission_auditor` |
-| `requirements` | `code_explorer` → `code_reviewer` → `omission_auditor` |
+| `ordinary_mr` | `code_explorer` → `code_reviewer` + `pr_test_analyzer` |
+| `widget` | `code_explorer` → `react_reviewer` + `typescript_reviewer` + `pr_test_analyzer` |
+| `widget_js` | `code_explorer` → `code_reviewer` + `react_reviewer` + `pr_test_analyzer` |
+| `ruby_backend` | `code_explorer` → `ruby_reviewer` + `pr_test_analyzer` |
+| `python_backend` | `code_explorer` + `python_reviewer` + `pr_test_analyzer` |
+| `mobile` | `code_explorer` → `mobile_reviewer` + `pr_test_analyzer` |
+| `security` | `code_explorer` → `security_reviewer` + `silent_failure_hunter` |
+| `autotest` | `code_reviewer` + `typescript_reviewer` + `pr_test_analyzer` |
+| `requirements` | `code_explorer` → `code_reviewer` |
 
-The Python bundle starts its three primary profiles together, then runs `omission_auditor` after their reports are available. Required context must be supplied upfront. Reports from previous groups are available only to subsequent groups. The installed catalog is authoritative; see the [bundle and profile catalog](docs/ORCHESTRATION_POLICY.md#fixed-bundles-and-profile-names).
+The Python bundle starts its three profiles together. Required context must be supplied upfront. Reports from previous groups are available only to subsequent groups. The installed catalog is authoritative; see the [bundle and profile catalog](docs/ORCHESTRATION_POLICY.md#fixed-bundles-and-profile-names).
 
 ## Evidence and context
 

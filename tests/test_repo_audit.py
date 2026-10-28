@@ -105,6 +105,24 @@ def test_profile_detects_camel_case_test_files_without_matching_unrelated_names(
     assert profile["test_inventory"]["paths"] == ["src/api/ApiTest.java", "src/api/TestAuth.cs"]
 
 
+def test_profile_excludes_documentation_specs_but_keeps_test_specs(tmp_path):
+    repository = _repository(
+        tmp_path,
+        {
+            "docs/superpowers/specs/design.md": "# Design\n",
+            "docs/specification.md": "# Specification\n",
+            "specs/login.feature": "Feature: login\n",
+            "src/login.spec.ts": "test('login', () => {});\n",
+        },
+    )
+
+    profile = build_repository_profile(repository, use_cache=False)
+    audit = audit_test_suite(repository, use_cache=False)
+
+    assert profile["test_inventory"]["paths"] == ["specs/login.feature", "src/login.spec.ts"]
+    assert audit["test_files_total"] == 2
+
+
 def test_profile_cache_reuses_stable_metadata_and_invalidates_test_inventory(tmp_path, monkeypatch):
     from qa_orchestrator import repo_audit
 

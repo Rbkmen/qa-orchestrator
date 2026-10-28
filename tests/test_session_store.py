@@ -196,6 +196,34 @@ def test_completed_review_artifacts_survive_restart_until_normal_expiry(
     assert store.load_all() == []
 
 
+def test_legacy_bundle_with_auditor_restores_and_completes(tmp_path, monkeypatch):
+    import qa_orchestrator.orchestration as orchestration_module
+
+    store = SqliteSessionStore(tmp_path / "legacy-sessions.sqlite3")
+    clock = FakeClock()
+    first = _orchestrator(store, clock)
+    started = first.start("ordinary_review")
+    with monkeypatch.context() as old:
+        original = orchestration_module.triage_review_profiles
+        old.setattr(orchestration_module, "triage_review_profiles", lambda **kwargs: (
+            *original(**kwargs), ReviewAgent.OMISSION_AUDITOR
+        ))
+        first.advance(run_id=started.run_id, completed_step="triage", status="completed",
+                      selected_bundle=ReviewBundle.PYTHON_BACKEND)
+    restored = _orchestrator(store, clock)
+    primary = restored.advance(
+        run_id=started.run_id, completed_step="primary_review", status="completed",
+        completed_profiles=[ReviewAgent.CODE_EXPLORER, ReviewAgent.PYTHON_REVIEWER,
+                            ReviewAgent.PR_TEST_ANALYZER],
+    )
+    assert primary.current_profile is ReviewAgent.OMISSION_AUDITOR
+    complete = restored.advance(
+        run_id=started.run_id, completed_step="primary_review", status="completed",
+        completed_profiles=[ReviewAgent.OMISSION_AUDITOR], risk_signals=DeepReviewSignals(),
+    )
+    assert complete.current_step is OrchestrationStep.SYNTHESIS
+
+
 def test_python_backend_session_resumes_remaining_group_after_schedule_change(tmp_path):
     store = SqliteSessionStore(tmp_path / "sessions.sqlite3")
     clock = FakeClock()
@@ -221,28 +249,12 @@ def test_python_backend_session_resumes_remaining_group_after_schedule_change(tm
         run_id=started.run_id,
         completed_step=OrchestrationStep.PRIMARY_REVIEW,
         status="completed",
-        completed_profiles=[
-            ReviewAgent.PYTHON_REVIEWER,
-            ReviewAgent.PR_TEST_ANALYZER,
-        ],
-    )
-
-    audited = restored.advance(
-        run_id=started.run_id,
-        completed_step=OrchestrationStep.PRIMARY_REVIEW,
-        status="completed",
-        completed_profile=ReviewAgent.OMISSION_AUDITOR,
+        completed_profiles=[ReviewAgent.PYTHON_REVIEWER, ReviewAgent.PR_TEST_ANALYZER],
         risk_signals=DeepReviewSignals(),
     )
-
-    assert completed.current_step is OrchestrationStep.PRIMARY_REVIEW
-    assert completed.current_profile is ReviewAgent.OMISSION_AUDITOR
-    assert audited.current_step is OrchestrationStep.SYNTHESIS
-    assert audited.completed_profiles == [
-        ReviewAgent.CODE_EXPLORER,
-        ReviewAgent.PYTHON_REVIEWER,
-        ReviewAgent.PR_TEST_ANALYZER,
-        ReviewAgent.OMISSION_AUDITOR,
+    assert completed.current_step is OrchestrationStep.SYNTHESIS
+    assert completed.completed_profiles == [
+        ReviewAgent.CODE_EXPLORER, ReviewAgent.PYTHON_REVIEWER, ReviewAgent.PR_TEST_ANALYZER,
     ]
 
 

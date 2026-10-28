@@ -57,9 +57,9 @@ The Codex catalog source and last-review date live beside `MODEL_CATALOGS` in `s
 ## Orchestration flow
 
 1. For `ordinary_review` and `widget_review`, the host first resolves the exact task/MR revisions and diff, prepares the compact Evidence Packet and schema-v2 input manifest, and passes them as `review_context` to `start_qa_orchestration`. A task/MR URL alone is insufficient. Non-review task types may omit `review_context`. The call returns a `run_id`, the active model-policy mode, and the next action. `host_default` uses the host's configured model and reasoning; `configured` returns explicit per-stage settings.
-2. After triage, the host calls `advance_qa_orchestration` with one fixed bundle or one of the ten `ReviewAgent` profiles. Use one profile for a narrow, single-concern, low-risk review; a higher file count alone does not require a bundle. When `implementation_review=true` and triage selects one eligible implementation reviewer, the returned route appends one sequential `omission_auditor` pass. `code_explorer`, `pr_test_analyzer`, and `omission_auditor` are not eligible for this automatic addition. Bundles already include the auditor; explicitly test-only/evidence-only (`false`) and legacy requests (omitted intent) keep their selected route.
+2. After triage, the host calls `advance_qa_orchestration` with one fixed bundle or one of the ten `ReviewAgent` profiles. Use one profile for a narrow, single-concern, low-risk review; a higher file count alone does not require a bundle. Set `implementation_review=true` when implementation behavior is in scope.
 3. Use `selected_review_routes` from the successful triage response; it includes the selected checklist(s) and `execution_groups`, whose flattened order matches the returned routes. The stateless preparation tools remain available for standalone lookup or recovery. Run each group as a barrier: profiles in the same group may be reviewed concurrently when the host supports parallel workers; otherwise use the sequential fallback. Wait for all profiles in a group, then report the full group once through `completed_profiles`, in fixed route order. Older hosts may keep using `completed_profile` one at a time. Never submit transition calls concurrently. Retry a failed role or run it in the parent before reporting the group; if it remains incomplete, end with an honest `partial` or `blocked` outcome. The orchestrator validates the sequence the host reports, but cannot confirm a review actually ran or ran concurrently.
-4. In the same transition that reports the final primary-review group, the host supplies evidence-based `risk_signals` (use an empty object when none apply). Any true signal includes a rationale and supporting Evidence Packet refs; a bound session checks that those refs are registered. The orchestrator applies fixed deep-review rules to the host-reported signals but cannot verify that they reflect evidence. The host advances according to the deep-review assessment. A route containing exactly one profile may set `skip_synthesis=true` when that profile reports no findings, no unresolved material questions, and every risk signal is false. An implementation-aware selection of one eligible reviewer has two profiles after triage, so it always runs the omission audit and normal synthesis. Bundles and any non-clean review continue through normal synthesis.
+4. In the same transition that reports the final primary-review group, the host supplies evidence-based `risk_signals` (use an empty object when none apply). Any true signal includes a rationale and supporting Evidence Packet refs; a bound session checks that those refs are registered. The orchestrator applies fixed deep-review rules to the host-reported signals but cannot verify that they reflect evidence. The host advances according to the deep-review assessment. A route containing exactly one profile may set `skip_synthesis=true` when that profile reports no findings, no unresolved material questions, and every risk signal is false. Bundles and any non-clean review continue through normal synthesis.
 5. After deep review, the host uses the returned synthesis policy or its own configured model in `host_default` mode.
 6. After synthesis or the eligible clean single-profile fast path, the state becomes `awaiting_host_outcome`; the host completes its final QA validation and calls `finish_qa_orchestration` with the same `run_id` and a status of `completed`, `partial`, or `blocked`. The orchestrator moves the session to its final status. For an early stop, first pass `partial` or `blocked` to `advance_qa_orchestration`, then finish the session with that same status.
 
@@ -104,7 +104,7 @@ transitions, candidate validation, synthesis, and the final decision. Parallel
 requests may increase concurrent token use even when elapsed time falls. The
 host's model and reasoning settings remain unchanged.
 
-Bundles always use synthesis. The clean single-profile fast path is available only when the selected route contains one profile and the host confirms no findings, no unresolved material questions, and no risk signals; an implementation-aware selection of one eligible reviewer adds `omission_auditor` and therefore uses synthesis. The host still produces the complete final QA result.
+Bundles always use synthesis. The clean single-profile fast path is available only when the selected route contains one profile and the host confirms no findings, no unresolved material questions, and no risk signals. The host still produces the complete final QA result.
 
 Deep read-only review appears only after the last primary-review profile and when the fixed signal rules match; the flow then continues to final synthesis.
 
@@ -147,7 +147,7 @@ exists or is resolved. History is supplied per session, retained only with that
 session's normal TTL when persistence is enabled, and is not automatically
 learned or shared across MRs.
 
-Profile reports also carry `scenario_coverage`: concise material behavior scenarios with a disposition (`candidate`, `refuted`, `unverified`, or `not_applicable_to_diff`), bound evidence refs, and rationale. The `omission_auditor` runs after specialist profiles in bundles and receives a bounded queue of prior candidate or unverified scenarios, unverified notes, and coverage gaps. For `implementation_review=true`, one eligible implementation reviewer always gets a final auditor pass, including when its first report is clean. Other single-profile routes get one targeted auditor pass only when they leave an unresolved item. Risk assessment runs after the auditor. It checks the queue against the same bound evidence before its independent omission sweep. Queue truncation must be reported as a gap. This adds one host model pass and can increase token use and elapsed time; it does not establish a recall improvement without a paired, adjudicated benchmark.
+Profile reports carry `scenario_coverage` with evidence-backed scenario dispositions; unresolved items remain available to the host for synthesis.
 
 ### Bound and retained review artifacts
 
@@ -242,15 +242,15 @@ flowchart LR
 
 | Bundle | Ordered profiles | Execution groups (each group is a barrier) |
 |---|---|---|
-| `ordinary_mr` | `code_explorer` → `code_reviewer` → `pr_test_analyzer` → `omission_auditor` | (`code_explorer`) → (`code_reviewer`, `pr_test_analyzer`) → (`omission_auditor`) |
-| `widget` | `code_explorer` → `react_reviewer` → `typescript_reviewer` → `pr_test_analyzer` → `omission_auditor` | (`code_explorer`) → (`react_reviewer`, `typescript_reviewer`, `pr_test_analyzer`) → (`omission_auditor`) |
-| `widget_js` | `code_explorer` → `code_reviewer` → `react_reviewer` → `pr_test_analyzer` → `omission_auditor` | (`code_explorer`) → (`code_reviewer`, `react_reviewer`, `pr_test_analyzer`) → (`omission_auditor`) |
-| `ruby_backend` | `code_explorer` → `ruby_reviewer` → `pr_test_analyzer` → `omission_auditor` | (`code_explorer`) → (`ruby_reviewer`, `pr_test_analyzer`) → (`omission_auditor`) |
-| `python_backend` | `code_explorer` → `python_reviewer` → `pr_test_analyzer` → `omission_auditor` | (`code_explorer`, `python_reviewer`, `pr_test_analyzer`) → (`omission_auditor`) |
-| `mobile` | `code_explorer` → `mobile_reviewer` → `pr_test_analyzer` → `omission_auditor` | (`code_explorer`) → (`mobile_reviewer`, `pr_test_analyzer`) → (`omission_auditor`) |
-| `security` | `code_explorer` → `security_reviewer` → `silent_failure_hunter` → `omission_auditor` | (`code_explorer`) → (`security_reviewer`, `silent_failure_hunter`) → (`omission_auditor`) |
-| `autotest` | `code_reviewer` → `typescript_reviewer` → `pr_test_analyzer` → `omission_auditor` | (`code_reviewer`, `typescript_reviewer`, `pr_test_analyzer`) → (`omission_auditor`) |
-| `requirements` | `code_explorer` → `code_reviewer` → `omission_auditor` | (`code_explorer`) → (`code_reviewer`) → (`omission_auditor`) |
+| `ordinary_mr` | `code_explorer` → `code_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`code_reviewer`, `pr_test_analyzer`) |
+| `widget` | `code_explorer` → `react_reviewer` → `typescript_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`react_reviewer`, `typescript_reviewer`, `pr_test_analyzer`) |
+| `widget_js` | `code_explorer` → `code_reviewer` → `react_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`code_reviewer`, `react_reviewer`, `pr_test_analyzer`) |
+| `ruby_backend` | `code_explorer` → `ruby_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`ruby_reviewer`, `pr_test_analyzer`) |
+| `python_backend` | `code_explorer` → `python_reviewer` → `pr_test_analyzer` | (`code_explorer`, `python_reviewer`, `pr_test_analyzer`) |
+| `mobile` | `code_explorer` → `mobile_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`mobile_reviewer`, `pr_test_analyzer`) |
+| `security` | `code_explorer` → `security_reviewer` → `silent_failure_hunter` | (`code_explorer`) → (`security_reviewer`, `silent_failure_hunter`) |
+| `autotest` | `code_reviewer` → `typescript_reviewer` → `pr_test_analyzer` | (`code_reviewer`, `typescript_reviewer`, `pr_test_analyzer`) |
+| `requirements` | `code_explorer` → `code_reviewer` | (`code_explorer`) → (`code_reviewer`) |
 
 | Technical profile | Display name |
 |---|---|
@@ -264,7 +264,6 @@ flowchart LR
 | `ruby_reviewer` | `Ruby Reviewer` |
 | `python_reviewer` | `Python Reviewer` |
 | `mobile_reviewer` | `Mobile Reviewer` |
-| `omission_auditor` | `Omission Auditor` |
 
 Faraday is the internal display name for `code_explorer`. It is not a separate external agent, service, package, or model. The orchestrator returns only the fixed identifier and order; the host runs the configured primary model for each role.
 
@@ -282,9 +281,8 @@ Use the narrowest profile that matches the task:
 - `ruby_reviewer` — Ruby semantics, ActiveRecord or Sequel behavior, and relevant Sidekiq retry/concurrency contracts when repository evidence confirms those libraries;
 - `python_reviewer` — Python async/error behavior, data validation, serialization, and relevant FastMCP tool contracts when present;
 - `mobile_reviewer` — React Native/native lifecycle, permissions, navigation, bridge, and platform-specific behavior on changed paths.
-- `omission_auditor` — an independent final pass over changed paths and earlier reports for distinct, missed failure modes.
 
-`code_explorer` owns evidence mapping; specialist profiles own their focused candidates; `omission_auditor` owns a final search for distinct omissions. It receives earlier profile reports and must not repeat their candidates. The role sequence is a host-execution claim, not proof that every possible defect was found.
+`code_explorer` owns evidence mapping; specialist profiles own their focused candidates. The host validates candidates and resolves or reports gaps during synthesis.
 
 Every review must separate confirmed findings from hypotheses and unverified runtime or release facts. An empty or unknown profile is rejected before a route is built.
 

@@ -1,10 +1,9 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from types import MappingProxyType
 
 from qa_orchestrator.contracts import (
-    ProfileReviewReport,
     QaOrchestrationCatalog,
     QaTaskType,
     ReviewAgent,
@@ -336,7 +335,6 @@ _REVIEW_BUNDLE_EXECUTION_GROUPS: Mapping[
         ReviewBundle.ORDINARY_MR: (
             (ReviewAgent.CODE_EXPLORER,),
             (ReviewAgent.CODE_REVIEWER, ReviewAgent.PR_TEST_ANALYZER),
-            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.WIDGET: (
             (ReviewAgent.CODE_EXPLORER,),
@@ -345,7 +343,6 @@ _REVIEW_BUNDLE_EXECUTION_GROUPS: Mapping[
                 ReviewAgent.TYPESCRIPT_REVIEWER,
                 ReviewAgent.PR_TEST_ANALYZER,
             ),
-            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.WIDGET_JS: (
             (ReviewAgent.CODE_EXPLORER,),
@@ -354,12 +351,10 @@ _REVIEW_BUNDLE_EXECUTION_GROUPS: Mapping[
                 ReviewAgent.REACT_REVIEWER,
                 ReviewAgent.PR_TEST_ANALYZER,
             ),
-            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.RUBY_BACKEND: (
             (ReviewAgent.CODE_EXPLORER,),
             (ReviewAgent.RUBY_REVIEWER, ReviewAgent.PR_TEST_ANALYZER),
-            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.PYTHON_BACKEND: (
             (
@@ -367,17 +362,14 @@ _REVIEW_BUNDLE_EXECUTION_GROUPS: Mapping[
                 ReviewAgent.PYTHON_REVIEWER,
                 ReviewAgent.PR_TEST_ANALYZER,
             ),
-            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.MOBILE: (
             (ReviewAgent.CODE_EXPLORER,),
             (ReviewAgent.MOBILE_REVIEWER, ReviewAgent.PR_TEST_ANALYZER),
-            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.SECURITY: (
             (ReviewAgent.CODE_EXPLORER,),
             (ReviewAgent.SECURITY_REVIEWER, ReviewAgent.SILENT_FAILURE_HUNTER),
-            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.AUTOTEST: (
             (
@@ -385,12 +377,10 @@ _REVIEW_BUNDLE_EXECUTION_GROUPS: Mapping[
                 ReviewAgent.TYPESCRIPT_REVIEWER,
                 ReviewAgent.PR_TEST_ANALYZER,
             ),
-            (ReviewAgent.OMISSION_AUDITOR,),
         ),
         ReviewBundle.REQUIREMENTS: (
             (ReviewAgent.CODE_EXPLORER,),
             (ReviewAgent.CODE_REVIEWER,),
-            (ReviewAgent.OMISSION_AUDITOR,),
         ),
     }
 )
@@ -461,6 +451,7 @@ def build_review_catalog() -> QaOrchestrationCatalog:
                 profile=profile, display_name=definition.display_name, focus=definition.focus
             )
             for profile, definition in REVIEW_PROFILES.items()
+            if profile is not ReviewAgent.OMISSION_AUDITOR
         ],
         bundles=[
             ReviewBundleSummary(
@@ -494,39 +485,13 @@ def triage_review_profiles(
     if selected_profile is None:
         return ()
 
-    selected_profiles = (selected_profile,)
-    limited_or_auditor_profiles = {
-        ReviewAgent.CODE_EXPLORER,
-        ReviewAgent.PR_TEST_ANALYZER,
-        ReviewAgent.OMISSION_AUDITOR,
-    }
-    if implementation_review is True and selected_profile not in limited_or_auditor_profiles:
-        return (*selected_profiles, ReviewAgent.OMISSION_AUDITOR)
-    return selected_profiles
+    return (selected_profile,)
 
 
 def bundle_execution_groups(
     bundle: ReviewBundle,
 ) -> tuple[tuple[ReviewAgent, ...], ...]:
     return _REVIEW_BUNDLE_EXECUTION_GROUPS[bundle]
-
-
-def needs_targeted_omission_audit(
-    profile_reports: Sequence[ProfileReviewReport],
-    scheduled_profiles: Sequence[ReviewAgent],
-) -> bool:
-    """Add one omission pass when a route has no auditor and leaves material questions open."""
-    if ReviewAgent.OMISSION_AUDITOR in scheduled_profiles:
-        return False
-    return any(
-        report.coverage_gaps
-        or report.unverified
-        or any(
-            item.disposition in {"candidate", "unverified"}
-            for item in report.scenario_coverage
-        )
-        for report in profile_reports
-    )
 
 
 def recommended_bundles_for(

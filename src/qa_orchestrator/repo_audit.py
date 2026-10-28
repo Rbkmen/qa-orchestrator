@@ -233,7 +233,12 @@ def _read_blobs(
 
 
 def _test_paths(paths: list[str]) -> list[str]:
-    return [path for path in paths if _TEST_PATH.search(path) or _CAMEL_CASE_TEST_FILE.search(path)]
+    return [
+        path for path in paths
+        if not (PurePosixPath(path).parts[0].lower() in {"doc", "docs"}
+                and PurePosixPath(path).suffix.lower() in {".md", ".rst"})
+        and (_TEST_PATH.search(path) or _CAMEL_CASE_TEST_FILE.search(path))
+    ]
 
 
 def _profile_inputs(paths: list[str]) -> list[str]:
