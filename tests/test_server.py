@@ -115,7 +115,24 @@ async def test_server_publishes_tool_descriptions(tmp_path):
         "review_context"
     ]["description"]
     assert "Required for ordinary_review and widget_review" in start_context_description
-    assert "schema v2" in start_context_description
+    assert "before calling" in start_context_description.lower()
+    assert "May be omitted only for non-review task types" in start_context_description
+    assert "input_manifest.schema_version=2" in start_context_description
+    start_description = " ".join(tools["start_qa_orchestration"].description.split())
+    assert "Before calling for ordinary_review or widget_review" in start_description
+    assert "exact base_sha and head_sha" in start_description
+    assert "diff_sha256 and evidence_packet_sha256" in start_description
+    assert "input_manifest.schema_version=2" in start_description
+
+
+def test_server_startup_instructions_require_review_context_preflight(tmp_path):
+    server = build_server(OrchestratorService.from_settings(data_dir=tmp_path))
+    instructions = server.instructions
+
+    assert "Before calling start_qa_orchestration for ordinary_review or widget_review" in instructions
+    assert "exact base_sha and head_sha" in instructions
+    assert "diff_sha256 and evidence_packet_sha256" in instructions
+    assert "input_manifest.schema_version=2" in instructions
 
 
 @pytest.mark.asyncio
@@ -125,10 +142,13 @@ async def test_code_review_start_requires_bound_context_and_manifest_v2(
 ):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
     async with Client(build_server(service)) as client:
-        with pytest.raises(ToolError, match="require a bound review_context"):
+        with pytest.raises(ToolError, match="exact base_sha and head_sha"):
             await client.call_tool("start_qa_orchestration", {"task_type": task_type})
 
-        with pytest.raises(ToolError, match="input_manifest schema_version=2"):
+        with pytest.raises(
+            ToolError,
+            match="input_manifest.schema_version=2 with source_inventory_status",
+        ):
             await client.call_tool(
                 "start_qa_orchestration",
                 {
