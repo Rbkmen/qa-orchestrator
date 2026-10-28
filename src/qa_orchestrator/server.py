@@ -366,7 +366,12 @@ def build_server(service: OrchestratorService) -> FastMCP:
         ] = None,
         implementation_review: Annotated[
             bool | None,
-            Field(description="At triage, whether the user's request includes review of implementation behavior. Unknown when omitted."),
+            Field(description=(
+                "At triage, whether the user's request includes review of implementation behavior. "
+                "Unknown when omitted. When true with one eligible implementation reviewer "
+                "(not code_explorer, pr_test_analyzer, or omission_auditor), the selected route "
+                "also includes one final omission_auditor pass."
+            )),
         ] = None,
         acknowledge_limited_profile: Annotated[
             bool,
@@ -385,13 +390,16 @@ def build_server(service: OrchestratorService) -> FastMCP:
         after early stops, match the recorded outcome.
 
         - Triage: select exactly one bundle or profile; default to one profile for narrow work.
+          When implementation_review=true and one eligible implementation reviewer is selected, the
+          returned route appends one final omission_auditor pass; bundles already contain that pass.
         - Every call requires run_id, completed_step, and status. Copy completed_step from the latest
           session's current_step; use status=completed after a successful stage.
         - Primary review: after a whole execution group finishes, report its ordered profiles together
           with completed_profiles. In a review-context-bound session, also supply matching profile_reports.
           Older hosts may continue reporting completed_profile one at a time.
           The final group requires risk_signals ({} if none).
-        - Clean single-profile fast path: set skip_synthesis=true only when that review has no findings,
+        - Clean single-profile fast path: set skip_synthesis=true only when the route contains one profile
+          and that review has no findings,
           no unresolved material questions, and no risk signals. This bypasses only the separate synthesis
           step; the host still validates and produces the final QA report. The server cannot verify this claim.
           Bundles, findings, unresolved questions, or any risk signal require the normal synthesis stage.

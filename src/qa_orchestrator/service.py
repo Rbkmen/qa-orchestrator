@@ -29,6 +29,7 @@ from qa_orchestrator.review_profiles import (
     build_review_route,
     bundle_execution_groups,
     bundle_profiles,
+    triage_review_profiles,
 )
 from qa_orchestrator.session_store import SqliteSessionStore
 
@@ -135,12 +136,23 @@ class OrchestratorService:
                 )
             else:
                 assert request.selected_profile is not None
-                route = self.prepare_review_route(request.selected_profile)
+                profiles = triage_review_profiles(
+                    selected_bundle=None,
+                    selected_profile=request.selected_profile,
+                    implementation_review=request.implementation_review,
+                )
                 selected_review_routes = ReviewRouteSelection(
-                    routes=[route],
-                    execution_groups=[[route.profile]],
+                    routes=[self.prepare_review_route(profile) for profile in profiles],
+                    execution_groups=[[profile] for profile in profiles],
                 )
         session = self.orchestrator.advance(**request.model_dump())
+        if selected_review_routes is not None and session.selected_bundle is None:
+            prepared_profiles = [route.profile for route in selected_review_routes.routes]
+            if prepared_profiles != session.review_profiles:
+                selected_review_routes = ReviewRouteSelection(
+                    routes=[self.prepare_review_route(profile) for profile in session.review_profiles],
+                    execution_groups=[[profile] for profile in session.review_profiles],
+                )
         return QaOrchestrationAdvanceResult.model_validate(
             {
                 **session.model_dump(),

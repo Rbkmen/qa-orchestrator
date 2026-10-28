@@ -502,10 +502,7 @@ coverage gap when the matrix is full.
 Bundles already place `OMISSION_AUDITOR` after specialist profiles. Its prompt
 now gives it a bounded queue of candidate/unverified scenarios, prior
 unverified notes, and coverage gaps, then requires it to preserve exact scenario
-text in `targeted_scenario_audit` while checking the bound packet; newly discovered scenarios use `scenario_coverage` with separate capacity. Both sets are carried into synthesis or exposed as gaps. A single-profile route adds one auditor
-pass only when unresolved items exist and waits to assess risk until that pass
-finishes. This improves traceability and makes omissions visible; it does not
-prove model reasoning or guarantee that the queue is semantically complete.
+text in `targeted_scenario_audit` while checking the bound packet; newly discovered scenarios use `scenario_coverage` with separate capacity. Both sets are carried into synthesis or exposed as gaps. An eligible implementation reviewer selected alone with `implementation_review=true` gets one auditor pass even when the first report is clean. Other single-profile routes add one auditor pass when unresolved items exist. Risk assessment waits until the pass finishes. This improves traceability and makes omissions visible; it does not prove model reasoning or guarantee that the queue is semantically complete.
 
 ### Preview profile context before execution
 

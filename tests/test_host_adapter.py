@@ -28,7 +28,10 @@ from qa_orchestrator.service import OrchestratorService
 def host_session(tmp_path, bound_review_context):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
-    def start(*, bundle=None, profile=None):
+    def start(
+        *, bundle=None, profile=None, implementation_review=None,
+        acknowledge_limited_profile=False,
+    ):
         session = service.start_qa_orchestration("ordinary_review", bound_review_context)
         service.advance_qa_orchestration(
             AdvanceQaOrchestrationRequest(
@@ -37,6 +40,8 @@ def host_session(tmp_path, bound_review_context):
                 status="completed",
                 selected_bundle=bundle,
                 selected_profile=profile,
+                implementation_review=implementation_review,
+                acknowledge_limited_profile=acknowledge_limited_profile,
             )
         )
         return service, session.run_id
@@ -115,6 +120,10 @@ async def test_host_runs_targeted_auditor_for_unverified_single_profile_scenario
 
     def assess_risk(reports):
         assessed.append(reports)
+        assert [item.profile for item in reports] == [
+            ReviewAgent.PYTHON_REVIEWER,
+            ReviewAgent.OMISSION_AUDITOR,
+        ]
         return DeepReviewSignals()
 
     result = await HostReviewAdapter(service).run_primary_review(run_id, execute, assess_risk)
@@ -127,6 +136,84 @@ async def test_host_runs_targeted_auditor_for_unverified_single_profile_scenario
     assert executed[1].previous_reports[0].scenario_coverage[0].scenario == (
         "A retry can execute the write twice."
     )
+    assert len(assessed) == 1
+    assert result.session.completed_profiles == [
+        ReviewAgent.PYTHON_REVIEWER,
+        ReviewAgent.OMISSION_AUDITOR,
+    ]
+
+
+async def test_host_runs_auditor_before_risk_assessment_for_clean_implementation_review(
+    host_session,
+):
+    service, run_id = host_session(
+        profile=ReviewAgent.PYTHON_REVIEWER,
+        implementation_review=True,
+    )
+    executed = []
+    assessed = []
+
+    async def execute(job):
+        executed.append(job)
+        return report(job.profile, job.session.review_context)
+
+    def assess_risk(reports):
+        assessed.append(reports)
+        assert [job.profile for job in executed] == [
+            ReviewAgent.PYTHON_REVIEWER,
+            ReviewAgent.OMISSION_AUDITOR,
+        ]
+        return DeepReviewSignals()
+
+    result = await HostReviewAdapter(service).run_primary_review(run_id, execute, assess_risk)
+
+    assert len(assessed) == 1
+    assert len(assessed[0]) == 2
+    assert len(executed[1].previous_reports) == 1
+    assert executed[1].previous_reports[0].profile is ReviewAgent.PYTHON_REVIEWER
+    assert result.session.completed_profiles == [
+        ReviewAgent.PYTHON_REVIEWER,
+        ReviewAgent.OMISSION_AUDITOR,
+    ]
+
+
+async def test_host_resumes_scheduled_auditor_after_single_profile_completion(host_session):
+    service, run_id = host_session(
+        profile=ReviewAgent.PYTHON_REVIEWER,
+        implementation_review=True,
+    )
+    session = service.get_qa_orchestration(run_id)
+    first_report = report(ReviewAgent.PYTHON_REVIEWER, session.review_context)
+    pending_audit = service.advance_qa_orchestration(
+        AdvanceQaOrchestrationRequest(
+            run_id=run_id,
+            completed_step="primary_review",
+            status="completed",
+            completed_profile=ReviewAgent.PYTHON_REVIEWER,
+            profile_reports=[first_report],
+        )
+    )
+    assert pending_audit.current_profile is ReviewAgent.OMISSION_AUDITOR
+
+    executed = []
+    assessed = []
+
+    async def execute(job):
+        executed.append(job)
+        return report(job.profile, job.session.review_context)
+
+    def assess_risk(reports):
+        assessed.append(reports)
+        assert [item.profile for item in reports] == [
+            ReviewAgent.PYTHON_REVIEWER,
+            ReviewAgent.OMISSION_AUDITOR,
+        ]
+        return DeepReviewSignals()
+
+    result = await HostReviewAdapter(service).run_primary_review(run_id, execute, assess_risk)
+
+    assert [job.profile for job in executed] == [ReviewAgent.OMISSION_AUDITOR]
+    assert executed[0].previous_reports == (first_report,)
     assert len(assessed) == 1
     assert result.session.completed_profiles == [
         ReviewAgent.PYTHON_REVIEWER,
