@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from itertools import pairwise
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import (
     BaseModel,
@@ -64,6 +65,19 @@ class GoldFinding(BaseModel):
         return self
 
 
+def _normalize_pull_request_url(value: str) -> str:
+    parsed = urlsplit(value.strip())
+    return urlunsplit(
+        (
+            parsed.scheme.casefold(),
+            parsed.netloc.casefold(),
+            parsed.path.rstrip("/").casefold(),
+            "",
+            "",
+        )
+    )
+
+
 class BenchmarkCase(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -75,6 +89,8 @@ class BenchmarkCase(BaseModel):
     task_title: str | None = Field(default=None, max_length=4000)
     task_body: str | None = Field(default=None, max_length=30000)
     pull_request_url: str | None = Field(default=None, max_length=2048)
+    split: Literal["tune", "check"] | None = None
+    split_group_id: str | None = Field(default=None, min_length=1, max_length=512)
     language: str | None = Field(default=None, max_length=128)
     diff_bytes: int | None = Field(default=None, ge=0)
     task_context_sha256: Sha256Digest | None = None
@@ -85,8 +101,14 @@ class BenchmarkCase(BaseModel):
     def serialize_optional_reviewbench_context(self, handler):
         payload = handler(self)
         for field in (
-            "task_title", "task_body", "pull_request_url", "language", "diff_bytes",
+            "task_title",
+            "task_body",
+            "pull_request_url",
+            "language",
+            "diff_bytes",
             "task_context_sha256",
+            "split",
+            "split_group_id",
         ):
             if getattr(self, field) is None:
                 payload.pop(field, None)
@@ -96,6 +118,16 @@ class BenchmarkCase(BaseModel):
     @classmethod
     def normalize_hashes(cls, value: str | None) -> str | None:
         return value.lower() if value is not None else None
+
+    @field_validator("split_group_id")
+    @classmethod
+    def normalize_split_group_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("split_group_id must not be empty")
+        return value
 
     @model_validator(mode="after")
     def unique_gold(self) -> "BenchmarkCase":
@@ -111,13 +143,15 @@ class BenchmarkCase(BaseModel):
             raise ValueError("benchmark revisions must differ")
         if len({finding.gold_id for finding in self.gold}) != len(self.gold):
             raise ValueError("gold IDs must be unique within a case")
+        if self.split is not None and self.split_group_id is None:
+            raise ValueError("a split requires a split_group_id")
         return self
 
 
 class BenchmarkDataset(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1, 2, 3] = 1
+    schema_version: Literal[1, 2, 3, 4] = 1
     kind: Literal["synthetic", "reviewbench_reference", "curated"]
     source: str = Field(min_length=1, max_length=1024)
     source_sha256: Sha256Digest | None = None
@@ -136,6 +170,54 @@ class BenchmarkDataset(BaseModel):
             raise ValueError("schema version 2 requires explicit source revision status")
         if self.schema_version == 3 and self.source_revision_status != "checkout_verified":
             raise ValueError("schema version 3 requires a verified source checkout")
+        if self.schema_version == 4 and self.source_revision_status not in {
+            "caller_supplied_unverified",
+            "checkout_verified",
+        }:
+            raise ValueError("schema version 4 requires an explicit source revision status")
+        if self.schema_version < 4 and any(case.split is not None for case in self.cases):
+            raise ValueError("split assignments require dataset schema version 4")
+        if self.schema_version == 4 and any(
+            case.split is None or case.split_group_id is None for case in self.cases
+        ):
+            raise ValueError("schema version 4 requires a split and group ID for every case")
+        if self.schema_version == 4 and {case.split for case in self.cases} != {
+            "tune",
+            "check",
+        }:
+            raise ValueError("schema version 4 requires cases in both tune and check splits")
+        group_splits: dict[str, str] = {}
+        pull_request_splits: dict[str, tuple[str | None, str | None]] = {}
+        for case in self.cases:
+            if case.split_group_id is not None and case.split is not None:
+                previous_split = group_splits.setdefault(case.split_group_id, case.split)
+                if previous_split != case.split:
+                    raise ValueError("cases in the same split group must share one split")
+            if case.pull_request_url is not None:
+                pull_request_key = _normalize_pull_request_url(case.pull_request_url)
+                if pull_request_key:
+                    current_assignment = (case.split, case.split_group_id)
+                    previous_assignment = pull_request_splits.setdefault(
+                        pull_request_key, current_assignment
+                    )
+                    previous_split, previous_group_id = previous_assignment
+                    current_split, current_group_id = current_assignment
+                    if (
+                        previous_split is not None
+                        and current_split is not None
+                        and previous_split != current_split
+                    ) or (
+                        previous_group_id is not None
+                        and current_group_id is not None
+                        and previous_group_id != current_group_id
+                    ):
+                        raise ValueError(
+                            "cases for the same pull request must share one split and group ID"
+                        )
+                    pull_request_splits[pull_request_key] = (
+                        previous_split if previous_split is not None else current_split,
+                        previous_group_id if previous_group_id is not None else current_group_id,
+                    )
         return self
 
     @model_serializer(mode="wrap")
@@ -584,16 +666,119 @@ def _benchmark_dataset_sha256(dataset: BenchmarkDataset) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
-def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dict:
-    cases = {case.case_id: case for case in dataset.cases}
+def assign_benchmark_splits(
+    dataset: BenchmarkDataset,
+    *,
+    check_fraction: float = 0.2,
+    seed: str = "0",
+) -> BenchmarkDataset:
+    """Assign whole pull-request groups to stable tuning and check splits."""
+    if type(check_fraction) not in {int, float} or not math.isfinite(check_fraction):
+        raise ValueError("check_fraction must be a finite number between 0 and 1")
+    if not 0 < check_fraction < 1:
+        raise ValueError("check_fraction must be greater than 0 and less than 1")
+    if not isinstance(seed, str) or not seed.strip():
+        raise ValueError("seed must be a non-empty string")
+
+    case_groups: dict[str, str] = {}
+    groups: set[str] = set()
+    explicit_ids_by_pull_request: dict[str, str] = {}
+    for case in dataset.cases:
+        if case.pull_request_url is None or case.split_group_id is None:
+            continue
+        normalized_url = _normalize_pull_request_url(case.pull_request_url)
+        if not normalized_url:
+            continue
+        previous_group_id = explicit_ids_by_pull_request.setdefault(
+            normalized_url, case.split_group_id
+        )
+        if previous_group_id != case.split_group_id:
+            raise ValueError("cases for the same pull request must share one split group ID")
+
+    for case in dataset.cases:
+        normalized_url = (
+            _normalize_pull_request_url(case.pull_request_url)
+            if case.pull_request_url is not None
+            else ""
+        )
+        if case.split_group_id is not None:
+            group_id = case.split_group_id
+        elif normalized_url and normalized_url in explicit_ids_by_pull_request:
+            group_id = explicit_ids_by_pull_request[normalized_url]
+        elif normalized_url:
+            url_digest = hashlib.sha256(normalized_url.encode()).hexdigest()
+            group_id = f"pr:{url_digest}"
+        else:
+            raise ValueError(
+                "every case needs a pull_request_url or split_group_id before splitting"
+            )
+        case_groups[case.case_id] = group_id
+        groups.add(group_id)
+
+    if len(groups) < 2:
+        raise ValueError("at least two distinct pull-request groups are required to split")
+
+    check_count = max(1, min(len(groups) - 1, int(len(groups) * check_fraction + 0.5)))
+    ordered_groups = sorted(
+        groups,
+        key=lambda group_id: hashlib.sha256(f"{seed}\0{group_id}".encode()).digest(),
+    )
+    check_groups = set(ordered_groups[:check_count])
+    cases = []
+    for case in dataset.cases:
+        group_id = case_groups[case.case_id]
+        cases.append(
+            case.model_copy(
+                update={
+                    "split": "check" if group_id in check_groups else "tune",
+                    "split_group_id": group_id,
+                }
+            ).model_dump(mode="json")
+        )
+
+    payload = dataset.model_dump(mode="json")
+    payload.update(
+        {
+            "schema_version": 4,
+            "source_revision_status": (
+                dataset.source_revision_status or "caller_supplied_unverified"
+            ),
+            "cases": cases,
+        }
+    )
+    return BenchmarkDataset.model_validate(payload)
+
+
+def score_benchmark(
+    dataset: BenchmarkDataset,
+    results: BenchmarkResults,
+    *,
+    split: Literal["tune", "check"] | None = None,
+) -> dict:
+    if split is not None and split not in {"tune", "check"}:
+        raise ValueError("split must be tune or check")
+    if split is not None and dataset.schema_version != 4:
+        raise ValueError("split scoring requires dataset schema version 4")
+    all_cases = {case.case_id: case for case in dataset.cases}
+    cases = {
+        case_id: case
+        for case_id, case in all_cases.items()
+        if split is None or case.split == split
+    }
+    if split is not None and not cases:
+        raise ValueError(f"dataset has no cases assigned to the {split} split")
     summaries = []
     failures_by_configuration = defaultdict(list)
+    selected_failures = []
     for failure in results.failures:
-        if failure.case_id not in cases:
+        if failure.case_id not in all_cases:
             raise ValueError("benchmark failure references an unknown dataset case")
+        if failure.case_id not in cases:
+            continue
+        selected_failures.append(failure)
         failures_by_configuration[failure.configuration_id].append(failure)
     for run in results.runs:
-        case = cases.get(run.case_id)
+        case = all_cases.get(run.case_id)
         if case is None:
             raise ValueError("benchmark run references an unknown dataset case")
         if (case.base_sha, case.head_sha) != (run.base_sha, run.head_sha):
@@ -604,6 +789,8 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
             case.task_context_sha256
         ):
             raise ValueError("benchmark run task context does not match the pinned dataset case")
+        if run.case_id not in cases:
+            continue
         gold = {finding.gold_id: finding for finding in case.gold}
         if any(
             gold_id is not None and gold_id not in gold
@@ -709,7 +896,8 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
     for summary in summaries:
         by_configuration[summary["configuration_id"]].append(summary)
     for run in results.runs:
-        runs_by_configuration[run.configuration_id].append(run)
+        if run.case_id in cases:
+            runs_by_configuration[run.configuration_id].append(run)
     aggregates = {}
     configurations = set(by_configuration) | set(failures_by_configuration)
     for configuration in sorted(configurations):
@@ -819,18 +1007,34 @@ def score_benchmark(dataset: BenchmarkDataset, results: BenchmarkResults) -> dic
             )
     payload = {
         "schema_version": (
-            5 if results.schema_version == 5 else 4 if results.failures else 3
+            5 if results.schema_version == 5 else 4 if selected_failures else 3
         ),
         "scoring": "local_explicit_adjudication",
         "dataset_kind": dataset.kind,
+        "dataset_schema_version": dataset.schema_version,
+        "dataset_split": split,
         "dataset_sha256": _benchmark_dataset_sha256(dataset),
+        "dataset_case_count": len(all_cases),
         "dataset_cases": sorted(cases),
         "runs": summaries,
         "configurations": aggregates,
     }
-    if results.failures:
-        payload["failures"] = [failure.model_dump(mode="json") for failure in results.failures]
+    if selected_failures:
+        payload["failures"] = [
+            failure.model_dump(mode="json") for failure in selected_failures
+        ]
     return payload
+
+
+def _check_split_gate_reason(score: Mapping[str, object]) -> str | None:
+    schema_version = score.get("dataset_schema_version")
+    if (
+        type(schema_version) is int
+        and schema_version >= 4
+        and score.get("dataset_split") != "check"
+    ):
+        return "split-aware dataset quality gates require scoring the check split"
+    return None
 
 
 def evaluate_quality_gate(
@@ -990,6 +1194,9 @@ def evaluate_quality_gate(
         "stratum_checks": [],
     }
     reasons = []
+    split_reason = _check_split_gate_reason(score)
+    if split_reason is not None:
+        reasons.append(split_reason)
     if required_dataset_kind is not None and dataset_kind != required_dataset_kind:
         reasons.append(f"dataset kind {dataset_kind or 'unavailable'} does not match required kind")
     if required_dataset_sha256 is not None and dataset_sha256 != required_dataset_sha256:
@@ -1111,6 +1318,8 @@ def evaluate_quality_gate(
         "mode": "experimental",
         "configuration_id": configuration_id,
         "dataset_kind": dataset_kind,
+        "dataset_schema_version": score.get("dataset_schema_version"),
+        "dataset_split": score.get("dataset_split"),
         "dataset_sha256": dataset_sha256,
         "passed": not reasons,
         "thresholds": {
@@ -1196,6 +1405,9 @@ def evaluate_quality_policy(
         block("score must be a JSON object")
     if score.get("scoring") != "local_explicit_adjudication":
         block("score is not from local explicit adjudication")
+    split_reason = _check_split_gate_reason(score)
+    if split_reason is not None:
+        block(split_reason)
     if dataset_kind != policy.dataset_kind:
         block(
             f"dataset kind {dataset_kind or 'unavailable'} does not match policy kind "
@@ -1334,6 +1546,8 @@ def evaluate_quality_policy(
         "policy_id": policy.policy_id,
         "configuration_id": configuration_id,
         "dataset_kind": dataset_kind,
+        "dataset_schema_version": score.get("dataset_schema_version"),
+        "dataset_split": score.get("dataset_split"),
         "dataset_sha256": dataset_sha256,
         "thresholds": thresholds,
         "observed": observed,
@@ -1455,20 +1669,25 @@ def compare_speed(
     baseline_configuration: str,
     candidate_configuration: str,
     repetitions: int,
+    split: Literal["tune", "check"] | None = None,
 ) -> dict:
     """Compare two host configurations on identical pinned inputs and model settings."""
     if not 2 <= repetitions <= 20:
         raise ValueError("repetitions must be between 2 and 20")
     if baseline_configuration == candidate_configuration:
         raise ValueError("baseline and candidate configurations must differ")
-    if results.failures:
-        raise ValueError("speed comparison cannot include failed benchmark attempts")
 
-    score_benchmark(dataset, results)
+    scored = score_benchmark(dataset, results, split=split)
+    expected_cases = set(scored["dataset_cases"])
+    if any(failure.case_id in expected_cases for failure in results.failures):
+        raise ValueError(
+            "speed comparison cannot include failed benchmark attempts in the selected split"
+        )
     selected = tuple(
         run
         for run in results.runs
         if run.configuration_id in {baseline_configuration, candidate_configuration}
+        and run.case_id in expected_cases
     )
     by_configuration: dict[str, dict[str, list[BenchmarkRun]]] = {
         baseline_configuration: defaultdict(list),
@@ -1478,7 +1697,6 @@ def compare_speed(
         by_configuration[run.configuration_id][run.case_id].append(run)
     if not all(by_configuration.values()):
         raise ValueError("both benchmark configurations must have results")
-    expected_cases = {case.case_id for case in dataset.cases}
     for cases in by_configuration.values():
         if set(cases) != expected_cases:
             raise ValueError("speed comparison requires complete coverage of the same dataset cases")
@@ -1513,11 +1731,11 @@ def compare_speed(
             schedule_assessment = "randomized_host_declared"
         else:
             runs_by_id = {run.run_id: run for run in results.runs}
+            selected_run_ids = {run.run_id for run in selected}
             ordered_pair = [
                 runs_by_id[run_id]
                 for run_id in results.schedule.run_order
-                if runs_by_id[run_id].configuration_id
-                in {baseline_configuration, candidate_configuration}
+                if run_id in selected_run_ids
             ]
             configurations_in_order = [run.configuration_id for run in ordered_pair]
             schedule_assessment = (
@@ -1639,6 +1857,7 @@ def compare_speed(
             schema_version=results.schema_version,
             runs=tuple(baseline_runs + candidate_runs),
         ),
+        split=split,
     )
     quality = {
         configuration: score["configurations"][configuration]
@@ -1694,6 +1913,8 @@ def compare_speed(
         "schema_version": 1,
         "comparison": "same_model_same_pinned_input_attempt_paired_host_elapsed_time",
         "dataset_kind": dataset.kind,
+        "dataset_schema_version": dataset.schema_version,
+        "dataset_split": split,
         "dataset_sha256": _benchmark_dataset_sha256(dataset),
         "baseline_configuration": baseline_configuration,
         "candidate_configuration": candidate_configuration,
@@ -1803,6 +2024,9 @@ def evaluate_speed_candidate(
         block("baseline and candidate configuration identities are missing or invalid")
     if dataset_kind != policy.dataset_kind:
         block("comparison dataset kind does not match the policy")
+    split_reason = _check_split_gate_reason(comparison)
+    if split_reason is not None:
+        block(split_reason)
     if dataset_sha256 != policy.dataset_sha256:
         block("comparison dataset SHA-256 does not match the policy-pinned dataset")
     if not isinstance(schedule_assessment, str) or schedule_assessment not in {
@@ -1930,6 +2154,8 @@ def evaluate_speed_candidate(
             score = {
                 "scoring": "local_explicit_adjudication",
                 "dataset_kind": dataset_kind,
+                "dataset_schema_version": comparison.get("dataset_schema_version"),
+                "dataset_split": comparison.get("dataset_split"),
                 "dataset_sha256": dataset_sha256,
                 "dataset_cases": dataset_cases,
                 "configurations": {configuration: dict(aggregate_quality)},
@@ -1977,6 +2203,8 @@ def evaluate_speed_candidate(
         "state": state,
         "policy_id": policy.policy_id,
         "dataset_kind": dataset_kind,
+        "dataset_schema_version": comparison.get("dataset_schema_version"),
+        "dataset_split": comparison.get("dataset_split"),
         "dataset_sha256": dataset_sha256,
         "baseline_configuration": baseline_configuration,
         "candidate_configuration": candidate_configuration,
@@ -2398,9 +2626,17 @@ def _task_context_sha256(title: str | None, body: str | None) -> str | None:
 def benchmark_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="qa-orch benchmark")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    split = subparsers.add_parser(
+        "split", help="Assign complete pull-request groups to tuning and check splits"
+    )
+    split.add_argument("--dataset", required=True, type=Path)
+    split.add_argument("--output", required=True, type=Path)
+    split.add_argument("--check-fraction", type=float, default=0.2)
+    split.add_argument("--seed", default="0")
     score = subparsers.add_parser("score", help="Score pinned runs using explicit adjudications")
     score.add_argument("--dataset", required=True, type=Path)
     score.add_argument("--results", required=True, type=Path)
+    score.add_argument("--split", choices=("tune", "check"))
     score.add_argument("--output", type=Path)
     quality_gate = subparsers.add_parser(
         "quality-gate",
@@ -2438,6 +2674,7 @@ def benchmark_main(argv: list[str]) -> int:
     compare.add_argument("--baseline", required=True)
     compare.add_argument("--candidate", required=True)
     compare.add_argument("--repetitions", required=True, type=int)
+    compare.add_argument("--split", choices=("tune", "check"))
     compare.add_argument("--quality-policy", type=Path)
     compare.add_argument("--output", type=Path)
     prepare = subparsers.add_parser("import-reviewbench", help="Import one public golden case")
@@ -2522,6 +2759,13 @@ def benchmark_main(argv: list[str]) -> int:
                 required_dataset_kind=args.require_dataset_kind,
                 required_dataset_sha256=args.require_dataset_sha256,
             )
+    elif args.command == "split":
+        dataset = BenchmarkDataset.model_validate_json(args.dataset.read_bytes())
+        payload = assign_benchmark_splits(
+            dataset,
+            check_fraction=args.check_fraction,
+            seed=args.seed,
+        ).model_dump(mode="json")
     elif args.command == "import-reviewbench":
         payload = import_reviewbench(args.golden, args.repository).model_dump(mode="json")
     elif args.command == "import-reviewbench-set":
@@ -2548,6 +2792,7 @@ def benchmark_main(argv: list[str]) -> int:
                 baseline_configuration=args.baseline,
                 candidate_configuration=args.candidate,
                 repetitions=args.repetitions,
+                split=args.split,
             )
             if args.quality_policy:
                 policy = BenchmarkQualityGatePolicy.model_validate_json(
@@ -2557,7 +2802,7 @@ def benchmark_main(argv: list[str]) -> int:
             else:
                 payload["eligibility"] = "exploratory"
         else:
-            payload = score_benchmark(dataset, results)
+            payload = score_benchmark(dataset, results, split=args.split)
     output = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if args.output:
         args.output.write_text(output, encoding="utf-8")

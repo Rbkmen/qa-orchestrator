@@ -182,7 +182,7 @@ Reads do not extend TTL. Deletion neither finalizes a review nor cancels host ex
 | `qa-orch evidence pack` / `chunks` | Exact context packets/source chunks |
 | `qa-orch repo profile` / `audit-tests` | Profile tracked project/test/CI metadata and report source-anchored test-suite review candidates |
 | `qa-orch rules` | Bind explicit review rules |
-| `qa-orch benchmark import-reviewbench` / `import-reviewbench-set` / `diff-budget` / `score` / `reliability` / `compare` / `quality-gate` | Import references, score explicit adjudications, compare speed, and enforce declared quality thresholds |
+| `qa-orch benchmark import-reviewbench` / `import-reviewbench-set` / `split` / `diff-budget` / `score` / `reliability` / `compare` / `quality-gate` | Import references, split cases by pull request, score explicit adjudications, compare speed, and enforce declared quality thresholds |
 | `qa-orchestrator-doctor --json` | Read-only local diagnostics |
 
 `qa-orchestrator` aliases `qa-orch`. Running either without a subcommand starts the MCP server. These tools do not provide a one-command MR review and publication flow.
