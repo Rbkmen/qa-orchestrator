@@ -68,7 +68,7 @@ SERVER_INSTRUCTIONS = (
     "For local Git branches or refs, resolve_git_review_input can pin both commits and their exact diff metadata. "
     "Before calling start_qa_orchestration for ordinary_review or widget_review, complete review-context "
     "preflight: resolve the authoritative task/MR and repository; for Git input pin exact base_sha and head_sha; "
-    "for a standalone unified diff use input_kind=diff with no Git revisions and bind its exact hash and hunks; inspect the diff "
+    "for an MR diff use input_kind=diff with no Git revisions and bind its exact hash and hunks; inspect the diff "
     "and changed paths, build the compact Evidence Packet and stable evidence_refs, compute diff_sha256 and "
     "evidence_packet_sha256, and include input_manifest.schema_version=2 with source_inventory_status and "
     "source_conflict_status. A task/MR URL alone is not enough. Keep raw source, diff, and packet content with "

@@ -604,6 +604,11 @@ def render_final_report(
         "- **Incomplete sources:** " + (", ".join(_code(s) for s in incomplete) or ("none declared" if manifest is not None else "unknown; manifest unavailable")),
         "- **Reported limitations:** " + ("; ".join(_text(s) for s in limitations) or "none reported"),
     ))
+    if context is not None and context.input_kind == "diff":
+        lines.append(
+            "- **Diff-only scope:** Git revisions, repository provenance and surrounding "
+            "source are not verified by this input."
+        )
     if outcome in {"partial", "blocked"}:
         lines.append(
             "- **Known completion gaps (host-selected outcome):** "

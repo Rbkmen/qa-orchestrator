@@ -5,8 +5,23 @@ import pytest
 from pydantic import ValidationError
 
 from qa_orchestrator.context_pack import build_diff_context_packet, validate_packet_context
-from qa_orchestrator.contracts import EvidenceRecord, ReviewContext
-from qa_orchestrator.evidence import bind_diff_only, evidence_main, validate_registered_locations
+from qa_orchestrator.contracts import (
+    EvidenceRecord,
+    FinalReviewReport,
+    ProfileChangedPathCoverage,
+    ReviewAgent,
+    ReviewContext,
+    ReviewCoverageLedger,
+    review_changed_paths_sha256,
+)
+from qa_orchestrator.evidence import (
+    bind_diff_only,
+    evidence_main,
+    review_completion_gaps,
+    validate_registered_locations,
+)
+from qa_orchestrator.orchestration import DeepReviewSignals, QaOrchestrator
+from qa_orchestrator.report import render_final_report
 from qa_orchestrator.service import OrchestratorService
 
 
@@ -130,3 +145,52 @@ def test_diff_only_builds_packet_without_repository(bound_review_context, tmp_pa
     ]) == 0
     bound = ReviewContext.model_validate_json(bound_path.read_bytes())
     assert bound.evidence_packet_sha256 == hashlib.sha256(packet_path.read_bytes()).hexdigest()
+
+
+def test_complete_diff_only_review_needs_no_git_impact_ledger(
+    bound_review_context, make_profile_review_report,
+):
+    diff = b"diff --git a/src/service.py b/src/service.py\n--- a/src/service.py\n+++ b/src/service.py\n@@ -1 +1 @@\n-old\n+new\n"
+    data = bound_review_context.model_dump(mode="json")
+    data.update(input_kind="diff", base_sha=None, head_sha=None,
+                diff_sha256=hashlib.sha256(diff).hexdigest())
+    data.update(diff_hunks=[], diff_hunk_inventory_sha256=None)
+    data["input_manifest"].update(schema_version=2, source_inventory_status="complete",
+                                  source_conflict_status="clear")
+    context = bind_diff_only(ReviewContext.model_validate(data), diff)
+    ledger = ReviewCoverageLedger(
+        changed_paths_sha256=review_changed_paths_sha256(context.changed_files),
+        changed_path_count=1,
+        profiles=(ProfileChangedPathCoverage(profile=ReviewAgent.CODE_REVIEWER,
+                                             context_selection_recorded=True,
+                                             reviewed_diff_hunk_indexes=(0,)),),
+        diff_hunk_inventory_sha256=context.diff_hunk_inventory_sha256,
+        diff_hunk_count=1,
+        unreviewed_diff_hunk_indexes=(),
+    )
+    report = FinalReviewReport(summary="Reviewed diff.", profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+                               coverage_ledger=ledger)
+    assert review_completion_gaps(context, report) == ()
+    assert "Git revisions, repository provenance and surrounding source are not verified" in render_final_report(report, context=context)
+    incomplete = report.model_copy(update={"coverage_ledger": ledger.model_copy(update={"unreviewed_diff_hunk_indexes": (0,)})})
+    assert any("unreviewed diff hunk" in gap for gap in review_completion_gaps(context, incomplete))
+
+    orchestrator = QaOrchestrator(ttl_seconds=1800, max_sessions=1)
+    session = orchestrator.start("ordinary_review", context)
+    session = orchestrator.advance(
+        run_id=session.run_id, completed_step="triage", status="completed",
+        selected_profile=ReviewAgent.CODE_REVIEWER,
+    )
+    session = orchestrator.advance(
+        run_id=session.run_id, completed_step="primary_review", status="completed",
+        completed_profile=ReviewAgent.CODE_REVIEWER,
+        profile_reports=[make_profile_review_report(ReviewAgent.CODE_REVIEWER, context=context)],
+        risk_signals=DeepReviewSignals(), skip_synthesis=True,
+    )
+    final = orchestrator.finish(
+        run_id=session.run_id, outcome="completed",
+        final_review_report=FinalReviewReport(
+            summary="Reviewed diff.", profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        ),
+    )
+    assert final.status.value == "completed"

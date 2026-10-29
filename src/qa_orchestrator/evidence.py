@@ -1138,8 +1138,6 @@ def review_completion_gaps(
 ) -> tuple[str, ...]:
     """Describe why a bound review cannot be finalized as completed."""
     gaps = []
-    if context.input_kind == "diff":
-        gaps.append("diff-only review cannot verify repository provenance or surrounding source")
     input_status = input_manifest_completeness(context)
     if input_status["status"] != "complete":
         gaps.append(
@@ -1175,7 +1173,9 @@ def review_completion_gaps(
             + ", ".join(missing_scope_source_kinds)
         )
     try:
-        validate_impact_coverage_context(report, context, require_ledger=True)
+        validate_impact_coverage_context(
+            report, context, require_ledger=context.input_kind == "git"
+        )
     except ValueError as exc:
         gaps.append(str(exc))
     if report.impact_coverage is not None:
