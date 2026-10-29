@@ -1138,6 +1138,14 @@ class ReviewNote(BaseModel):
 
     text: str = Field(min_length=1, max_length=2000)
     evidence_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=32)
+    origin: Literal["review", "verifier"] = "review"
+
+    @model_serializer(mode="wrap")
+    def omit_default_origin(self, handler):
+        payload = handler(self)
+        if self.origin == "review":
+            payload.pop("origin", None)
+        return payload
 
 
 class ReviewEvidenceMapEntry(BaseModel):

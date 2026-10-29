@@ -185,6 +185,72 @@ async def test_codex_cycle_records_each_handoff_when_selections_match(
         started_at=now, completed_at=now, attempts=(attempt,))})
     assert profile_input_receipt_verified(context, completed)
 
+async def test_verifier_can_cite_evidence_omitted_from_review_passes(
+    executor_input, review_finding_candidate, monkeypatch,
+):
+    from datetime import UTC, datetime
+
+    from qa_orchestrator.codex_review_cycle import CodexReviewCycle
+    from qa_orchestrator.contracts import (
+        ProfileAttemptMetrics,
+        ProfileAttemptObservation,
+        ProfileContextSelection,
+        ProfileExecutionMetrics,
+        ProfileReviewReport,
+    )
+    from qa_orchestrator.evidence import profile_input_receipt_verified
+    from qa_orchestrator.review_cycle import ReviewCycleResult, ReviewVerdict
+
+    _, job, _ = executor_input
+    context = job.session.review_context
+    selection = ProfileContextSelection(
+        source_packet_sha256=context.evidence_packet_sha256, selected_packet_sha256="8" * 64,
+        included_refs=("E1",), omitted_refs=("E2",), changed_files_count=1,
+        max_bytes=10000, selected_bytes=100,
+    )
+    first = ProfileReviewReport(profile=job.profile, scope="first", context_selection=selection,
+                                finding_candidates=(review_finding_candidate,))
+    second = ProfileReviewReport(profile=job.profile, scope="second", context_selection=selection)
+    verdict = ReviewVerdict(candidate_key="first:F-01", verdict="rejected",
+                            rationale="counterevidence", evidence_refs=("E2",))
+    cycle = CodexReviewCycle(None)
+
+    def observation(refs, omitted):
+        return ProfileAttemptObservation(
+            prompt_write_status="written", submitted_prompt_sha256="9" * 64,
+            source_packet_sha256=context.evidence_packet_sha256, selected_packet_sha256="8" * 64,
+            included_evidence_refs=refs, omitted_evidence_refs=omitted,
+        )
+
+    cycle.observations = [observation(("E1",), ("E2",)), observation(("E1",), ("E2",)),
+                          observation(("E1", "E2"), ())]
+
+    async def run(_job):
+        return ReviewCycleResult((first, second), (verdict,), "completed", "completed")
+
+    monkeypatch.setattr(cycle, "run", run)
+    obs = ProfileAttemptObservation()
+    combined = await cycle(replace(job, observation=obs))
+    assert combined.context_selection == selection
+    assert combined.unverified[0].origin == "verifier"
+    now = datetime.now(UTC)
+    attempt = ProfileAttemptMetrics(**obs.model_dump(), profile=job.profile, attempt=1,
+        outcome="completed", review_head_sha=context.head_sha, review_diff_sha256=context.diff_sha256,
+        started_at=now, completed_at=now, queue_seconds=0, executor_seconds=0)
+    completed = combined.model_copy(update={"execution_metrics": ProfileExecutionMetrics(
+        started_at=now, completed_at=now, attempts=(attempt,))})
+    assert profile_input_receipt_verified(context, completed)
+
+    verifier_receipt = attempt.review_cycle_receipts[-1].model_copy(update={
+        "included_evidence_refs": ("E1",), "omitted_evidence_refs": ("E2",),
+    })
+    altered_attempt = attempt.model_copy(update={
+        "review_cycle_receipts": (*attempt.review_cycle_receipts[:-1], verifier_receipt),
+    })
+    altered = completed.model_copy(update={"execution_metrics": ProfileExecutionMetrics(
+        started_at=now, completed_at=now, attempts=(altered_attempt,))})
+    assert not profile_input_receipt_verified(context, altered)
+
 
 def test_prior_review_history_prompt_is_empty_without_history(executor_input):
     from qa_orchestrator.codex_executor import prior_review_history_instruction

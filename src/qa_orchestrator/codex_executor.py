@@ -102,6 +102,8 @@ def _safe_cli_failure_detail(stderr: bytes) -> str | None:
 
 def _output_schema(profile: str) -> dict:
     schema = ProfileReviewReport.model_json_schema()
+    # Note provenance is assigned by the host after verifier execution.
+    schema.get("$defs", {}).get("ReviewNote", {}).get("properties", {}).pop("origin", None)
     # Metrics and rule-version assertions are host-owned, not model output.
     for name in ("execution_metrics", "review_rules_sha256", "context_selection"):
         schema["properties"].pop(name)

@@ -78,6 +78,8 @@ class ReviewCycle:
     def _validate_report(context: ReviewContext, profile: ReviewAgent, report: ProfileReviewReport):
         if report.profile != profile:
             raise ValueError("review returned the wrong profile")
+        if any(note.origin != "review" for note in (*report.coverage_gaps, *report.unverified)):
+            raise ValueError("reviewer cannot claim verifier note provenance")
         if set(report.reviewed_changed_paths) - set(context.changed_files):
             raise ValueError("review reported an unbound changed path")
         if set(report.reviewed_diff_hunk_indexes) - {h.index for h in context.diff_hunks}:

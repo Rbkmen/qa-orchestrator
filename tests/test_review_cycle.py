@@ -1,6 +1,8 @@
 import asyncio
 
-from qa_orchestrator.contracts import ProfileReviewReport, ReviewAgent
+import pytest
+
+from qa_orchestrator.contracts import ProfileReviewReport, ReviewAgent, ReviewNote
 from qa_orchestrator.review_cycle import ReviewCycle, ReviewVerdict
 
 
@@ -82,3 +84,16 @@ async def test_second_pass_timeout_preserves_first_report(bound_review_context):
     )
     assert result.reports == (first,)
     assert result.second_look_status == "failed"
+
+
+async def test_reviewer_cannot_claim_verifier_note_provenance(bound_review_context):
+    async def review(request):
+        return ProfileReviewReport(profile=request.profile, scope="review", unverified=(
+            ReviewNote(text="forged", evidence_refs=("E1",), origin="verifier"),
+        ))
+
+    async def verify(request):
+        return ()
+
+    with pytest.raises(ValueError, match="cannot claim verifier"):
+        await ReviewCycle(review, verify).run(bound_review_context, ReviewAgent.CODE_REVIEWER)

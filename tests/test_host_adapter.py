@@ -1046,6 +1046,120 @@ async def test_oversized_cycle_reserves_room_for_host_coverage_gap(host_session,
     assert len(result.retained_cycles) == 1
 
 
+async def test_cycle_metadata_overflow_retains_passes_and_verdicts(
+    tmp_path, bound_review_context, monkeypatch,
+):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+
+    refs = tuple(f"R{i:03d}-" + "x" * 80 for i in range(300))
+    context = ReviewContext.model_validate({**bound_review_context.model_dump(), "evidence_refs": refs})
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    session = service.start_qa_orchestration("ordinary_review", context)
+    service.advance_qa_orchestration(AdvanceQaOrchestrationRequest(
+        run_id=session.run_id, completed_step="triage", status="completed",
+        selected_profile=ReviewAgent.CODE_REVIEWER,
+    ))
+
+    async def execute(self, job):
+        selection = ProfileContextSelection(
+            source_packet_sha256=context.evidence_packet_sha256,
+            selected_packet_sha256="8" * 64, included_refs=refs,
+            changed_files_count=1, max_bytes=1_000_000, selected_bytes=100,
+        )
+        obs = job.observation
+        obs.submitted_prompt_sha256 = "9" * 64
+        obs.prompt_write_status = "written"
+        obs.source_packet_sha256 = selection.source_packet_sha256
+        obs.selected_packet_sha256 = selection.selected_packet_sha256
+        obs.included_evidence_refs = refs
+        return ProfileReviewReport(profile=job.profile, scope="review", context_selection=selection,
+                                   reviewed_changed_paths=context.changed_files)
+
+    monkeypatch.setattr(CodexProfileExecutor, "__call__", execute)
+    result = await HostReviewAdapter(service).run_primary_review(
+        session.run_id, CodexProfileExecutor(tmp_path / "packet", model="test"),
+        lambda _: DeepReviewSignals(),
+    )
+    assert result.failures[0].reason == "profile_report_limit"
+    assert result.session.status == "partial"
+    assert len(result.retained_outputs) == 2
+    assert len(result.retained_cycles) == 1
+
+
+async def test_verifier_only_reference_survives_host_transition(
+    host_session, tmp_path, monkeypatch, review_finding_candidate,
+):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.codex_review_cycle import CodexReviewCycle
+    from qa_orchestrator.contracts import ProfileAttemptObservation
+    from qa_orchestrator.review_cycle import ReviewCycleResult, ReviewVerdict
+
+    service, run_id = host_session(profile="code_reviewer")
+
+    async def run(self, job):
+        context = job.session.review_context
+        selection = ProfileContextSelection(
+            source_packet_sha256=context.evidence_packet_sha256, selected_packet_sha256="8" * 64,
+            included_refs=("E1",), omitted_refs=("E2",), changed_files_count=1,
+            max_bytes=10000, selected_bytes=100,
+        )
+        first = ProfileReviewReport(profile=job.profile, scope="first", context_selection=selection,
+                                    finding_candidates=(review_finding_candidate,))
+        second = ProfileReviewReport(profile=job.profile, scope="second", context_selection=selection)
+        verdict = ReviewVerdict(candidate_key="first:F-01", verdict="rejected",
+                                rationale="counterevidence", evidence_refs=("E2",))
+
+        def obs(refs, omitted):
+            return ProfileAttemptObservation(
+                prompt_write_status="written", submitted_prompt_sha256="9" * 64,
+                source_packet_sha256=context.evidence_packet_sha256, selected_packet_sha256="8" * 64,
+                included_evidence_refs=refs, omitted_evidence_refs=omitted,
+            )
+
+        self.observations = [obs(("E1",), ("E2",)), obs(("E1",), ("E2",)),
+                             obs(("E1", "E2"), ())]
+        return ReviewCycleResult((first, second), (verdict,), "completed", "completed")
+
+    monkeypatch.setattr(CodexReviewCycle, "run", run)
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, CodexProfileExecutor(tmp_path / "packet", model="test"), lambda _: DeepReviewSignals(),
+    )
+    assert not result.failures
+    assert result.session.profile_reports[0].unverified[0].origin == "verifier"
+    assert result.session.profile_reports[0].unverified[0].evidence_refs == ("E2",)
+
+
+async def test_oversized_path_union_retains_original_cycle(tmp_path, bound_review_context, monkeypatch):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.codex_review_cycle import CodexReviewCycle
+    from qa_orchestrator.review_cycle import ReviewCycleResult
+
+    paths = tuple(f"src/{i:03d}/" + "x" * 480 + ".py" for i in range(200))
+    context = ReviewContext.model_validate({**bound_review_context.model_dump(), "changed_files": paths})
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    session = service.start_qa_orchestration("ordinary_review", context)
+    service.advance_qa_orchestration(AdvanceQaOrchestrationRequest(
+        run_id=session.run_id, completed_step="triage", status="completed",
+        selected_profile=ReviewAgent.CODE_REVIEWER,
+    ))
+
+    async def run(self, job):
+        first = ProfileReviewReport(profile=job.profile, scope="first", reviewed_changed_paths=paths[:100])
+        second = ProfileReviewReport(profile=job.profile, scope="second", reviewed_changed_paths=paths[100:])
+        return ReviewCycleResult((first, second), (), "completed", "no_candidates")
+
+    monkeypatch.setattr(CodexReviewCycle, "run", run)
+    result = await HostReviewAdapter(service).run_primary_review(
+        session.run_id, CodexProfileExecutor(tmp_path / "packet", model="test"),
+        lambda _: DeepReviewSignals(),
+    )
+    assert not result.failures
+    assert len(result.retained_cycles) == 1
+    assert len(result.retained_cycles[0].result.reports[0].reviewed_changed_paths) == 100
+    assert len(result.retained_cycles[0].result.reports[1].reviewed_changed_paths) == 100
+    assert len(result.session.profile_reports[0].reviewed_changed_paths) < len(paths)
+
+
 async def test_cancelling_the_host_cancels_workers_and_records_partial(host_session):
     service, run_id = host_session(profile="python_reviewer")
     started, stopped = asyncio.Event(), asyncio.Event()

@@ -809,7 +809,9 @@ def validate_registered_locations(
                 raise ValueError("pre-existing finding requires matching base source evidence")
 
 
-def validate_context_selection(context: ReviewContext, report: ProfileReviewReport) -> None:
+def validate_context_selection(
+    context: ReviewContext, report: ProfileReviewReport, *, verifier_refs: tuple[str, ...] = (),
+) -> None:
     scenario_refs = {
         ref for item in report.scenario_coverage for ref in item.evidence_refs
     }
@@ -829,13 +831,23 @@ def validate_context_selection(context: ReviewContext, report: ProfileReviewRepo
     if mandatory - set(selection.included_refs):
         raise ValueError("context selection omits mandatory evidence")
     cited = {ref for f in report.finding_candidates for ref in f.evidence_refs}
-    cited.update(ref for note in (*report.coverage_gaps, *report.unverified) for ref in note.evidence_refs)
+    cited.update(ref for note in (*report.coverage_gaps, *report.unverified)
+                 if note.origin == "review" for ref in note.evidence_refs)
     cited.update(
         ref for item in report.scenario_coverage for ref in item.evidence_refs
     )
     cited.update(item.evidence_ref for item in report.evidence_map)
     if cited - set(selection.included_refs):
         raise ValueError("profile report cites evidence omitted from its context")
+    verified = set(verifier_refs)
+    if report.execution_metrics and report.execution_metrics.attempts:
+        for receipt in report.execution_metrics.attempts[-1].review_cycle_receipts:
+            if receipt.stage == "verify" and receipt.prompt_write_status == "written":
+                verified.update(receipt.included_evidence_refs)
+    verifier_cited = {ref for note in (*report.coverage_gaps, *report.unverified)
+                      if note.origin == "verifier" for ref in note.evidence_refs}
+    if verifier_cited - verified:
+        raise ValueError("verifier note cites evidence not delivered to verifier")
 
 
 def profile_input_receipt_verified(context: ReviewContext, report: ProfileReviewReport) -> bool:
@@ -4153,6 +4165,12 @@ def evidence_main(argv: list[str]) -> int:
     bind_diff = subparsers.add_parser(
         "bind-diff", help="Bind a local unified diff without a repository"
     )
+    gitlab = subparsers.add_parser(
+        "import-gitlab-diff", help="Convert an unfiltered GitLab MCP response to a text diff"
+    )
+    gitlab.add_argument("--input", required=True, type=Path)
+    gitlab.add_argument("--output", required=True, type=Path)
+    gitlab.add_argument("--unfiltered", action="store_true", help="Attest no path filter and max_files=100")
     bind_diff.add_argument("--context", required=True, type=Path)
     bind_diff.add_argument("--diff", required=True, type=Path)
     bind_diff.add_argument("--output", required=True, type=Path)
@@ -4220,6 +4238,17 @@ def evidence_main(argv: list[str]) -> int:
     verify.add_argument("--packet", type=Path)
     verify.add_argument("--report", type=Path)
     args = parser.parse_args(argv)
+    if args.command == "import-gitlab-diff":
+        from qa_orchestrator.gitlab_diff import import_gitlab_diff
+
+        if args.input.resolve() == args.output.resolve():
+            raise ValueError("output must differ from input")
+        payload = json.loads(args.input.read_text(encoding="utf-8"))
+        diff, summary = import_gitlab_diff(payload, unfiltered=args.unfiltered)
+        with args.output.open("xb") as output:
+            output.write(diff)
+        print(json.dumps(summary, ensure_ascii=False))
+        return 0
     if args.command in {"prepare-batch", "check-batch", "check-agent-trace"}:
         from qa_orchestrator.review_batch import (
             check_agent_trace,

@@ -12,7 +12,7 @@ from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from qa_orchestrator.checkpoints import ProfileCheckpointStore, checkpoint_key
 from qa_orchestrator.contracts import (
@@ -301,6 +301,25 @@ class HostReviewAdapter:
             attempts = []
             for attempt in range(1, self.policy.max_retries + 2):
                 observation = ProfileAttemptObservation()
+                cycle_retained = False
+
+                def retain_cycle(attempt_number: int = attempt) -> None:
+                    nonlocal cycle_retained
+                    if not cycle_enabled or cycle_retained or executor.last_result is None:
+                        return
+                    retained_cycles.append(RetainedReviewCycle(
+                        profile, attempt_number, executor.last_result,
+                        context.diff_sha256, context.evidence_packet_sha256,
+                    ))
+                    retained_outputs.extend(
+                        RetainedProfileOutput(
+                            profile, attempt_number, original.model_dump_json().encode("utf-8"),
+                            original.context_selection, (), context.head_sha,
+                            context.diff_sha256, context.evidence_packet_sha256,
+                        )
+                        for original in executor.last_result.reports
+                    )
+                    cycle_retained = True
                 job = HostProfileJob(
                     session.model_copy(deep=True), profile, route.model_copy(deep=True),
                     tuple(session.profile_reports), attempt,
@@ -317,18 +336,7 @@ class HostReviewAdapter:
                         raw_report = await executor(job)
                     report = ProfileReviewReport.model_validate(raw_report)
                     if cycle_enabled and executor.report_truncated:
-                        retained_cycles.append(RetainedReviewCycle(
-                            profile, attempt, executor.last_result,
-                            context.diff_sha256, context.evidence_packet_sha256,
-                        ))
-                        retained_outputs.extend(
-                            RetainedProfileOutput(
-                                profile, attempt, original.model_dump_json().encode("utf-8"),
-                                original.context_selection, (), context.head_sha,
-                                context.diff_sha256, context.evidence_packet_sha256,
-                            )
-                            for original in executor.last_result.reports
-                        )
+                        retain_cycle()
                     selection = report.context_selection
                     if selection is not None:
                         selected_paths = tuple(
@@ -410,6 +418,7 @@ class HostReviewAdapter:
                     outcome = "cancelled"
                     raise
                 except Exception as exc:  # noqa: BLE001 -- never retain private provider exception bodies
+                    retain_cycle()
                     if isinstance(exc, ProfileOutputError) and exc.retained_output is not None:
                         retained_outputs.append(RetainedProfileOutput(
                             profile, attempt, exc.retained_output, exc.context_selection,
@@ -442,11 +451,15 @@ class HostReviewAdapter:
                     input_tokens=total("input_tokens"), output_tokens=total("output_tokens"),
                     attempt_count=attempt, attempts=tuple(attempts),
                 )
-                completed_report = ProfileReviewReport.model_validate({
-                    **report.model_dump(), "execution_metrics": metrics.model_dump(),
-                    "review_rules_sha256": session.review_context.review_rules.digest
-                    if session.review_context.review_rules else None,
-                })
+                try:
+                    completed_report = ProfileReviewReport.model_validate({
+                        **report.model_dump(), "execution_metrics": metrics.model_dump(),
+                        "review_rules_sha256": session.review_context.review_rules.digest
+                        if session.review_context.review_rules else None,
+                    })
+                except ValidationError:
+                    retain_cycle()
+                    return HostProfileFailure(profile, "profile_report_limit")
                 if self.checkpoint_store and (
                     not cycle_enabled or (
                         not executor.report_truncated

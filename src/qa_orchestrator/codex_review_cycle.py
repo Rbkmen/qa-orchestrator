@@ -44,6 +44,7 @@ class CodexReviewCycle:
 
     async def __call__(self, job: HostProfileJob) -> ProfileReviewReport:
         """Return one host report; absent composite receipts keep strict completion partial."""
+        self.last_result = None
         result = await self.run(job)
         self.last_result = result
         self.report_truncated = False
@@ -59,6 +60,7 @@ class CodexReviewCycle:
         unverified.extend(ReviewNote(
             text=f"Verifier {item.verdict} for {keys[item.candidate_key]}: {item.rationale}"[:2000],
             evidence_refs=item.evidence_refs,
+            origin="verifier",
         ) for item in result.verdicts)
         if result.second_look_status != "completed":
             gaps.append(ReviewNote(text="Second review pass failed; first-pass results are retained."))
@@ -80,9 +82,9 @@ class CodexReviewCycle:
                 else:
                     scenario_keys.add(key)
                     scenarios.append(scenario)
-        paths = tuple(path for path in job.session.review_context.changed_files
-                      if any(path in report.reviewed_changed_paths for report in result.reports))
-        hunks = tuple(sorted({index for report in result.reports for index in report.reviewed_diff_hunk_indexes}))
+        paths = [path for path in job.session.review_context.changed_files
+                 if any(path in report.reviewed_changed_paths for report in result.reports)]
+        hunks = sorted({index for report in result.reports for index in report.reviewed_diff_hunk_indexes})
         evidence_map = {}
         for report in result.reports:
             for entry in report.evidence_map:
@@ -123,7 +125,12 @@ class CodexReviewCycle:
                         sections[key].pop()
                         break
                 else:
-                    raise
+                    if paths:
+                        paths.pop()
+                    elif hunks:
+                        hunks.pop()
+                    else:
+                        raise
         first_selection = result.reports[0].context_selection
         second_selection = result.reports[1].context_selection if len(result.reports) == 2 else None
         same_packet = first_selection is not None and second_selection is not None and (
@@ -139,7 +146,10 @@ class CodexReviewCycle:
             selection = first_selection
             possible = combined.model_copy(update={"context_selection": selection})
             try:
-                validate_context_selection(job.session.review_context, possible)
+                verifier_refs = (self.observations[-1].included_evidence_refs
+                                 if candidates and len(self.observations) == 3 else ())
+                validate_context_selection(job.session.review_context, possible,
+                                           verifier_refs=verifier_refs)
                 stages = ("review", "second_look", "verify") if candidates else ("review", "second_look")
                 if len(stages) != len(self.observations):
                     raise ValueError("incomplete cycle observations")
