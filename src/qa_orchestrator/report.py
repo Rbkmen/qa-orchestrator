@@ -507,8 +507,10 @@ def _render_profile_execution(report: FinalReviewReport) -> list[str]:
 def verification_binding(
     record: ReviewVerificationRecord,
     context: ReviewContext,
-) -> Literal["current", "stale"]:
+) -> Literal["current", "stale", "unknown"]:
     """Classify a recorded run by whether it used the exact reviewed head."""
+    if context.head_sha is None or record.head_sha is None:
+        return "unknown"
     return "current" if record.head_sha == context.head_sha else "stale"
 
 
@@ -519,7 +521,7 @@ def _render_verification_records(
     lines = [
         "## Tests and CI verification",
         "",
-        "These are host-supplied records bound to a head SHA; status, head binding and provenance are shown separately. The orchestrator does not independently authenticate host-reported results.",
+        "These are host-supplied records; status, head binding and provenance are shown separately. A diff-only review cannot establish head binding. The orchestrator does not independently authenticate host-reported results.",
         "",
     ]
     if not report.verification_records:
@@ -544,7 +546,7 @@ def _render_verification_records(
             f"head binding: {_text(binding)}",
             f"provenance: {_text(provenance)}",
             f"scenario: {_text(record.scenario)}",
-            f"head: {_code(record.head_sha)}",
+            f"head: {_code(record.head_sha) if record.head_sha else 'unknown'}",
             f"environment: {_text(record.environment)}",
             f"source: {_text(record.source)} / {_code(record.source_ref)}",
         ]

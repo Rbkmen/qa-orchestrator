@@ -882,9 +882,15 @@ def profile_input_receipt_verified(context: ReviewContext, report: ProfileReview
                     or receipt.source_packet_sha256 != context.evidence_packet_sha256):
                 return False
             if receipt.stage == "verify":
-                if (receipt.selected_packet_sha256 != context.evidence_packet_sha256
-                        or set(receipt.included_evidence_refs) != set(context.evidence_refs)
-                        or receipt.omitted_evidence_refs):
+                verifier_refs = set(receipt.included_evidence_refs)
+                required_refs = {ref for candidate in report.finding_candidates
+                                 for ref in candidate.evidence_refs}
+                required_refs.update(item.evidence_ref for item in context.prior_review_decisions)
+                required_refs.update(entry.evidence_ref for entry in context.evidence_registry
+                                     if entry.kind in {"diff", "requirement", "claim"})
+                if (not required_refs <= verifier_refs
+                        or verifier_refs & set(receipt.omitted_evidence_refs)
+                        or verifier_refs | set(receipt.omitted_evidence_refs) != set(context.evidence_refs)):
                     return False
             elif (receipt.selected_packet_sha256 != selection.selected_packet_sha256
                     or receipt.included_evidence_refs != selection.included_refs

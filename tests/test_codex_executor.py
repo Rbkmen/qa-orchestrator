@@ -74,6 +74,72 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':12,'output_tok
     assert any("receipts" in item.text for item in combined.coverage_gaps)
 
 
+async def test_verifier_selects_candidate_evidence_under_budget(executor_input, review_finding_candidate):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.codex_review_cycle import CodexReviewCycle
+    from qa_orchestrator.context_pack import ContextFragment, ContextPacket
+    from qa_orchestrator.contracts import EvidenceRecord, ProfileAttemptObservation, ReviewContext
+    from qa_orchestrator.review_cycle import ReviewCycleCandidate, VerificationRequest
+
+    packet_path, job, script = executor_input
+    source = "source"
+    extra = "x" * 1_050_000
+    diff = "diff content"
+    records = (
+        EvidenceRecord(evidence_ref="E1", kind="source", revision=job.session.review_context.head_sha,
+                       path="src/service.py", sha256=hashlib.sha256(source.encode()).hexdigest()),
+        EvidenceRecord(evidence_ref="E2", kind="other", locator="host:extra",
+                       sha256=hashlib.sha256(extra.encode()).hexdigest()),
+        EvidenceRecord(evidence_ref="E3", kind="diff", revision=job.session.review_context.head_sha,
+                       sha256=hashlib.sha256(diff.encode()).hexdigest()),
+    )
+    packet = ContextPacket(fragments=(ContextFragment(record=records[0], text=source),
+                                      ContextFragment(record=records[1], text=extra, required=False),
+                                      ContextFragment(record=records[2], text=diff)))
+    packet_path.write_text(packet.model_dump_json())
+    context = ReviewContext.model_validate({**job.session.review_context.model_dump(),
+        "evidence_packet_sha256": hashlib.sha256(packet_path.read_bytes()).hexdigest(),
+        "diff_sha256": hashlib.sha256(diff.encode()).hexdigest(),
+        "diff_hunk_inventory_sha256": None, "diff_hunks": (),
+        "evidence_refs": ("E1", "E2", "E3"), "evidence_registry": records})
+    job = replace(job, session=job.session.model_copy(update={"review_context": context}))
+    script.write_text('''import json,sys,pathlib
+assert "Omitted evidence refs" in sys.stdin.read()
+a=sys.argv
+pathlib.Path(a[a.index("--output-last-message")+1]).write_text(json.dumps({"verdicts":[{"candidate_key":"first:F-01","verdict":"uncertain","rationale":"unknown","evidence_refs":["E1"]}]}))
+print(json.dumps({"type":"turn.completed"}))
+''')
+    cycle = CodexReviewCycle(CodexProfileExecutor(packet_path, command=(sys.executable, str(script)), model="test"))
+    observation = ProfileAttemptObservation()
+    request = VerificationRequest(context=context, candidates=(ReviewCycleCandidate("first:F-01", review_finding_candidate),))
+    verdicts = await cycle._verify(job, request, observation)
+    assert verdicts[0].candidate_key == "first:F-01"
+    assert set(observation.included_evidence_refs) == {"E1", "E3"}
+    assert observation.omitted_evidence_refs == ("E2",)
+
+
+async def test_cycle_keeps_first_pass_when_combined_report_exceeds_limits(executor_input, monkeypatch):
+    from qa_orchestrator.codex_review_cycle import CodexReviewCycle
+    from qa_orchestrator.contracts import ProfileReviewReport, ReviewNote
+    from qa_orchestrator.review_cycle import ReviewCycleResult
+
+    _, job, _ = executor_input
+    report = ProfileReviewReport(profile=job.profile, scope="review",
+                                 coverage_gaps=tuple(ReviewNote(text=f"gap {i}") for i in range(51)))
+    result = ReviewCycleResult((report, report), (), "completed", "no_candidates")
+    cycle = CodexReviewCycle(None)
+
+    async def run(_job):
+        return result
+
+    monkeypatch.setattr(cycle, "run", run)
+    combined = await cycle(job)
+    assert cycle.last_result == result
+    assert len(combined.coverage_gaps) <= 100
+    assert any("exceeded its limits" in gap.text for gap in combined.coverage_gaps)
+    assert combined.context_selection is None
+
+
 async def test_codex_cycle_records_each_handoff_when_selections_match(
     executor_input, make_profile_review_report, monkeypatch,
 ):

@@ -835,14 +835,14 @@ def validate_final_report_verification_records(
     """Require each verification receipt and its runtime evidence to match the pinned head."""
     registry = {entry.evidence_ref: entry for entry in context.evidence_registry}
     for verification in final_report.verification_records:
-        if verification.head_sha != context.head_sha:
+        if context.input_kind == "git" and verification.head_sha != context.head_sha:
             raise OrchestrationError(
                 "verification record does not match the bound head revision"
             )
         for reference in verification.evidence_refs:
             entry = registry.get(reference)
             if entry is not None and (
-                entry.kind != "runtime" or entry.revision != context.head_sha
+                entry.kind != "runtime" or entry.revision != verification.head_sha
             ):
                 raise OrchestrationError(
                     "verification evidence must be a runtime record bound to the reviewed head"

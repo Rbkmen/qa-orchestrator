@@ -576,18 +576,7 @@ class CodexProfileExecutor:
             stderr_task = asyncio.create_task(self._read_stderr(proc))
             validated = None
             try:
-                async with asyncio.timeout(self.timeout_seconds):
-                    writer = asyncio.create_task(
-                        self._send(proc, prompt_bytes, job.observation)
-                    )
-                    try:
-                        events = await self._events(proc, job.observation)
-                        await writer
-                        code = await proc.wait()
-                    finally:
-                        if not writer.done():
-                            writer.cancel()
-                        await asyncio.gather(writer, return_exceptions=True)
+                events, code = await self._exchange(proc, prompt_bytes, job.observation)
                 if job.observation is not None:
                     job.observation.model_seconds = perf_counter() - model_started
                 validated = perf_counter()
@@ -681,6 +670,19 @@ class CodexProfileExecutor:
                     job.observation.model_seconds = perf_counter() - model_started
                 await self._stop(proc)
                 await asyncio.gather(stderr_task, return_exceptions=True)
+
+    async def _exchange(self, proc, prompt, observation):
+        """Send one prompt and consume the CLI stream under a bounded timeout."""
+        async with asyncio.timeout(self.timeout_seconds):
+            writer = asyncio.create_task(self._send(proc, prompt, observation))
+            try:
+                events = await self._events(proc, observation)
+                await writer
+                return events, await proc.wait()
+            finally:
+                if not writer.done():
+                    writer.cancel()
+                await asyncio.gather(writer, return_exceptions=True)
 
     @staticmethod
     async def _read_stderr(proc) -> bytes:

@@ -52,7 +52,7 @@ Pinned evidence → triage → primary review groups → optional deep review
                 → synthesis → awaiting_host_outcome → host final outcome
 ```
 
-1. For implementation reviews, build a complete `ReviewContext` before starting: exact repository/base/head, diff and packet SHA-256 digests, changed paths, evidence refs, and an `input_manifest` using schema v2. Non-review task types may omit it.
+1. For implementation reviews, build a complete `ReviewContext`: repository, exact diff and packet SHA-256 digests, changed paths, evidence refs, and an `input_manifest` using schema v2. Git input also requires base/head commits; a complete MR diff can use diff-only input without them. Non-review task types may omit it.
 2. Call `start_qa_orchestration`, then complete triage through `advance_qa_orchestration` with one `selected_profile` or `selected_bundle`.
 3. Run the returned `execution_groups`. Profiles in one group may run concurrently; wait for all, then record the ordered `completed_profiles` and reports in one transition. Transition calls are sequential.
 4. Supply evidence-based `risk_signals` on the last primary-review transition. Perform any required deep review, then validate and synthesize the result.
@@ -113,7 +113,7 @@ The Python bundle starts its three profiles together. Required context must be s
 
 ## Evidence and context
 
-A bound `ReviewContext` pins repository identity, full base/head commits, diff and packet SHA-256, changed paths, and evidence IDs. Discovery can also bind its exact candidate set and a diff-ordered hunk inventory (up to 500 hunks) to the review. Partial or unavailable hunk inventory blocks strict completion. Profiles attest inspected hunk indexes; the report labels this as an attestation, not proof of reasoning. Changed-path coverage still accounts for binary and metadata-only changes that have no text hunks. Optional registry metadata adds source hashes, coordinates, text availability and external locators. Binary and non-UTF-8 source stays hash-bound but cannot support source coordinates. Bound profiles submit structured reports; finding coordinates must be supported by cited, text-available head-source records when a registry is supplied.
+A bound `ReviewContext` pins repository identity, diff and packet SHA-256, changed paths, and evidence IDs. Git input also pins base/head commits; diff-only input does not establish Git revisions or surrounding source. Discovery can also bind its exact candidate set and a diff-ordered hunk inventory (up to 500 hunks) to the review. Partial or unavailable hunk inventory blocks strict completion. Profiles attest inspected hunk indexes; the report labels this as an attestation, not proof of reasoning. Changed-path coverage still accounts for binary and metadata-only changes that have no text hunks. Optional registry metadata adds source hashes, coordinates, text availability and external locators. Binary and non-UTF-8 source stays hash-bound but cannot support source coordinates. Git findings require cited head-source records; diff-only finding coordinates must lie within a bound diff hunk.
 
 Local utilities verify immutable Git bytes, hashes and coordinates. External requirements/runtime evidence remains unverified by the Git checker. The MCP server validates identifiers and citations; it does not read the raw packet.
 

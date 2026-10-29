@@ -227,6 +227,7 @@ class HostReviewAdapter:
         reused: list[ReviewAgent],
         ledger: list[ProfileAttemptMetrics],
         retained_outputs: list[RetainedProfileOutput],
+        interrupted_reports: list[ProfileReviewReport],
     ) -> ProfileReviewReport | HostProfileFailure:
         context = session.review_context
         if context is None:
@@ -240,7 +241,9 @@ class HostReviewAdapter:
             ReviewAgent.CODE_EXPLORER, ReviewAgent.PR_TEST_ANALYZER,
         }
         if cycle_enabled:
-            executor = CodexReviewCycle(executor)
+            executor = CodexReviewCycle(
+                executor, stage_timeout_seconds=self.policy.profile_timeout_seconds
+            )
         queued = perf_counter()
         async with semaphore:
             queue_seconds = perf_counter() - queued
@@ -282,9 +285,18 @@ class HostReviewAdapter:
                 clock = perf_counter()
                 outcome, failure = "failed", None
                 try:
-                    async with asyncio.timeout(self.policy.profile_timeout_seconds):
+                    async with asyncio.timeout(None if cycle_enabled else self.policy.profile_timeout_seconds):
                         raw_report = await executor(job)
                     report = ProfileReviewReport.model_validate(raw_report)
+                    if cycle_enabled and executor.report_truncated:
+                        retained_outputs.extend(
+                            RetainedProfileOutput(
+                                profile, attempt, original.model_dump_json().encode("utf-8"),
+                                original.context_selection, (), context.head_sha,
+                                context.diff_sha256, context.evidence_packet_sha256,
+                            )
+                            for original in executor.last_result.reports
+                        )
                     selection = report.context_selection
                     if selection is not None:
                         selected_paths = tuple(
@@ -351,6 +363,12 @@ class HostReviewAdapter:
                             profile, "profile_timeout" if outcome == "timeout" else "retry_exhausted"
                         )
                 except asyncio.CancelledError:
+                    if cycle_enabled and executor.first_report is not None:
+                        first = executor.first_report
+                        note = ReviewNote(text="Review cycle interrupted after the first pass.")
+                        interrupted_reports.append(first.model_copy(update={
+                            "coverage_gaps": (*first.coverage_gaps[:99], note),
+                        }))
                     observation.failure_kind = observation.failure_kind or "cancelled"
                     outcome = "cancelled"
                     raise
@@ -392,7 +410,7 @@ class HostReviewAdapter:
                     "review_rules_sha256": session.review_context.review_rules.digest
                     if session.review_context.review_rules else None,
                 })
-                if self.checkpoint_store:
+                if self.checkpoint_store and not (cycle_enabled and executor.report_truncated):
                     try:
                         self._validate_report(session.review_context, profile, completed_report)
                     except ValueError:
@@ -429,6 +447,7 @@ class HostReviewAdapter:
         reused: list[ReviewAgent] = []
         ledger: list[ProfileAttemptMetrics] = []
         retained_outputs: list[RetainedProfileOutput] = []
+        interrupted_reports: list[ProfileReviewReport] = []
         tasks: list[asyncio.Task] = []
         lease_seconds = (session.expires_at - datetime.now(UTC)).total_seconds()
         interval = min(self.policy.heartbeat_interval_seconds, max(lease_seconds / 3, 0.01))
@@ -446,7 +465,7 @@ class HostReviewAdapter:
                         continue
                     tasks = [
                         asyncio.create_task(
-                            self._execute_profile(session, profile, executor, semaphore, reused, ledger, retained_outputs)
+                            self._execute_profile(session, profile, executor, semaphore, reused, ledger, retained_outputs, interrupted_reports)
                         )
                         for profile in remaining
                     ]
@@ -528,6 +547,8 @@ class HostReviewAdapter:
                     and task.exception() is None
                     and isinstance(task.result(), ProfileReviewReport)
                 )
+            if failures or cancellation is not None:
+                unsaved = (*unsaved, *interrupted_reports)
             if cancellation is not None:
                 cancellation.execution_attempts = tuple(ledger)
                 cancellation.unsaved_reports = unsaved

@@ -1619,7 +1619,8 @@ def test_verification_records_are_bound_to_exact_head_and_rendered(bound_review_
     rendered = render_final_report(report, context=context)
 
     assert "## Tests and CI verification" in rendered
-    assert "host-supplied records bound to a head SHA" in rendered
+    assert "host-supplied records" in rendered
+    assert "A diff-only review cannot establish head binding" in rendered
     assert "unit and integration test suites" in rendered
     assert "workflow 123 / job 456" in rendered
     assert "<https://github.com/example/repo/actions/runs/123>" in rendered

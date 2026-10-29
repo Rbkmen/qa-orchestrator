@@ -564,7 +564,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
                     "candidate snapshot. Confirmed findings "
                     "require host severity, impact, affected area, and source locations. Optional "
                     "verification_records capture test/CI/runtime scenarios, results, environment, run "
-                    "reference, reason, and exact reviewed head SHA; these remain host-supplied and "
+                    "reference, reason, and head SHA when known; for diff-only reviews the head binding "
+                    "remains unknown. These records remain host-supplied and "
                     "are not independently authenticated by the orchestrator. The report "
                     "is limited to 80 KiB; profile plus final reports are limited to 288 KiB per session."
                 )

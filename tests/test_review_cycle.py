@@ -1,3 +1,5 @@
+import asyncio
+
 from qa_orchestrator.contracts import ProfileReviewReport, ReviewAgent
 from qa_orchestrator.review_cycle import ReviewCycle, ReviewVerdict
 
@@ -62,3 +64,21 @@ async def test_unbound_verifier_evidence_is_not_accepted(bound_review_context, r
     result = await ReviewCycle(review, verify).run(bound_review_context, ReviewAgent.CODE_REVIEWER)
     assert result.verification_status == "failed"
     assert result.verdicts[0].verdict == "uncertain"
+
+
+async def test_second_pass_timeout_preserves_first_report(bound_review_context):
+    first = ProfileReviewReport(profile=ReviewAgent.CODE_REVIEWER, scope="first")
+
+    async def review(request):
+        if request.phase == "second_look":
+            await asyncio.sleep(1)
+        return first
+
+    async def verify(request):
+        return ()
+
+    result = await ReviewCycle(review, verify, stage_timeout_seconds=0.01).run(
+        bound_review_context, ReviewAgent.CODE_REVIEWER
+    )
+    assert result.reports == (first,)
+    assert result.second_look_status == "failed"

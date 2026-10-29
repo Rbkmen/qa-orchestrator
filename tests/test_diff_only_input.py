@@ -12,6 +12,7 @@ from qa_orchestrator.contracts import (
     ReviewAgent,
     ReviewContext,
     ReviewCoverageLedger,
+    ReviewVerificationRecord,
     review_changed_paths_sha256,
 )
 from qa_orchestrator.evidence import (
@@ -191,6 +192,22 @@ def test_complete_diff_only_review_needs_no_git_impact_ledger(
         run_id=session.run_id, outcome="completed",
         final_review_report=FinalReviewReport(
             summary="Reviewed diff.", profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+            verification_records=(ReviewVerificationRecord(
+                verification_id="V-01", check_type="test", scenario="unit tests",
+                status="passed", environment="local", source="local_runner", source_ref="pytest",
+            ),),
         ),
     )
     assert final.status.value == "completed"
+    rendered = render_final_report(final.final_review_report, context=context)
+    assert "head binding: unknown" in rendered
+    assert "passed, head binding unknown" in rendered
+    known_run = final.final_review_report.verification_records[0].model_copy(
+        update={"head_sha": "a" * 40}
+    )
+    from qa_orchestrator.orchestration import validate_final_report_verification_records
+    from qa_orchestrator.report import verification_binding
+
+    known_report = final.final_review_report.model_copy(update={"verification_records": (known_run,)})
+    validate_final_report_verification_records(context, known_report)
+    assert verification_binding(known_run, context) == "unknown"

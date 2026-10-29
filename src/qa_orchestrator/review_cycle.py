@@ -1,5 +1,6 @@
 """Host-driven review, second look and independent candidate verification."""
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal
@@ -61,9 +62,17 @@ class ReviewCycle:
         self,
         review: Callable[[ReviewPassRequest], Awaitable[ProfileReviewReport]],
         verify: Callable[[VerificationRequest], Awaitable[tuple[ReviewVerdict, ...]]],
+        stage_timeout_seconds: float | None = None,
     ):
         self.review = review
         self.verify = verify
+        self.stage_timeout_seconds = stage_timeout_seconds
+
+    async def _run_stage(self, operation):
+        if self.stage_timeout_seconds is None:
+            return await operation
+        async with asyncio.timeout(self.stage_timeout_seconds):
+            return await operation
 
     @staticmethod
     def _validate_report(context: ReviewContext, profile: ReviewAgent, report: ProfileReviewReport):
@@ -85,19 +94,19 @@ class ReviewCycle:
         validate_registered_locations(context, report.finding_candidates)
 
     async def run(self, context: ReviewContext, profile: ReviewAgent) -> ReviewCycleResult:
-        first = ProfileReviewReport.model_validate(await self.review(
+        first = ProfileReviewReport.model_validate(await self._run_stage(self.review(
             ReviewPassRequest(context=context, profile=profile, phase="review")
-        ))
+        )))
         self._validate_report(context, profile, first)
         paths = tuple(path for path in context.changed_files if path not in first.reviewed_changed_paths)
         hunks = tuple(h.index for h in context.diff_hunks if h.index not in first.reviewed_diff_hunk_indexes)
         reports = [first]
         second_status: Literal["completed", "failed"] = "failed"
         try:
-            second = ProfileReviewReport.model_validate(await self.review(ReviewPassRequest(
+            second = ProfileReviewReport.model_validate(await self._run_stage(self.review(ReviewPassRequest(
                 context=context, profile=profile, phase="second_look", prior_report=first,
                 missing_changed_paths=paths, missing_hunk_indexes=hunks,
-            )))
+            ))))
             self._validate_report(context, profile, second)
             reports.append(second)
             second_status = "completed"
@@ -111,7 +120,7 @@ class ReviewCycle:
         if not candidates:
             return ReviewCycleResult(tuple(reports), (), second_status, "no_candidates")
         try:
-            raw = await self.verify(VerificationRequest(context=context, candidates=candidates))
+            raw = await self._run_stage(self.verify(VerificationRequest(context=context, candidates=candidates)))
             verdicts = [ReviewVerdict.model_validate(item) for item in raw]
             keys = {item.key for item in candidates}
             if len({v.candidate_key for v in verdicts}) != len(verdicts) or any(v.candidate_key not in keys for v in verdicts):

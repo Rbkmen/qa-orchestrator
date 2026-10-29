@@ -874,7 +874,7 @@ class ReviewVerificationRecord(BaseModel):
     check_type: Literal["test", "ci", "runtime"]
     scenario: str = Field(min_length=1, max_length=1000)
     status: Literal["passed", "failed", "skipped", "not_run", "cancelled", "unknown"]
-    head_sha: GitObjectId
+    head_sha: GitObjectId | None = None
     environment: str = Field(min_length=1, max_length=256)
     source: Literal["host", "local_runner", "ci_provider", "runtime_system"]
     source_ref: str = Field(min_length=1, max_length=2048)

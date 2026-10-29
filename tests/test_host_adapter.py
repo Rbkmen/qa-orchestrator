@@ -880,6 +880,53 @@ async def test_profile_timeout_is_bounded_and_does_not_complete_a_profile(host_s
     assert result.session.completed_profiles == []
 
 
+async def test_run_timeout_preserves_completed_first_pass(host_session, tmp_path, monkeypatch):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+
+    service, run_id = host_session(profile="python_reviewer")
+    calls = 0
+
+    async def execute(self, job):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            await asyncio.Event().wait()
+        return report(job.profile, job.session.review_context)
+
+    monkeypatch.setattr(CodexProfileExecutor, "__call__", execute)
+    policy = HostExecutionPolicy(run_timeout_seconds=0.05, profile_timeout_seconds=1)
+    result = await HostReviewAdapter(service, policy).run_primary_review(
+        run_id, CodexProfileExecutor(tmp_path / "packet", model="test"), lambda _: DeepReviewSignals()
+    )
+    assert result.failures[0].reason == "run_timeout"
+    assert result.session.status == "partial"
+    assert len(result.unsaved_reports) == 1
+    assert any("interrupted after the first pass" in n.text for n in result.unsaved_reports[0].coverage_gaps)
+
+
+async def test_oversized_combined_cycle_retains_original_reports(host_session, tmp_path, monkeypatch):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.codex_review_cycle import CodexReviewCycle
+    from qa_orchestrator.contracts import ReviewNote
+    from qa_orchestrator.review_cycle import ReviewCycleResult
+
+    service, run_id = host_session(profile="python_reviewer")
+
+    async def run(self, job):
+        original = report(job.profile, job.session.review_context).model_copy(update={
+            "coverage_gaps": tuple(ReviewNote(text=f"gap {i}") for i in range(51)),
+        })
+        return ReviewCycleResult((original, original), (), "completed", "no_candidates")
+
+    monkeypatch.setattr(CodexReviewCycle, "run", run)
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, CodexProfileExecutor(tmp_path / "packet", model="test"), lambda _: DeepReviewSignals()
+    )
+    assert len(result.retained_outputs) == 2
+    assert all(len(ProfileReviewReport.model_validate_json(item.raw_output).coverage_gaps) == 51
+               for item in result.retained_outputs)
+
+
 async def test_cancelling_the_host_cancels_workers_and_records_partial(host_session):
     service, run_id = host_session(profile="python_reviewer")
     started, stopped = asyncio.Event(), asyncio.Event()
