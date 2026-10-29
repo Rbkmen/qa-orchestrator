@@ -403,6 +403,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
         compact_response: Annotated[
             bool, Field(description="Return workflow state without stored context, reports and audit history; use get_qa_orchestration for full state.")
         ] = False,
+        stop_reason: Annotated[
+            str | None,
+            Field(min_length=1, max_length=2000, description="Required for partial or blocked early stops: state the observed cause or explicitly say it is unknown, without secrets or raw private output."),
+        ] = None,
     ) -> QaOrchestrationAdvanceResult:
         """Record one active QA step's result; return updated state and next_action instructions for the host.
 
@@ -430,7 +434,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
           risk_signals reflect evidence; bound sessions validate report/profile alignment,
           citation membership, finding-source lineage, and risk-signal reference membership,
           not report truth.
-        - Early stop: omit route selectors, completion fields, and risk_signals.
+        - Early stop: provide stop_reason; omit route selectors, completion fields, and risk_signals.
         - Success saves state and refreshes expires_at.
         - Invalid/stale requests and unknown/expired run_ids fail without advancing.
         - With request_id and expected_revision, exact retries return current retained state without
@@ -439,11 +443,14 @@ def build_server(service: OrchestratorService) -> FastMCP:
           transition error, read get_qa_orchestration(run_id) and continue from its current_step;
           if the session is unknown or expired, start a new session.
         """
+        if status in ("partial", "blocked") and (stop_reason is None or not stop_reason.strip()):
+            raise ValueError("stop_reason is required for partial or blocked early stops")
         result = service.advance_qa_orchestration(
             AdvanceQaOrchestrationRequest(
                 run_id=run_id,
                 completed_step=completed_step,
                 status=status,
+                stop_reason=stop_reason,
                 selected_bundle=selected_bundle,
                 selected_profile=selected_profile,
                 completed_profile=completed_profile,

@@ -570,6 +570,7 @@ async def test_cancelled_attempt_keeps_observed_usage_in_partial_result(host_ses
         service, HostExecutionPolicy(run_timeout_seconds=0.02)
     ).run_primary_review(run_id, execute, lambda _: DeepReviewSignals())
     assert result.session.status == "partial"
+    assert result.session.stop_reason == "host: run_timeout"
     assert result.execution_attempts[0].outcome == "cancelled"
     assert result.execution_attempts[0].failure_kind == "cancelled"
     assert result.execution_attempts[0].input_tokens == 17

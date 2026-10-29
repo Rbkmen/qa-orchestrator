@@ -95,6 +95,15 @@ def test_receipts_survive_restart_and_storage_failure_does_not_consume_a_key(tmp
     assert restored.advance(**request(started.run_id)) == advanced
 
 
+def test_early_stop_reason_survives_session_store_restart(tmp_path, bound_review_context):
+    store = SqliteSessionStore(tmp_path / "sessions.sqlite3")
+    first = QaOrchestrator(ttl_seconds=60, max_sessions=10, session_store=store)
+    started = first.start("ordinary_review", bound_review_context)
+    first.advance(run_id=started.run_id, completed_step="triage", status="partial", stop_reason="Cause unknown")
+    restored = QaOrchestrator(ttl_seconds=60, max_sessions=10, session_store=store)
+    assert restored.get(started.run_id).stop_reason == "Cause unknown"
+
+
 def test_renewal_changes_only_the_lease_and_cannot_revive_terminal_or_expired_sessions():
     clock = Clock()
     orchestrator = QaOrchestrator(ttl_seconds=60, max_sessions=10, clock=clock)

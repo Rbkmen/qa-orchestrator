@@ -56,7 +56,7 @@ Pinned evidence → triage → primary review groups → optional deep review
 2. Call `start_qa_orchestration`, then complete triage through `advance_qa_orchestration` with one `selected_profile` or `selected_bundle`.
 3. Run the returned `execution_groups`. Profiles in one group may run concurrently; wait for all, then record the ordered `completed_profiles` and reports in one transition. Transition calls are sequential.
 4. Supply evidence-based `risk_signals` on the last primary-review transition. Perform any required deep review, then validate and synthesize the result.
-5. Call `finish_qa_orchestration` with `completed`, `partial`, or `blocked`. A completed bound review requires `final_review_report`. Record early stops through `advance_qa_orchestration` first.
+5. Call `finish_qa_orchestration` with `completed`, `partial`, or `blocked`. A completed bound review requires `final_review_report`. Record early stops through `advance_qa_orchestration` first, including a sanitized `stop_reason` or an explicit statement that the cause is unknown. The reason is host-reported and cannot establish an unknown root cause.
 
 Use the session returned by each transition. Read/recover with `get_qa_orchestration` or `list_qa_orchestrations`. Revision checks and request keys protect against stale submissions and lost-response retries.
 

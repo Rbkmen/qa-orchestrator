@@ -490,7 +490,7 @@ class HostReviewAdapter:
             cancellation = exc
             cancellation.session_stop_failed = False
             try:
-                self._stop_partial(run_id, session.revision)
+                self._stop_partial(run_id, session.revision, "Host execution cancelled; cause not recorded.")
             except Exception:  # noqa: BLE001 -- cancellation must remain observable
                 cancellation.session_stop_failed = True
             raise
@@ -524,7 +524,10 @@ class HostReviewAdapter:
         session_snapshot_fresh = True
         if failures:
             try:
-                session = self._stop_partial(run_id, session.revision)
+                session = self._stop_partial(run_id, session.revision, "; ".join(
+                    f"{failure.profile.value if failure.profile else 'host'}: {failure.reason}"
+                    for failure in failures
+                ))
             except Exception as exc:  # noqa: BLE001 -- preserve outputs without leaking error bodies
                 reason = (
                     "session_revision_conflict"
@@ -791,7 +794,7 @@ class HostReviewAdapter:
                 if str(exc) != "stale session revision":
                     raise
 
-    def _stop_partial(self, run_id: str, expected_revision: int) -> QaOrchestrationSession:
+    def _stop_partial(self, run_id: str, expected_revision: int, reason: str) -> QaOrchestrationSession:
         current = self.service.get_qa_orchestration(run_id)
         if current.revision != expected_revision:
             raise OrchestrationError("stale session revision")
@@ -801,6 +804,7 @@ class HostReviewAdapter:
                     run_id=run_id,
                     completed_step=current.current_step,
                     status="partial",
+                    stop_reason=reason,
                     request_id=f"host-stop-{uuid4().hex}",
                     expected_revision=expected_revision,
                 )

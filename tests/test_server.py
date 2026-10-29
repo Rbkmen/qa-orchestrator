@@ -290,6 +290,21 @@ async def test_tools_support_keyed_retries_and_active_lease_renewal(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_early_stop_requires_and_retains_reason(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    async with Client(build_server(service)) as client:
+        started = (await client.call_tool("start_qa_orchestration", {"task_type": "other"})).structured_content
+        payload = {"run_id": started["run_id"], "completed_step": "triage", "status": "partial"}
+        with pytest.raises(ToolError, match="stop_reason is required"):
+            await client.call_tool("advance_qa_orchestration", payload)
+        assert (await client.call_tool("get_qa_orchestration", {"run_id": started["run_id"]})).structured_content["revision"] == 0
+        stopped = await client.call_tool("advance_qa_orchestration", {**payload, "stop_reason": "Profile executor timed out"})
+        assert stopped.structured_content["stop_reason"] == "Profile executor timed out"
+        finished = await client.call_tool("finish_qa_orchestration", {"run_id": started["run_id"], "outcome": "partial"})
+        assert finished.structured_content["stop_reason"] == "Profile executor timed out"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("state", ["active", "early_stop", "awaiting_host_outcome", "finalized"])
 async def test_delete_session_removes_only_requested_run_and_is_idempotent(tmp_path, state):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
@@ -303,7 +318,7 @@ async def test_delete_session_removes_only_requested_run_and_is_idempotent(tmp_p
         run_id = target["run_id"]
         if state == "early_stop":
             await client.call_tool("advance_qa_orchestration", {
-                "run_id": run_id, "completed_step": "triage", "status": "partial"
+                "run_id": run_id, "completed_step": "triage", "status": "partial", "stop_reason": "Review unavailable"
             })
         elif state in {"awaiting_host_outcome", "finalized"}:
             await client.call_tool("advance_qa_orchestration", {
@@ -332,7 +347,7 @@ async def test_delete_session_removes_only_requested_run_and_is_idempotent(tmp_p
         assert current.structured_content == retained
         for name, extra in (
             ("get_qa_orchestration", {}),
-            ("advance_qa_orchestration", {"completed_step": "triage", "status": "partial"}),
+            ("advance_qa_orchestration", {"completed_step": "triage", "status": "partial", "stop_reason": "Review unavailable"}),
             ("finish_qa_orchestration", {"outcome": "partial"}),
         ):
             with pytest.raises(ToolError, match="unknown run_id"):
@@ -656,7 +671,7 @@ async def test_orchestration_tool_finalizes_early_stop(tmp_path, outcome):
             )
         stopped = await client.call_tool(
             "advance_qa_orchestration",
-            {"run_id": run_id, "completed_step": "triage", "status": outcome},
+            {"run_id": run_id, "completed_step": "triage", "status": outcome, "stop_reason": "Review unavailable"},
         )
         finalized = await client.call_tool(
             "finish_qa_orchestration",

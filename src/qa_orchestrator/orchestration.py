@@ -447,6 +447,7 @@ class QaOrchestrationSession(BaseModel):
     review_profiles: list[ReviewAgent] = Field(default_factory=list)
     current_profile: ReviewAgent | None = None
     completed_profiles: list[ReviewAgent] = Field(default_factory=list)
+    stop_reason: str | None = Field(default=None, max_length=2000, description="Host-reported, sanitized reason for an early stop; not independently verified.")
     profile_reports: list[ProfileReviewReport] = Field(default_factory=list, max_length=11)
     final_review_report: FinalReviewReport | None = None
     risk_signals: DeepReviewSignals | None = None
@@ -600,6 +601,7 @@ class AdvanceQaOrchestrationRequest(BaseModel):
     run_id: str = Field(pattern=r"^qar-[0-9a-f]{32}$")
     completed_step: OrchestrationStep
     status: QaTaskOutcome
+    stop_reason: str | None = Field(default=None, min_length=1, max_length=2000)
     request_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     expected_revision: int | None = Field(default=None, ge=0, strict=True)
     selected_bundle: ReviewBundle | None = None
@@ -622,6 +624,11 @@ class AdvanceQaOrchestrationRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_transition_signal(self) -> "AdvanceQaOrchestrationRequest":
+        if self.stop_reason is not None:
+            if not self.stop_reason.strip():
+                raise ValueError("stop_reason must not be blank")
+            if self.status == "completed":
+                raise ValueError("stop_reason is only valid for an early stop")
         if (self.implementation_review is not None or self.acknowledge_limited_profile) and not (
             self.completed_step is OrchestrationStep.TRIAGE and self.status == "completed"
         ):
@@ -1001,6 +1008,7 @@ class QaOrchestrator:
         run_id: str,
         completed_step: OrchestrationStep,
         status: QaTaskOutcome,
+        stop_reason: str | None = None,
         request_id: str | None = None,
         expected_revision: int | None = None,
         selected_bundle: ReviewBundle | None = None,
@@ -1018,6 +1026,7 @@ class QaOrchestrator:
                 run_id=run_id,
                 completed_step=completed_step,
                 status=status,
+                stop_reason=stop_reason,
                 request_id=request_id,
                 expected_revision=expected_revision,
                 selected_bundle=selected_bundle,
@@ -1038,6 +1047,8 @@ class QaOrchestrator:
             self._purge_expired(now, keep_run_id=request.run_id)
             session = self._require_session(request.run_id, now)
             excluded = set()
+            if request.stop_reason is None:
+                excluded.add("stop_reason")
             if request.implementation_review is None:
                 excluded.add("implementation_review")
             if not request.acknowledge_limited_profile:
@@ -1066,6 +1077,7 @@ class QaOrchestrator:
                     session.model_copy(
                         update={
                             "status": OrchestrationStatus(request.status),
+                            "stop_reason": request.stop_reason,
                             "model_policy": None,
                             "next_action": _TERMINAL_ACTIONS[OrchestrationStatus(request.status)],
                         }
