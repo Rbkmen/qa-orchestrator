@@ -127,6 +127,12 @@ class OrchestratorService:
                     "code review requires input_manifest.schema_version=2 with source_inventory_status "
                     "and source_conflict_status"
                 )
+            if review_context.input_kind == "diff" and (
+                review_context.diff_hunk_inventory_status != "complete"
+                or not review_context.diff_hunks
+                or not any(entry.kind == "diff" for entry in review_context.evidence_registry)
+            ):
+                raise ValueError("diff-only review requires bound diff evidence and complete hunk inventory")
         return self.orchestrator.start(task_type, review_context)
 
     def advance_qa_orchestration(

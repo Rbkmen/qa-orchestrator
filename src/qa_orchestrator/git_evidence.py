@@ -14,6 +14,38 @@ def _git(repository: Path, *args: str) -> bytes:
     return result.stdout
 
 
+def resolve_git_input(repository: Path, base: str, head: str) -> dict[str, object]:
+    """Resolve local refs once and describe the exact immutable Git diff."""
+    revisions = []
+    for ref in (base, head):
+        if not ref or ref.startswith("-") or "\x00" in ref:
+            raise ValueError("invalid Git revision")
+        revisions.append(
+            _git(repository, "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}")
+            .decode("ascii")
+            .strip()
+        )
+    base_sha, head_sha = revisions
+    if base_sha == head_sha:
+        raise ValueError("base and head must identify different commits")
+    diff = _git(
+        repository, "diff", "--binary", "--no-ext-diff", "--no-textconv", base_sha, head_sha, "--"
+    )
+    paths = _git(repository, "diff", "--name-only", "-z", base_sha, head_sha, "--")
+    try:
+        changed_files = [path.decode("utf-8") for path in paths.split(b"\0") if path]
+    except UnicodeDecodeError as exc:
+        raise ValueError("changed file paths must be valid UTF-8") from exc
+    if not changed_files:
+        raise ValueError("Git diff has no changed files")
+    return {
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "diff_sha256": hashlib.sha256(diff).hexdigest(),
+        "changed_files": changed_files,
+    }
+
+
 def _diff(context: ReviewContext, repository: Path) -> bytes:
     for revision in (context.base_sha, context.head_sha):
         if _git(repository, "cat-file", "-t", revision).strip() != b"commit":

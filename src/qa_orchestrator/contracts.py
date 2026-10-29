@@ -155,8 +155,6 @@ class EvidenceRecord(BaseModel):
             raise ValueError("source text availability applies only to source evidence")
         elif self.path is not None or self.start_line is not None or self.end_line is not None:
             raise ValueError("source coordinates are allowed only for source evidence")
-        if self.kind == "diff" and self.revision is None:
-            raise ValueError("diff evidence requires a head revision")
         if self.kind == "prior_review" and self.revision is None:
             raise ValueError("prior review evidence requires the reviewed head revision")
         if self.kind not in {"source", "diff"} and not self.locator:
@@ -411,8 +409,9 @@ class ReviewContext(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     repository: str = Field(min_length=1, max_length=512)
-    base_sha: GitObjectId
-    head_sha: GitObjectId
+    input_kind: Literal["git", "diff"] = "git"
+    base_sha: GitObjectId | None = None
+    head_sha: GitObjectId | None = None
     diff_sha256: Sha256Digest
     evidence_packet_sha256: Sha256Digest
     changed_files: tuple[ChangedFilePath, ...] = Field(min_length=1, max_length=500)
@@ -484,7 +483,13 @@ class ReviewContext(BaseModel):
 
     @model_validator(mode="after")
     def validate_review_identity(self) -> "ReviewContext":
-        if self.base_sha == self.head_sha:
+        if self.input_kind == "git" and (self.base_sha is None or self.head_sha is None):
+            raise ValueError("git review requires base and head revisions")
+        if self.input_kind == "diff" and (self.base_sha is not None or self.head_sha is not None):
+            raise ValueError("diff-only review cannot claim Git revisions")
+        if self.input_kind == "diff" and self.prior_review_decisions:
+            raise ValueError("diff-only review cannot bind Git revision history")
+        if self.input_kind == "git" and self.base_sha == self.head_sha:
             raise ValueError("base_sha and head_sha must identify different revisions")
         if any(not path.strip() for path in self.changed_files):
             raise ValueError("changed_files must contain non-empty paths")
@@ -581,6 +586,8 @@ class ReviewContext(BaseModel):
             if len(set(ids)) != len(ids) or set(ids) != set(self.evidence_refs):
                 raise ValueError("evidence registry must map each registered ref exactly once")
             for entry in self.evidence_registry:
+                if self.input_kind == "diff" and entry.kind == "source":
+                    raise ValueError("diff-only review cannot verify Git source evidence")
                 if entry.kind == "source" and entry.revision not in {self.base_sha, self.head_sha}:
                     raise ValueError("source evidence revision must be the bound base or head")
                 if entry.kind == "diff" and (
@@ -646,6 +653,8 @@ class ReviewContext(BaseModel):
     @model_serializer(mode="wrap")
     def serialize_optional_input_manifest(self, handler):
         payload = handler(self)
+        if self.input_kind == "git":
+            payload.pop("input_kind", None)
         if self.input_manifest is None:
             payload.pop("input_manifest", None)
         if self.current_merge_request_source_id is None:
@@ -776,8 +785,8 @@ class ProfileAttemptMetrics(ProfileAttemptObservation):
             raise ValueError("included and omitted evidence refs must be disjoint")
         if len(set(self.included_source_paths)) != len(self.included_source_paths):
             raise ValueError("included source paths must be unique")
-        if (self.review_head_sha is None) != (self.review_diff_sha256 is None):
-            raise ValueError("review head and diff hashes must be supplied together")
+        if self.review_head_sha is not None and self.review_diff_sha256 is None:
+            raise ValueError("review head requires a diff hash")
         return self
 
 

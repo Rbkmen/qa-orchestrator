@@ -40,6 +40,7 @@ async def test_server_exposes_ten_tools(tmp_path):
         "get_qa_orchestration_catalog",
         "delete_qa_orchestration",
         "renew_qa_orchestration",
+        "resolve_git_review_input",
     }
 
 

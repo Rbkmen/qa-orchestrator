@@ -30,7 +30,14 @@ from qa_orchestrator.contracts import (
     review_changed_paths_sha256,
     review_diff_hunk_inventory_sha256,
 )
-from qa_orchestrator.git_evidence import _diff, _git, _is_text_source, _source_bytes, _source_lines
+from qa_orchestrator.git_evidence import (
+    _diff,
+    _git,
+    _is_text_source,
+    _source_bytes,
+    _source_lines,
+    resolve_git_input,
+)
 
 _DISCOVERY_MAX_SYMBOLS = 128
 _DISCOVERY_MAX_TRACKED_PATHS = 200_000
@@ -414,6 +421,52 @@ def _diff_hunk_inventory(context: ReviewContext, diff: bytes) -> dict[str, objec
     }
 
 
+def bind_diff_only(context: ReviewContext, diff: bytes) -> ReviewContext:
+    """Bind a host-supplied unified diff without asserting Git provenance."""
+    if context.input_kind != "diff":
+        raise ValueError("diff-only binding requires diff input")
+    if hashlib.sha256(diff).hexdigest() != context.diff_sha256:
+        raise ValueError("diff hash does not match review context")
+    hunks, count = _parse_diff_hunks(context, diff)
+    if not hunks or count != len(hunks):
+        raise ValueError("diff must contain a complete supported hunk inventory")
+    chunks = re.split(rb"(?m)^(?=@@ )", diff)[1:]
+    if len(chunks) != len(hunks):
+        raise ValueError("invalid diff hunk structure")
+    for hunk, chunk in zip(hunks, chunks, strict=True):
+        old_count = new_count = 0
+        for line in chunk.splitlines()[1:]:
+            if line.startswith(b"diff --git "):
+                break
+            if line.startswith(b"\\ No newline at end of file"):
+                continue
+            if not line or line[:1] not in (b" ", b"+", b"-"):
+                raise ValueError("invalid or truncated diff hunk")
+            old_count += line[:1] in (b" ", b"-")
+            new_count += line[:1] in (b" ", b"+")
+        if (old_count, new_count) != (hunk.old_count, hunk.new_count):
+            raise ValueError("truncated diff hunk")
+    covered = {context.changed_files[h.changed_path_index] for h in hunks}
+    if covered != set(context.changed_files):
+        raise ValueError("diff hunks must cover all declared changed files")
+    file_sections = re.split(rb"(?m)^diff --git ", diff)
+    if file_sections[0].strip() or len(file_sections) - 1 != len(covered):
+        raise ValueError("diff contains unsupported or unbound file changes")
+    if any(b"\n@@ " not in section for section in file_sections[1:]):
+        raise ValueError("diff contains unsupported or unbound file changes")
+    return ReviewContext.model_validate(
+        {
+            **context.model_dump(),
+            "diff_hunks": hunks,
+            "diff_hunk_inventory_sha256": review_diff_hunk_inventory_sha256(
+                context.diff_sha256, hunks
+            ),
+            "diff_hunk_inventory_status": "complete",
+            "diff_hunk_inventory_count_at_least": len(hunks),
+        }
+    )
+
+
 def _diff_relationship_terms(
     diff: bytes,
     referenced_symbols: set[str],
@@ -692,6 +745,21 @@ def validate_registered_locations(
                 for entry in cited_entries
             ):
                 raise ValueError("exacerbated finding requires bound diff evidence")
+        if context.input_kind == "diff":
+            if not any(entry.kind == "diff" for entry in cited_entries):
+                raise ValueError("diff-only findings require bound diff evidence")
+            if candidate.change_origin in {"pre_existing", "exacerbated_by_pr"}:
+                raise ValueError("diff-only input cannot establish a prior source state")
+            for location in candidate.source_locations:
+                if not any(
+                    context.changed_files[h.changed_path_index] == location.path
+                    and h.new_count > 0
+                    and h.new_start <= location.start_line
+                    and (location.end_line or location.start_line) < h.new_start + h.new_count
+                    for h in context.diff_hunks
+                ):
+                    raise ValueError("diff-only finding location must be within a bound diff hunk")
+            continue
         source_entries = [
             entry
             for entry in cited_entries
@@ -1070,6 +1138,8 @@ def review_completion_gaps(
 ) -> tuple[str, ...]:
     """Describe why a bound review cannot be finalized as completed."""
     gaps = []
+    if context.input_kind == "diff":
+        gaps.append("diff-only review cannot verify repository provenance or surrounding source")
     input_status = input_manifest_completeness(context)
     if input_status["status"] != "complete":
         gaps.append(
@@ -4039,6 +4109,33 @@ def discover_neighbor_evidence(
 def evidence_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="qa-orch evidence")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    batch = subparsers.add_parser("prepare-batch", help="Prepare each review input independently")
+    batch.add_argument("--manifest", required=True, type=Path)
+    check_batch = subparsers.add_parser("check-batch", help="Check per-input host outcome records")
+    check_batch.add_argument("--manifest", required=True, type=Path)
+    check_batch.add_argument("--results", required=True, type=Path)
+    trace = subparsers.add_parser("check-agent-trace", help="Evaluate a normalized host trace")
+    trace.add_argument("--manifest", required=True, type=Path)
+    trace.add_argument("--trace", required=True, type=Path)
+    resolve = subparsers.add_parser("resolve-git", help="Pin two local Git refs and their diff")
+    resolve.add_argument("--repository", required=True, type=Path)
+    resolve.add_argument("--base", required=True)
+    resolve.add_argument("--head", required=True)
+    resolve.add_argument("--output", type=Path)
+    bind_diff = subparsers.add_parser(
+        "bind-diff", help="Bind a local unified diff without a repository"
+    )
+    bind_diff.add_argument("--context", required=True, type=Path)
+    bind_diff.add_argument("--diff", required=True, type=Path)
+    bind_diff.add_argument("--output", required=True, type=Path)
+    pack_diff = subparsers.add_parser(
+        "pack-diff", help="Build a diff-only packet without a repository"
+    )
+    pack_diff.add_argument("--context", required=True, type=Path)
+    pack_diff.add_argument("--diff", required=True, type=Path)
+    pack_diff.add_argument("--content", required=True, type=Path)
+    pack_diff.add_argument("--packet", required=True, type=Path)
+    pack_diff.add_argument("--bound-context", required=True, type=Path)
     build = subparsers.add_parser("build", help="Build a registry from host-provided ref metadata")
     verify = subparsers.add_parser(
         "verify", help="Check evidence against immutable local Git objects"
@@ -4095,6 +4192,63 @@ def evidence_main(argv: list[str]) -> int:
     verify.add_argument("--packet", type=Path)
     verify.add_argument("--report", type=Path)
     args = parser.parse_args(argv)
+    if args.command in {"prepare-batch", "check-batch", "check-agent-trace"}:
+        from qa_orchestrator.review_batch import (
+            check_agent_trace,
+            check_review_batch,
+            prepare_review_batch,
+        )
+
+        if args.command == "prepare-batch":
+            result = prepare_review_batch(args.manifest)
+            ok = all(item["status"] != "failed" for item in result["results"])
+        elif args.command == "check-batch":
+            result = check_review_batch(args.manifest, args.results)
+            ok = not result["unresolved"]
+        else:
+            result = check_agent_trace(args.manifest, args.trace)
+            ok = not result["unresolved"] and result["final_seen"]
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if ok else 1
+    if args.command == "pack-diff":
+        from qa_orchestrator.context_pack import build_diff_context_packet
+
+        inputs = {args.context.resolve(), args.diff.resolve(), args.content.resolve()}
+        outputs = {args.packet.resolve(), args.bound_context.resolve()}
+        if len(outputs) != 2 or inputs & outputs:
+            raise ValueError("packet and bound context outputs must be distinct from all inputs")
+        context = ReviewContext.model_validate_json(args.context.read_bytes())
+        diff = args.diff.read_bytes()
+        bound = bind_diff_only(context, diff)
+        content = json.loads(args.content.read_text(encoding="utf-8"))
+        if not isinstance(content, dict) or any(not isinstance(v, str) for v in content.values()):
+            raise ValueError("content must map evidence refs to text")
+        packet = build_diff_context_packet(bound, diff, external_content=content)
+        packet_bytes = (packet.model_dump_json() + "\n").encode("utf-8")
+        bound = ReviewContext.model_validate(
+            {
+                **bound.model_dump(),
+                "evidence_packet_sha256": hashlib.sha256(packet_bytes).hexdigest(),
+            }
+        )
+        args.packet.write_bytes(packet_bytes)
+        args.bound_context.write_text(bound.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        return 0
+    if args.command == "bind-diff":
+        if args.output.resolve() in {args.context.resolve(), args.diff.resolve()}:
+            raise ValueError("bound context output must be distinct from inputs")
+        context = ReviewContext.model_validate_json(args.context.read_bytes())
+        bound = bind_diff_only(context, args.diff.read_bytes())
+        args.output.write_text(bound.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        return 0
+    if args.command == "resolve-git":
+        result = resolve_git_input(args.repository, args.base, args.head)
+        output = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
+        if args.output:
+            args.output.write_text(output, encoding="utf-8")
+        else:
+            print(output, end="")
+        return 0
     if args.command == "chunks":
         from qa_orchestrator.review_chunks import chunk_source
 

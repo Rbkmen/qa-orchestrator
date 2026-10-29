@@ -16,10 +16,7 @@ MAX_CONTEXT_PACKET_BYTES = 2_000_000
 
 
 def _omitted_source_text(sha256: str) -> str:
-    return (
-        "[Source content omitted from text context (binary or non-UTF-8); "
-        f"sha256={sha256}]"
-    )
+    return f"[Source content omitted from text context (binary or non-UTF-8); sha256={sha256}]"
 
 
 class ContextFragment(BaseModel):
@@ -34,9 +31,8 @@ class ContextFragment(BaseModel):
     @model_validator(mode="after")
     def validate_content(self) -> "ContextFragment":
         text_sha256 = hashlib.sha256(self.text.encode()).hexdigest()
-        omitted_source = (
-            self.record.kind == "source"
-            and self.text == _omitted_source_text(self.record.sha256)
+        omitted_source = self.record.kind == "source" and self.text == _omitted_source_text(
+            self.record.sha256
         )
         if omitted_source and self.record.source_text_available is True:
             raise ValueError("source omission marker conflicts with text availability metadata")
@@ -150,10 +146,7 @@ def select_context(
         cost = len(block.encode())
         refs = [f.record.evidence_ref for f in fragments]
         if size + cost > max_bytes:
-            if any(
-                f.required or f.record.evidence_ref in required_ref_set
-                for f in fragments
-            ):
+            if any(f.required or f.record.evidence_ref in required_ref_set for f in fragments):
                 raise ValueError("mandatory context exceeds budget; split the review explicitly")
             omitted.extend(refs)
             budget_omitted.extend(refs)
@@ -263,7 +256,11 @@ def build_context_packet(
     diff = _diff(context, repository)
     fragments = []
     for entry in context.evidence_registry:
-        if entry.evidence_ref in optional_profiles and entry.kind in {"diff", "requirement", "claim"}:
+        if entry.evidence_ref in optional_profiles and entry.kind in {
+            "diff",
+            "requirement",
+            "claim",
+        }:
             raise ValueError("diff, requirements, and MR claims must remain mandatory")
         if entry.kind == "source":
             source = cache.read(repository, entry)
@@ -307,6 +304,31 @@ def build_context_packet(
         fragments=tuple(sorted(fragments, key=lambda f: f.record.evidence_ref)),
         deleted_paths=deleted,
     )
+
+
+def build_diff_context_packet(
+    context: ReviewContext, diff: bytes, *, external_content: dict[str, str]
+) -> ContextPacket:
+    """Build a packet from a diff and host-supplied evidence without a repository."""
+    from qa_orchestrator.evidence import bind_diff_only
+
+    bind_diff_only(context, diff)
+    if not context.evidence_registry:
+        raise ValueError("context packing requires a complete evidence registry")
+    fragments = []
+    for entry in context.evidence_registry:
+        if entry.kind == "diff":
+            text = diff.decode("utf-8")
+        else:
+            if entry.evidence_ref not in external_content:
+                raise ValueError("external evidence requires explicit host content")
+            text = external_content[entry.evidence_ref]
+        fragments.append(ContextFragment(record=entry, text=text))
+    packet = ContextPacket(fragments=tuple(sorted(fragments, key=lambda f: f.record.evidence_ref)))
+    validate_packet_context(packet, context)
+    if len(packet.model_dump_json().encode("utf-8")) > MAX_CONTEXT_PACKET_BYTES:
+        raise ValueError("context packet exceeds executor input size")
+    return packet
 
 
 def validate_packet_context(packet: ContextPacket, context: ReviewContext) -> None:

@@ -414,6 +414,7 @@ async def test_launcher_exposes_ten_tools(monkeypatch, tmp_path):
         "get_qa_orchestration_catalog",
         "delete_qa_orchestration",
         "renew_qa_orchestration",
+        "resolve_git_review_input",
     }
     assert prepared.structured_content["profile"] == "code_explorer"
     assert prepared_batch.structured_content["bundle"] == "ruby_backend"

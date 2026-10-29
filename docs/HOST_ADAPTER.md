@@ -67,6 +67,8 @@ An optional `evidence_verifier` callback validates the pinned input before execu
 
 The review identity is a repository plus an explicit base/head commit pair; it is not tied to a GitLab MR. A host can review a branch, release delta, or any other commit range by binding those two commits and the exact diff. The local evidence checker also verifies that `changed_files` matches the paths in that pinned diff. It does not read an editor buffer or an uncommitted working tree: the host must first materialize a stable Git snapshot and bind its commit SHA.
 
+For locally available branches or other Git refs, call `resolve_git_review_input` with the server-local repository path and explicit `base` and `head`, or run `qa-orch evidence resolve-git --repository /path/to/repo --base BASE --head HEAD`. The result supplies full commit IDs, the canonical diff hash and changed paths for the review context. It compares the two resolved commits directly; when the intended comparison starts at a merge base, resolve that base explicitly. It does not fetch missing refs, construct the evidence packet, or establish the authoritative MR diff.
+
 To inspect code around the change, add relevant unchanged callers, consumers, contracts, configuration, or tests as source evidence at the bound base/head revision. Keep the diff and requirements mandatory. Changed-source excerpts are optional context: include the paths needed to understand the scenario, and mark lower-priority excerpts optional when the byte budget is tight. A precise finding location still requires a cited head-source excerpt for that path; the bound diff remains usable evidence without one. Record anything needed but unavailable under Coverage gaps or Unverified. The packet builder enforces the 2 MB limit but does not infer whether the host selected enough context.
 
 For report-bound reviews, register each material acceptance criterion as one `requirement` evidence ref and each material MR behavior claim as one `claim` evidence ref. Keep refs atomic: a whole requirements document or MR description registered as one ref cannot show that every bullet was checked. Both kinds are mandatory in every profile's selected packet. `FinalReviewReport.criterion_coverage` maps each ref to expected behavior, an outcome (`confirmed`, `contradicted`, `unverified`, or `not_applicable_to_diff`), implementation refs, test/CI refs, and a rationale. The server adds an `unverified` row for any omitted ref, rejects unbound refs, and stores the resulting matrix with the final report. This is host-authored traceability; it does not prove model reasoning or the truth of an assessment.
@@ -103,3 +105,61 @@ For checkpoint reuse the Codex executor projects prior reports to exactly the fi
 
 
 When available, `failure_kind` categorizes input preparation, CLI failure, missing output, output validation, timeout, cancellation, or other executor errors. It records the observed failure stage, not an inferred provider root cause. Error text remains sanitized, and legacy records without the field remain supported.
+
+## Multiple review inputs
+
+For a set of MRs, maintain a host-owned JSON manifest with a unique `id` for
+all in-scope inputs. Paths are relative to the manifest directory (absolute paths
+also work). `prepare-batch` resolves local Git inputs and builds diff-only
+packets using the existing evidence commands. It reports an independent result
+for every input; a failed input does not skip the rest. Output files must not
+already exist or overlap any input or another output.
+
+```json
+{"inputs": [
+  {"id": "service-mr", "kind": "git", "repository": "/path/to/repo", "base": "BASE", "head": "HEAD"},
+  {"id": "config-mr", "kind": "diff", "context": "context.json", "diff": "change.diff", "content": "content.json", "packet": "packet.json", "bound_context": "bound.json"}
+]}
+```
+
+Run `qa-orch evidence prepare-batch --manifest batch.json`. A Git `resolved`
+result contains only pinned diff metadata: construct and verify its evidence
+packet separately before starting a session. A diff `ready` result is a bound
+packet, subject to the same provenance and completeness requirements as
+`pack-diff`. Neither status means a session started or review completed. Git
+ref resolution compares commits directly, so determine the authoritative MR
+comparison first. The MCP `resolve_git_review_input` is available independently
+of this CLI. If `qa-orch` is absent from PATH, try the project's
+`.venv/bin/qa-orch` or its installed entry point. CodeGraph failure is a
+coverage gap, not by itself a reason to skip other preflight or MCP work.
+
+Before a final response, save host-observed results for every manifest ID and
+run `qa-orch evidence check-batch --manifest batch.json --results outcomes.json`:
+
+```json
+{"results": [
+  {"id": "service-mr", "status": "finalized", "run_id": "qar-...", "outcome": "partial"},
+  {"id": "config-mr", "status": "failed", "step": "preflight", "reason": "complete diff unavailable"}
+]}
+```
+
+The command exits nonzero for missing or incomplete records. Only use `failed`
+for a specific observed obstacle after feasible work; record the actual step and
+reason. Verify finalized status against the session and report partial outcomes
+and limitations to the user. This is a host-supplied accounting check: it cannot
+verify session IDs, establish that a failure is genuine, inspect the final answer,
+or force an arbitrary agent to call it. It is not an agent-behavior evaluation.
+
+`qa-orch evidence check-agent-trace --manifest batch.json --trace trace.json`
+checks normalized observations from an evaluation harness. Supply ordered events
+`{"type":"start","input_id":"...","run_id":"..."}` and matching
+`{"type":"finish","input_id":"...","run_id":"...","outcome":"partial"}`,
+then `{"type":"final"}`. An observed obstacle uses
+`{"type":"failure","input_id":"...","step":"preflight","reason":"...","observed":true}`;
+allowed steps are `preflight`, `start`, `review`, and `finish`. CLI or CodeGraph
+errors by themselves do not account for an MR. Events after the first final
+answer do not count. Missing inputs or a missing final event return nonzero.
+The harness must normalize real tool results, verify failure provenance and check
+the final answer's content itself; this helper neither runs an agent nor
+authenticates observations. Tests using synthetic events validate the evaluator,
+not real model compliance.

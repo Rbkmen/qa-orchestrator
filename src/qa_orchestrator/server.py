@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Annotated, Literal
 
 from fastmcp import FastMCP
@@ -16,6 +17,7 @@ from qa_orchestrator.contracts import (
     ReviewRoute,
     ReviewRouteBatch,
 )
+from qa_orchestrator.git_evidence import resolve_git_input
 from qa_orchestrator.model_policy import ModelPolicyResponse
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
@@ -63,12 +65,14 @@ CompletableStep = Literal["triage", "primary_review", "deep_review", "synthesis"
 
 SERVER_INSTRUCTIONS = (
     "These instructions are advisory; the host owns review decisions and model execution. "
+    "For local Git branches or refs, resolve_git_review_input can pin both commits and their exact diff metadata. "
     "Before calling start_qa_orchestration for ordinary_review or widget_review, complete review-context "
-    "preflight: resolve the authoritative task/MR and repository, exact base_sha and head_sha, inspect the diff "
+    "preflight: resolve the authoritative task/MR and repository; for Git input pin exact base_sha and head_sha; "
+    "for a standalone unified diff use input_kind=diff with no Git revisions and bind its exact hash and hunks; inspect the diff "
     "and changed paths, build the compact Evidence Packet and stable evidence_refs, compute diff_sha256 and "
     "evidence_packet_sha256, and include input_manifest.schema_version=2 with source_inventory_status and "
     "source_conflict_status. A task/MR URL alone is not enough. Keep raw source, diff, and packet content with "
-    "the host; send only identifiers, digests, and metadata. If repository, revisions, diff, or packet identity "
+    "the host; send only identifiers, digests, and metadata. If repository, required Git revisions, diff, or packet identity "
     "cannot be pinned, do not start; resolve it or tell the user what is missing. Record unavailable requirement/spec "
     "sources with partial or unknown manifest statuses; these gaps need not prevent review once the code input identity "
     "is pinned. "
@@ -96,6 +100,20 @@ SERVER_INSTRUCTIONS = (
 
 def build_server(service: OrchestratorService) -> FastMCP:
     mcp = FastMCP(name="qa-orchestrator", instructions=SERVER_INSTRUCTIONS)
+
+    @mcp.tool(title="Resolve local Git review input", annotations=READ_ONLY_TOOL_ANNOTATIONS)
+    def resolve_git_review_input(
+        repository: Annotated[str, Field(description="Absolute path to the local Git repository on the server host.")],
+        base: Annotated[str, Field(description="Locally available base Git ref or commit.")],
+        head: Annotated[str, Field(description="Locally available head Git ref or commit.")],
+    ) -> dict[str, object]:
+        """Resolve two locally available Git refs into immutable commits and diff metadata.
+
+        The repository path is on the server host. This compares the resolved commits directly;
+        choose the merge base explicitly when a merge-base comparison is required. It does not
+        fetch refs, inspect uncommitted changes, or construct the evidence packet.
+        """
+        return resolve_git_input(Path(repository), base, head)
 
     @mcp.tool(title="Read specialist review checklist", annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def prepare_qa_orchestration(
@@ -218,8 +236,8 @@ def build_server(service: OrchestratorService) -> FastMCP:
             Field(
                 description=(
                     "May be omitted only for non-review task types. Required for ordinary_review and widget_review. "
-                    "Before calling for either review type, resolve the authoritative task/MR and exact base_sha "
-                    "and head_sha, inspect the diff, and provide changed_files, diff_sha256, "
+                    "Before calling for either review type, resolve the authoritative task/MR and, for Git input, exact base_sha "
+                    "and head_sha; for standalone diff use input_kind=diff with no revisions. Inspect the diff, and provide changed_files, diff_sha256, "
                     "evidence_packet_sha256, evidence_refs, and input_manifest.schema_version=2 with "
                     "source_inventory_status and source_conflict_status. Do not use a URL or placeholder instead. "
                     "Keep raw source, diff, and Evidence Packet contents with the host; pass only identifiers, "
@@ -237,10 +255,11 @@ def build_server(service: OrchestratorService) -> FastMCP:
         """Create a QA session and bind code reviews to one immutable review input.
 
         Before calling for ordinary_review or widget_review, complete review preflight: resolve the authoritative
-        task/MR, pin exact base_sha and head_sha, inspect the exact diff, build the host-owned Evidence Packet and
+        task/MR, pin exact base_sha and head_sha for Git input, or use input_kind=diff with no Git revisions for a
+        standalone unified diff; inspect the exact diff, build the host-owned Evidence Packet and
         stable refs, compute diff_sha256 and evidence_packet_sha256, and provide input_manifest.schema_version=2
         with source_inventory_status and source_conflict_status. A task or MR URL alone is not enough. If an exact
-        repository, revisions, diff, or packet identity cannot be pinned, do not start; resolve it or tell the user
+        repository, required Git revisions, diff, or packet identity cannot be pinned, do not start; resolve it or tell the user
         what is missing. Record unavailable requirement/spec sources with partial or unknown manifest statuses.
 
         Every call creates a separate session. Use prepare_qa_orchestration for a stateless profile
