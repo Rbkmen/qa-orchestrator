@@ -31,7 +31,11 @@ from qa_orchestrator.contracts import (
     ReviewNote,
     ReviewRoute,
 )
-from qa_orchestrator.evidence import validate_context_selection, validate_registered_locations
+from qa_orchestrator.evidence import (
+    profile_input_receipt_verified,
+    validate_context_selection,
+    validate_registered_locations,
+)
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
     DeepReviewAssessment,
@@ -45,6 +49,7 @@ from qa_orchestrator.orchestration import (
     validate_final_report_profile_links,
     validate_final_report_verification_records,
 )
+from qa_orchestrator.review_cycle import ReviewCycleResult
 from qa_orchestrator.review_rules import ReviewRuleset
 from qa_orchestrator.service import OrchestratorService
 
@@ -99,6 +104,17 @@ class RetainedProfileOutput:
 
 
 @dataclass(frozen=True)
+class RetainedReviewCycle:
+    """Original pass reports and verifier decisions retained only in host memory."""
+
+    profile: ReviewAgent
+    attempt: int
+    result: ReviewCycleResult = field(repr=False)
+    diff_sha256: str
+    evidence_packet_sha256: str
+
+
+@dataclass(frozen=True)
 class HostProfileJob:
     session: QaOrchestrationSession
     profile: ReviewAgent
@@ -126,6 +142,7 @@ class HostExecutionResult:
     execution_attempts: tuple[ProfileAttemptMetrics, ...] = ()
     retained_outputs: tuple[RetainedProfileOutput, ...] = field(default=(), repr=False)
     session_snapshot_fresh: bool = True
+    retained_cycles: tuple[RetainedReviewCycle, ...] = field(default=(), repr=False)
 
 
 class SynthesisReplayInputs(BaseModel):
@@ -199,6 +216,14 @@ def _canonical_json_sha256(value: object) -> str:
 class HostReviewAdapter:
     """Execute fixed primary-review waves; the host still owns evidence and final decisions."""
 
+    @staticmethod
+    def _cycle_checkpoint_eligible(context: ReviewContext, report: ProfileReviewReport) -> bool:
+        metrics = report.execution_metrics
+        return bool(
+            metrics and metrics.attempts and metrics.attempts[-1].review_cycle_receipts
+            and profile_input_receipt_verified(context, report)
+        )
+
     def __init__(
         self,
         service: OrchestratorService,
@@ -228,6 +253,7 @@ class HostReviewAdapter:
         ledger: list[ProfileAttemptMetrics],
         retained_outputs: list[RetainedProfileOutput],
         interrupted_reports: list[ProfileReviewReport],
+        retained_cycles: list[RetainedReviewCycle],
     ) -> ProfileReviewReport | HostProfileFailure:
         context = session.review_context
         if context is None:
@@ -256,14 +282,16 @@ class HostReviewAdapter:
                     route,
                     session.model_policy,
                     session.profile_reports,
-                    self.executor_identity + ":review-cycle-v1" if cycle_enabled
+                    self.executor_identity + ":review-cycle-v2" if cycle_enabled
                     else self.executor_identity,
                     previous_report_projection=getattr(
                         executor, "checkpoint_previous_report_projection", None
                     ),
                 )
                 cached = self.checkpoint_store.load(key)
-                if cached is not None:
+                if cached is not None and (
+                    not cycle_enabled or self._cycle_checkpoint_eligible(context, cached)
+                ):
                     cached = self._with_changed_path_coverage_gaps(
                         session.review_context, cached
                     )
@@ -289,6 +317,10 @@ class HostReviewAdapter:
                         raw_report = await executor(job)
                     report = ProfileReviewReport.model_validate(raw_report)
                     if cycle_enabled and executor.report_truncated:
+                        retained_cycles.append(RetainedReviewCycle(
+                            profile, attempt, executor.last_result,
+                            context.diff_sha256, context.evidence_packet_sha256,
+                        ))
                         retained_outputs.extend(
                             RetainedProfileOutput(
                                 profile, attempt, original.model_dump_json().encode("utf-8"),
@@ -363,12 +395,17 @@ class HostReviewAdapter:
                             profile, "profile_timeout" if outcome == "timeout" else "retry_exhausted"
                         )
                 except asyncio.CancelledError:
-                    if cycle_enabled and executor.first_report is not None:
-                        first = executor.first_report
-                        note = ReviewNote(text="Review cycle interrupted after the first pass.")
-                        interrupted_reports.append(first.model_copy(update={
-                            "coverage_gaps": (*first.coverage_gaps[:99], note),
-                        }))
+                    if cycle_enabled and executor.completed_passes:
+                        for index, completed in enumerate(executor.completed_passes, 1):
+                            retained_outputs.append(RetainedProfileOutput(
+                                profile, attempt, completed.model_dump_json().encode("utf-8"),
+                                completed.context_selection, (), context.head_sha,
+                                context.diff_sha256, context.evidence_packet_sha256,
+                            ))
+                            note = ReviewNote(text=f"Review cycle interrupted after pass {index}.")
+                            interrupted_reports.append(completed.model_copy(update={
+                                "coverage_gaps": (*completed.coverage_gaps[:99], note),
+                            }))
                     observation.failure_kind = observation.failure_kind or "cancelled"
                     outcome = "cancelled"
                     raise
@@ -410,7 +447,12 @@ class HostReviewAdapter:
                     "review_rules_sha256": session.review_context.review_rules.digest
                     if session.review_context.review_rules else None,
                 })
-                if self.checkpoint_store and not (cycle_enabled and executor.report_truncated):
+                if self.checkpoint_store and (
+                    not cycle_enabled or (
+                        not executor.report_truncated
+                        and self._cycle_checkpoint_eligible(context, completed_report)
+                    )
+                ):
                     try:
                         self._validate_report(session.review_context, profile, completed_report)
                     except ValueError:
@@ -448,6 +490,7 @@ class HostReviewAdapter:
         ledger: list[ProfileAttemptMetrics] = []
         retained_outputs: list[RetainedProfileOutput] = []
         interrupted_reports: list[ProfileReviewReport] = []
+        retained_cycles: list[RetainedReviewCycle] = []
         tasks: list[asyncio.Task] = []
         lease_seconds = (session.expires_at - datetime.now(UTC)).total_seconds()
         interval = min(self.policy.heartbeat_interval_seconds, max(lease_seconds / 3, 0.01))
@@ -465,7 +508,7 @@ class HostReviewAdapter:
                         continue
                     tasks = [
                         asyncio.create_task(
-                            self._execute_profile(session, profile, executor, semaphore, reused, ledger, retained_outputs, interrupted_reports)
+                            self._execute_profile(session, profile, executor, semaphore, reused, ledger, retained_outputs, interrupted_reports, retained_cycles)
                         )
                         for profile in remaining
                     ]
@@ -553,6 +596,7 @@ class HostReviewAdapter:
                 cancellation.execution_attempts = tuple(ledger)
                 cancellation.unsaved_reports = unsaved
                 cancellation.retained_outputs = tuple(retained_outputs)
+                cancellation.retained_cycles = tuple(retained_cycles)
         session_snapshot_fresh = True
         if failures:
             try:
@@ -582,6 +626,7 @@ class HostReviewAdapter:
             tuple(ledger),
             tuple(retained_outputs),
             session_snapshot_fresh,
+            tuple(retained_cycles),
         )
 
     async def replay_synthesis(

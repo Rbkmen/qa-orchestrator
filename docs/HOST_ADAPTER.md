@@ -106,10 +106,14 @@ is explicit and reported separately from fresh execution; disable it for benchma
 
 When a CLI profile returns bounded output that fails validation or accompanies a CLI error, the adapter retains it only in memory in `HostExecutionResult.retained_outputs`, including outputs from failed retries. The bytes are excluded from repr, session storage and logs; they may contain private evidence and are untrusted. The host may inspect or revalidate them with `revalidate_retained_profile_output(retained, context)`; the same profile and evidence validation runs again. A host may explicitly supply corrected bytes using `output=`, but must review those edits. Revalidation does not certify model completion or turn the retained output into an executor receipt; no validation is bypassed. Outputs disappear when the result is discarded or the process ends.
 
+If a combined review-cycle report exceeds its limits, `HostExecutionResult.retained_cycles` also retains the original pass reports and verifier verdicts, bound to the diff and packet hashes. These artifacts are in memory only, excluded from repr and session persistence, and must be assessed by the host. A cancelled execution exposes them on the cancellation exception. Completed passes interrupted before verification remain in `unsaved_reports`.
+
 
 `advance_qa_orchestration` accepts `compact_response=true` to omit stored context, profile reports, final report, audit events, and transition receipts from that response. Workflow state, revision, model policy and triage checklists remain available. The default remains the full response; `get_qa_orchestration` always returns retained full state, including for recovery after a lost response.
 
 For checkpoint reuse the Codex executor projects prior reports to exactly the fields it sends in the prompt, so changes only to host metrics or selection metadata do not invalidate the checkpoint. Other executors retain the full prior-report key unless they explicitly supply a projection. Use the full executor identity including the runtime version as before; a changed instruction, evidence content, route or prior finding must invalidate reuse.
+
+The built-in review cycle caches and reuses a profile only when its complete input-handoff receipts validate. An incomplete second pass, verifier or truncated combined report is not checkpointed as a completed cycle; older cycle checkpoint keys are not reused.
 
 
 When available, `failure_kind` categorizes input preparation, CLI failure, missing output, output validation, timeout, cancellation, or other executor errors. It records the observed failure stage, not an inferred provider root cause. Error text remains sanitized, and legacy records without the field remain supported.

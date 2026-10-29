@@ -704,6 +704,57 @@ async def test_checkpoint_rejects_different_executor_identity(host_session, tmp_
     assert len(called) == 2
 
 
+async def test_incomplete_cycle_is_not_reused_from_checkpoint(host_session, tmp_path, monkeypatch):
+    from qa_orchestrator.checkpoints import ProfileCheckpointStore
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+
+    store = ProfileCheckpointStore(tmp_path / "checkpoints.sqlite")
+    calls = []
+
+    async def execute(self, job):
+        second = any("second independent pass" in item for item in job.route.constraints)
+        calls.append("second" if second else "first")
+        if second:
+            raise RuntimeError("temporary failure")
+        return report(job.profile, job.session.review_context)
+
+    monkeypatch.setattr(CodexProfileExecutor, "__call__", execute)
+    executor = CodexProfileExecutor(tmp_path / "packet", model="test")
+    for _ in range(2):
+        service, run_id = host_session(profile="python_reviewer")
+        result = await HostReviewAdapter(
+            service, checkpoint_store=store, executor_identity="cycle-test",
+        ).run_primary_review(run_id, executor, lambda _: DeepReviewSignals())
+        assert result.reused_profiles == ()
+    assert calls == ["first", "second", "first", "second"]
+    assert store.list_keys() == ()
+
+
+def test_cycle_checkpoint_requires_both_verified_handoffs(
+    bound_review_context, make_profile_review_report,
+):
+    from qa_orchestrator.contracts import ReviewCycleReceipt
+
+    context = bound_review_context
+    profile_report = make_profile_review_report(ReviewAgent.CODE_REVIEWER, context=context)
+    assert not HostReviewAdapter._cycle_checkpoint_eligible(context, profile_report)
+    metrics = profile_report.execution_metrics
+    attempt = metrics.attempts[0]
+    receipts = tuple(ReviewCycleReceipt(
+        stage=stage, prompt_write_status="written",
+        submitted_prompt_sha256=attempt.submitted_prompt_sha256,
+        source_packet_sha256=attempt.source_packet_sha256,
+        selected_packet_sha256=attempt.selected_packet_sha256,
+        included_evidence_refs=attempt.included_evidence_refs,
+        omitted_evidence_refs=attempt.omitted_evidence_refs,
+    ) for stage in ("review", "second_look"))
+    verified_attempt = attempt.model_copy(update={"review_cycle_receipts": receipts})
+    verified = profile_report.model_copy(update={
+        "execution_metrics": metrics.model_copy(update={"attempts": (verified_attempt,)})
+    })
+    assert HostReviewAdapter._cycle_checkpoint_eligible(context, verified)
+
+
 async def test_retry_gets_a_fresh_checklist_after_executor_mutation(host_session):
     service, run_id = host_session(profile="python_reviewer")
     original_focus = service.prepare_review_route("python_reviewer").focus
@@ -901,22 +952,61 @@ async def test_run_timeout_preserves_completed_first_pass(host_session, tmp_path
     assert result.failures[0].reason == "run_timeout"
     assert result.session.status == "partial"
     assert len(result.unsaved_reports) == 1
-    assert any("interrupted after the first pass" in n.text for n in result.unsaved_reports[0].coverage_gaps)
+    assert any("interrupted after pass 1" in n.text for n in result.unsaved_reports[0].coverage_gaps)
 
 
-async def test_oversized_combined_cycle_retains_original_reports(host_session, tmp_path, monkeypatch):
+async def test_run_timeout_during_verifier_preserves_both_passes(
+    host_session, tmp_path, monkeypatch, review_finding_candidate,
+):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.codex_review_cycle import CodexReviewCycle
+
+    service, run_id = host_session(profile="python_reviewer")
+    calls = 0
+
+    async def execute(self, job):
+        nonlocal calls
+        calls += 1
+        return ProfileReviewReport(
+            profile=job.profile, scope=f"pass {calls}",
+            finding_candidates=(review_finding_candidate,) if calls == 2 else (),
+        )
+
+    async def verify(self, *args):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(CodexProfileExecutor, "__call__", execute)
+    monkeypatch.setattr(CodexReviewCycle, "_verify", verify)
+    result = await HostReviewAdapter(
+        service, HostExecutionPolicy(run_timeout_seconds=0.05, profile_timeout_seconds=1),
+    ).run_primary_review(
+        run_id, CodexProfileExecutor(tmp_path / "packet", model="test"), lambda _: DeepReviewSignals()
+    )
+    assert result.failures[0].reason == "run_timeout"
+    assert [item.scope for item in result.unsaved_reports] == ["pass 1", "pass 2"]
+    assert result.unsaved_reports[1].finding_candidates == (review_finding_candidate,)
+    assert [ProfileReviewReport.model_validate_json(item.raw_output).scope
+            for item in result.retained_outputs] == ["pass 1", "pass 2"]
+
+
+async def test_oversized_combined_cycle_retains_original_reports(
+    host_session, tmp_path, monkeypatch, review_finding_candidate,
+):
     from qa_orchestrator.codex_executor import CodexProfileExecutor
     from qa_orchestrator.codex_review_cycle import CodexReviewCycle
     from qa_orchestrator.contracts import ReviewNote
-    from qa_orchestrator.review_cycle import ReviewCycleResult
+    from qa_orchestrator.review_cycle import ReviewCycleResult, ReviewVerdict
 
     service, run_id = host_session(profile="python_reviewer")
 
     async def run(self, job):
         original = report(job.profile, job.session.review_context).model_copy(update={
             "coverage_gaps": tuple(ReviewNote(text=f"gap {i}") for i in range(51)),
+            "finding_candidates": (review_finding_candidate,),
         })
-        return ReviewCycleResult((original, original), (), "completed", "no_candidates")
+        verdicts = (ReviewVerdict(candidate_key="first:F-01", verdict="rejected",
+                                  rationale="Counterevidence", evidence_refs=("E1",)),)
+        return ReviewCycleResult((original, original), verdicts, "completed", "completed")
 
     monkeypatch.setattr(CodexReviewCycle, "run", run)
     result = await HostReviewAdapter(service).run_primary_review(
@@ -925,6 +1015,35 @@ async def test_oversized_combined_cycle_retains_original_reports(host_session, t
     assert len(result.retained_outputs) == 2
     assert all(len(ProfileReviewReport.model_validate_json(item.raw_output).coverage_gaps) == 51
                for item in result.retained_outputs)
+    assert len(result.retained_cycles) == 1
+    assert result.retained_cycles[0].result.verdicts[0].verdict == "rejected"
+    assert result.retained_cycles[0].diff_sha256 == result.session.review_context.diff_sha256
+
+
+async def test_oversized_cycle_reserves_room_for_host_coverage_gap(host_session, tmp_path, monkeypatch):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.codex_review_cycle import CodexReviewCycle
+    from qa_orchestrator.contracts import ReviewNote
+    from qa_orchestrator.review_cycle import ReviewCycleResult
+
+    service, run_id = host_session(profile="python_reviewer")
+
+    async def run(self, job):
+        original = ProfileReviewReport(
+            profile=job.profile, scope="review",
+            coverage_gaps=tuple(ReviewNote(text=f"gap {i}") for i in range(51)),
+        )
+        return ReviewCycleResult((original, original), (), "completed", "no_candidates")
+
+    monkeypatch.setattr(CodexReviewCycle, "run", run)
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, CodexProfileExecutor(tmp_path / "packet", model="test"), lambda _: DeepReviewSignals()
+    )
+    assert not result.failures
+    combined = result.session.profile_reports[0]
+    assert len(combined.coverage_gaps) <= 100
+    assert any("did not explicitly attest" in note.text for note in combined.coverage_gaps)
+    assert len(result.retained_cycles) == 1
 
 
 async def test_cancelling_the_host_cancels_workers_and_records_partial(host_session):

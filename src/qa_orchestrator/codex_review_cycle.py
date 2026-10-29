@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from qa_orchestrator.codex_executor import MAX_EXECUTOR_PROMPT_BYTES, CodexProfileExecutor
 from qa_orchestrator.context_pack import ContextPacket, select_context, validate_packet_context
 from qa_orchestrator.contracts import (
+    _MAX_PROFILE_REVIEW_REPORT_BYTES,
     ProfileAttemptObservation,
     ProfileReviewReport,
     ReviewAgent,
@@ -38,7 +39,7 @@ class CodexReviewCycle:
         self.stage_timeout_seconds = stage_timeout_seconds
         self.observations: list[ProfileAttemptObservation] = []
         self.last_result = None
-        self.first_report = None
+        self.completed_passes: list[ProfileReviewReport] = []
         self.report_truncated = False
 
     async def __call__(self, job: HostProfileJob) -> ProfileReviewReport:
@@ -103,8 +104,13 @@ class CodexReviewCycle:
                     reviewed_changed_paths=paths, reviewed_diff_hunk_indexes=hunks,
                     **{key: tuple(value) for key, value in sections.items()},
                 )
+                # Leave room for the host's missing-path/hunk notice and metrics.
+                if (len(combined.coverage_gaps) > 99 or
+                        len(combined.model_dump_json().encode("utf-8")) >
+                        _MAX_PROFILE_REVIEW_REPORT_BYTES - 4096):
+                    raise ValueError("combined report leaves no room for host metadata")
                 break
-            except ValidationError:
+            except (ValidationError, ValueError):
                 if not truncated:
                     sections["coverage_gaps"].insert(0, ReviewNote(
                         text="Combined report exceeded its limits; original passes need separate review."
@@ -174,7 +180,7 @@ class CodexReviewCycle:
         if job.profile in {ReviewAgent.CODE_EXPLORER, ReviewAgent.PR_TEST_ANALYZER}:
             raise ValueError("review cycle requires a finding-producing profile")
         observations: list[ProfileAttemptObservation] = []
-        self.first_report = None
+        self.completed_passes = []
 
         async def review(request: ReviewPassRequest):
             observation = ProfileAttemptObservation()
@@ -193,10 +199,9 @@ class CodexReviewCycle:
                 previous = (*previous, request.prior_report)
             report = await self.executor(replace(job, route=route, previous_reports=previous,
                                                  observation=observation))
-            if request.phase == "review":
-                report = ProfileReviewReport.model_validate(report)
-                ReviewCycle._validate_report(job.session.review_context, job.profile, report)
-                self.first_report = report
+            report = ProfileReviewReport.model_validate(report)
+            ReviewCycle._validate_report(job.session.review_context, job.profile, report)
+            self.completed_passes.append(report)
             return report
 
         async def verify(request: VerificationRequest):
