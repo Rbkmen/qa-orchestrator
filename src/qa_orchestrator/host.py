@@ -231,6 +231,16 @@ class HostReviewAdapter:
         context = session.review_context
         if context is None:
             return HostProfileFailure(None, "missing_review_context")
+        # The built-in Codex path runs the independent review cycle for profiles
+        # that can produce findings. Host-provided executors keep their own behavior.
+        from qa_orchestrator.codex_executor import CodexProfileExecutor
+        from qa_orchestrator.codex_review_cycle import CodexReviewCycle
+
+        cycle_enabled = isinstance(executor, CodexProfileExecutor) and profile not in {
+            ReviewAgent.CODE_EXPLORER, ReviewAgent.PR_TEST_ANALYZER,
+        }
+        if cycle_enabled:
+            executor = CodexReviewCycle(executor)
         queued = perf_counter()
         async with semaphore:
             queue_seconds = perf_counter() - queued
@@ -243,7 +253,8 @@ class HostReviewAdapter:
                     route,
                     session.model_policy,
                     session.profile_reports,
-                    self.executor_identity,
+                    self.executor_identity + ":review-cycle-v1" if cycle_enabled
+                    else self.executor_identity,
                     previous_report_projection=getattr(
                         executor, "checkpoint_previous_report_projection", None
                     ),

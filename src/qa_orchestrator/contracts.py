@@ -697,6 +697,20 @@ class ReviewFindingLocation(BaseModel):
         return self
 
 
+class ReviewCycleReceipt(BaseModel):
+    """Local prompt handoff for one review-cycle stage; not proof of model reasoning."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    stage: Literal["review", "second_look", "verify"]
+    prompt_write_status: Literal["prepared", "written"]
+    submitted_prompt_sha256: Sha256Digest
+    source_packet_sha256: Sha256Digest
+    selected_packet_sha256: Sha256Digest
+    included_evidence_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=1000)
+    omitted_evidence_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=1000)
+
+
 class ProfileAttemptObservation(BaseModel):
     """Executor-supplied observations, including usage available before failure."""
 
@@ -723,6 +737,7 @@ class ProfileAttemptObservation(BaseModel):
     cli_failure_detail: str | None = Field(default=None, max_length=512)
     cli_exit_code: int | None = Field(default=None, ge=-255, le=255)
     cli_event_type: Literal["error", "turn.failed"] | None = None
+    review_cycle_receipts: tuple[ReviewCycleReceipt, ...] = Field(default=(), max_length=3)
 
     @field_validator("cli_failure_detail")
     @classmethod
@@ -756,6 +771,8 @@ class ProfileAttemptMetrics(ProfileAttemptObservation):
         for field in ("included_evidence_refs", "omitted_evidence_refs", "included_source_paths"):
             if not getattr(self, field):
                 payload.pop(field, None)
+        if not self.review_cycle_receipts:
+            payload.pop("review_cycle_receipts", None)
         return payload
 
     @model_validator(mode="after")

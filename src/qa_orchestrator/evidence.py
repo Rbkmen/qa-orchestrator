@@ -868,6 +868,28 @@ def profile_input_receipt_verified(context: ReviewContext, report: ProfileReview
         return False
 
     included_refs = set(attempt.included_evidence_refs)
+    if attempt.review_cycle_receipts:
+        receipts = attempt.review_cycle_receipts
+        expected_stages = ("review", "second_look", "verify") if report.finding_candidates else (
+            "review", "second_look"
+        )
+        if tuple(receipt.stage for receipt in receipts) != expected_stages:
+            return False
+        if receipts[0].submitted_prompt_sha256 != attempt.submitted_prompt_sha256:
+            return False
+        for receipt in receipts:
+            if (receipt.prompt_write_status != "written"
+                    or receipt.source_packet_sha256 != context.evidence_packet_sha256):
+                return False
+            if receipt.stage == "verify":
+                if (receipt.selected_packet_sha256 != context.evidence_packet_sha256
+                        or set(receipt.included_evidence_refs) != set(context.evidence_refs)
+                        or receipt.omitted_evidence_refs):
+                    return False
+            elif (receipt.selected_packet_sha256 != selection.selected_packet_sha256
+                    or receipt.included_evidence_refs != selection.included_refs
+                    or receipt.omitted_evidence_refs != selection.omitted_refs):
+                return False
     expected_source_paths = tuple(
         sorted(
             {

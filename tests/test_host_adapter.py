@@ -116,6 +116,35 @@ async def test_synthesis_replay_holds_upstream_reports_fixed_and_does_not_persis
     assert after == before
 
 
+@pytest.mark.parametrize("profile,expected_cycle", [
+    (ReviewAgent.PYTHON_REVIEWER, True),
+    (ReviewAgent.CODE_EXPLORER, False),
+    (ReviewAgent.PR_TEST_ANALYZER, False),
+])
+async def test_host_automatically_uses_cycle_for_finding_codex_profiles(
+    host_session, tmp_path, monkeypatch, profile, expected_cycle,
+):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.codex_review_cycle import CodexReviewCycle
+
+    service, run_id = host_session(profile=profile)
+    calls = []
+    async def cycle_call(self, job):
+        calls.append("cycle")
+        return report(job.profile, job.session.review_context)
+    async def single_call(self, job):
+        calls.append("single")
+        return report(job.profile, job.session.review_context)
+    monkeypatch.setattr(CodexReviewCycle, "__call__", cycle_call)
+    monkeypatch.setattr(CodexProfileExecutor, "__call__", single_call)
+    executor = CodexProfileExecutor(tmp_path / "packet", model="test")
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, executor, lambda _: DeepReviewSignals(),
+    )
+    assert not result.failures
+    assert calls == (["cycle"] if expected_cycle else ["single"])
+
+
 async def test_synthesis_replay_rejects_a_report_for_another_profile(
     host_session, make_final_review_report,
 ):

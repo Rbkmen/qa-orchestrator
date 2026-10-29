@@ -971,6 +971,34 @@ def test_profile_input_receipt_requires_matching_packet_and_written_prompt(
     assert not profile_input_receipt_verified(bound_review_context, wrong_packet)
 
 
+def test_composite_receipt_requires_both_review_calls_and_completed_verifier(
+    bound_review_context, make_profile_review_report, review_finding_candidate,
+):
+    report = make_profile_review_report(ReviewAgent.CODE_REVIEWER, findings=(review_finding_candidate,))
+    metrics = report.execution_metrics
+    attempt = metrics.attempts[-1]
+    observation = {
+        "prompt_write_status": "written", "submitted_prompt_sha256": attempt.submitted_prompt_sha256,
+        "source_packet_sha256": bound_review_context.evidence_packet_sha256,
+        "selected_packet_sha256": report.context_selection.selected_packet_sha256,
+        "included_evidence_refs": report.context_selection.included_refs,
+        "omitted_evidence_refs": report.context_selection.omitted_refs,
+    }
+    def with_receipts(receipts):
+        data = attempt.model_dump(mode="python")
+        data["review_cycle_receipts"] = receipts
+        updated = type(attempt).model_validate(data)
+        return report.model_copy(update={"execution_metrics": metrics.model_copy(update={"attempts": (updated,)})})
+    review = {"stage": "review", **observation}
+    second = {"stage": "second_look", **observation}
+    verify = {"stage": "verify", **observation,
+        "selected_packet_sha256": bound_review_context.evidence_packet_sha256,
+        "included_evidence_refs": bound_review_context.evidence_refs, "omitted_evidence_refs": ()}
+    assert profile_input_receipt_verified(bound_review_context, with_receipts((review, second, verify)))
+    assert not profile_input_receipt_verified(bound_review_context, with_receipts((review, second)))
+    assert not profile_input_receipt_verified(bound_review_context, with_receipts((review, second, {**verify, "prompt_write_status": "prepared"})))
+
+
 def test_legacy_source_record_keeps_its_wire_shape(pinned_evidence):
     _, _, context, _ = pinned_evidence
     record = EvidenceRecord(

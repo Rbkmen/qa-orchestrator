@@ -183,6 +183,30 @@ def test_recall_guidance_respects_profile_output_boundaries(tmp_path):
     assert "Test Analyzer uses two passes for test-coverage recall" in canonical_rules
 
 
+def test_finding_routes_enable_independent_cycle_by_default(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    for profile in set(ReviewAgent) - {ReviewAgent.CODE_EXPLORER, ReviewAgent.PR_TEST_ANALYZER}:
+        constraints = " ".join(service.prepare_review_route(profile).constraints)
+        assert "independent second review" in constraints
+        assert "independent verifier" in constraints
+    rules = " ".join((Path(__file__).parents[1] / "client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md").read_text().split())
+    assert "independent second review" in rules
+    assert "independent verifier" in rules
+
+
+def test_review_routes_and_host_rules_require_targeted_second_look(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    for profile in ReviewAgent:
+        constraints = " ".join(service.prepare_review_route(profile).constraints)
+        assert "revisit uninspected changed paths and diff hunks" in constraints
+        assert "Preserve earlier candidates" in constraints
+    rules = " ".join((Path(__file__).parents[1] / "client-rules/generic/QA_ORCHESTRATOR_INSTRUCTIONS.md").read_text().split())
+    assert "revisit uninspected changed paths and diff hunks" in rules
+    assert "preserve earlier candidates" in rules
+    assert "Check the stated consequence separately" in rules
+    assert "dependency or runtime behavior" in rules
+
+
 def test_evidence_investigator_and_code_reviewer_have_distinct_outputs(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
     evidence_route = service.prepare_review_route(ReviewAgent.CODE_EXPLORER)

@@ -38,6 +38,88 @@ def test_prior_review_history_prompt_keeps_dispositions_as_context(executor_inpu
     assert "does not itself confirm a defect" in instruction
 
 
+async def test_codex_cycle_runs_two_reviews_and_independent_verifier(executor_input, review_finding_candidate):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.codex_review_cycle import CodexReviewCycle
+
+    packet, job, script = executor_input
+    candidate = review_finding_candidate.model_dump(mode="json")
+    script.write_text("""import json,sys,pathlib
+a=sys.argv
+schema=json.loads(pathlib.Path(a[a.index('--output-schema')+1]).read_text())
+prompt=sys.stdin.read()
+out=pathlib.Path(a[a.index('--output-last-message')+1])
+if 'verdicts' in schema['properties']:
+    assert 'Candidate' in prompt
+    result={'verdicts':[{'candidate_key':'first:F-01','verdict':'uncertain','rationale':'Needs a guard.','evidence_refs':['E1']}]}
+else:
+    candidate=json.loads(%r)
+    result={'profile':'python_reviewer','scope':'Inspected packet','finding_candidates':[] if 'second independent pass' in prompt else [candidate], 'reviewed_changed_paths':['src/service.py'], 'coverage_gaps':[], 'unverified':[], 'evidence_map':[]}
+out.write_text(json.dumps(result))
+print(json.dumps({'type':'turn.completed','usage':{'input_tokens':12,'output_tokens':5}}))
+""" % json.dumps(candidate))  # noqa: UP031
+    executor = CodexProfileExecutor(packet, command=(sys.executable, str(script)), model="test")
+    cycle = CodexReviewCycle(executor)
+    result = await cycle.run(job)
+    assert result.second_look_status == "completed"
+    assert result.verification_status == "completed"
+    assert result.verdicts[0].candidate_key == "first:F-01"
+    assert result.verdicts[0].verdict == "uncertain"
+    assert len(cycle.observations) == 3
+    assert all(item.prompt_write_status == "written" for item in cycle.observations)
+    combined = await cycle(job)
+    assert combined.finding_candidates[0].candidate_id == "F-01"
+    assert combined.context_selection is None
+    assert any("uncertain for F-01" in item.text for item in combined.unverified)
+    assert any("receipts" in item.text for item in combined.coverage_gaps)
+
+
+async def test_codex_cycle_records_each_handoff_when_selections_match(
+    executor_input, make_profile_review_report, monkeypatch,
+):
+    from datetime import UTC, datetime
+
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.codex_review_cycle import CodexReviewCycle
+    from qa_orchestrator.contracts import (
+        ProfileAttemptMetrics,
+        ProfileAttemptObservation,
+        ProfileExecutionMetrics,
+    )
+    from qa_orchestrator.evidence import profile_input_receipt_verified
+
+    packet, job, script = executor_input
+    context = job.session.review_context
+    profile_report = make_profile_review_report(job.profile, context=context)
+    async def fake_review(self, review_job):
+        selection = profile_report.context_selection
+        if any("second independent pass" in item for item in review_job.route.constraints):
+            selection = selection.model_copy(update={"max_bytes": selection.max_bytes + 1})
+        obs = review_job.observation
+        obs.submitted_prompt_sha256 = "9" * 64
+        obs.prompt_write_status = "written"
+        obs.source_packet_sha256 = selection.source_packet_sha256
+        obs.selected_packet_sha256 = selection.selected_packet_sha256
+        obs.included_evidence_refs = selection.included_refs
+        obs.omitted_evidence_refs = selection.omitted_refs
+        return profile_report.model_copy(update={"context_selection": selection})
+    monkeypatch.setattr(CodexProfileExecutor, "__call__", fake_review)
+    cycle = CodexReviewCycle(CodexProfileExecutor(packet, command=(sys.executable, str(script))))
+    observation = ProfileAttemptObservation()
+    combined = await cycle(replace(job, observation=observation))
+    assert combined.context_selection == profile_report.context_selection
+    assert [receipt.stage for receipt in observation.review_cycle_receipts] == ["review", "second_look"]
+    assert all(receipt.prompt_write_status == "written" for receipt in observation.review_cycle_receipts)
+    assert not any("receipts" in item.text for item in combined.coverage_gaps)
+    now = datetime.now(UTC)
+    attempt = ProfileAttemptMetrics(**observation.model_dump(), profile=job.profile, attempt=1,
+        outcome="completed", review_head_sha=context.head_sha, review_diff_sha256=context.diff_sha256,
+        started_at=now, completed_at=now, queue_seconds=0, executor_seconds=0)
+    completed = combined.model_copy(update={"execution_metrics": ProfileExecutionMetrics(
+        started_at=now, completed_at=now, attempts=(attempt,))})
+    assert profile_input_receipt_verified(context, completed)
+
+
 def test_prior_review_history_prompt_is_empty_without_history(executor_input):
     from qa_orchestrator.codex_executor import prior_review_history_instruction
 

@@ -12,6 +12,14 @@ result = await adapter.run_primary_review(run_id, execute_profile, assess_risk)
 
 `execute_profile(job)` is the host's async integration with its model/worker runtime. It receives `job.profile`, `job.route`, a session snapshot containing the bound context and model policy, `job.previous_reports`, and `job.attempt`. It must use the host's Evidence Packet and return `ProfileReviewReport`. The host must enforce the read-only worker boundary and gather provider usage; the adapter does not configure provider speed or acquire model credentials. Nothing is installed into an existing Codex/Claude session automatically.
 
+## Independent review cycle
+
+`qa_orchestrator.review_cycle.ReviewCycle` executes a host-provided review, a separate second look focused on paths and hunks not attested by the first pass, and a separate verifier when candidates exist. Both reports and per-candidate advisory verdicts are retained; failures leave findings available and uncertain. A verifier verdict is not a final host decision. The host remains responsible for linking candidates, checking evidence and reporting any incomplete stage.
+
+When `HostReviewAdapter.run_primary_review` receives a `CodexProfileExecutor`, it automatically runs `CodexReviewCycle` for finding-producing profiles. The evidence investigator and test analyzer retain their existing roles. Other host-provided executors are not wrapped: MCP hosts follow the canonical host instructions to run independent passes. For explicit access, `await CodexReviewCycle(executor).run(job)` returns the two reports and advisory verdicts. Each call has a separate observation; use one cycle object per job.
+
+The combined report retains both passes and advisory verdicts. When both review passes receive the same selected packet and every necessary prompt handoff is recorded, the attempt retains each stage's receipt; these attest local delivery, not reasoning. A failed pass, incomplete verification, differing packet selections, missing receipt, or verifier references outside the selected packet leaves an explicit gap and prevents a complete input receipt. The verifier receives the bound packet; it fails closed if the input exceeds the CLI budget. The host still validates candidates and performs synthesis. The existing profile timeout applies to the entire cycle, including all model calls.
+
 Python integrations starting an `ordinary_review` or `widget_review` should call
 `service.start_qa_orchestration(task_type, context, require_review_preflight=True)`.
 This applies the same context and manifest-v2 checks as the MCP endpoint. The
