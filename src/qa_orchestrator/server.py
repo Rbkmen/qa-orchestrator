@@ -254,22 +254,9 @@ def build_server(service: OrchestratorService) -> FastMCP:
         - Expired sessions are purged and retained terminal sessions may be evicted. If capacity can
           only be freed by removing an active session, the call returns a `session limit` error.
         """
-        if task_type in {"ordinary_review", "widget_review"}:
-            if review_context is None:
-                raise ValueError(
-                    "ordinary_review and widget_review require a bound review_context before start: exact "
-                    "base_sha and head_sha, diff_sha256, evidence_packet_sha256, changed_files, evidence_refs, "
-                    "and input_manifest.schema_version=2"
-                )
-            if (
-                review_context.input_manifest is None
-                or review_context.input_manifest.schema_version != 2
-            ):
-                raise ValueError(
-                    "code review requires input_manifest.schema_version=2 with source_inventory_status "
-                    "and source_conflict_status"
-                )
-        return service.start_qa_orchestration(task_type, review_context)
+        return service.start_qa_orchestration(
+            task_type, review_context, require_review_preflight=True
+        )
 
     @mcp.tool(title="Record QA step result", annotations=STATE_TOOL_ANNOTATIONS)
     def advance_qa_orchestration(

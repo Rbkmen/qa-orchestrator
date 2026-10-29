@@ -2,7 +2,7 @@ import pytest
 
 import qa_orchestrator.orchestration as orchestration_module
 from qa_orchestrator.config import Settings
-from qa_orchestrator.contracts import ReviewAgent, ReviewBundle
+from qa_orchestrator.contracts import ReviewAgent, ReviewBundle, ReviewContext
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
     DeepReviewSignals,
@@ -11,6 +11,28 @@ from qa_orchestrator.orchestration import (
 )
 from qa_orchestrator.review_profiles import REVIEW_BUNDLES, bundle_execution_groups
 from qa_orchestrator.service import OrchestratorService
+
+
+@pytest.mark.parametrize("task_type", ["ordinary_review", "widget_review"])
+def test_service_preflight_opt_in_and_legacy_compatibility(tmp_path, bound_review_context, task_type):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    with pytest.raises(ValueError, match="require a bound review_context"):
+        service.start_qa_orchestration(task_type, require_review_preflight=True)
+    with pytest.raises(ValueError, match="input_manifest.schema_version=2"):
+        service.start_qa_orchestration(
+            task_type, bound_review_context, require_review_preflight=True
+        )
+    context = bound_review_context.model_dump()
+    context["input_manifest"].update({
+        "schema_version": 2,
+        "source_inventory_status": "complete",
+        "source_conflict_status": "clear",
+    })
+    valid = ReviewContext.model_validate(context)
+    assert service.start_qa_orchestration(
+        task_type, valid, require_review_preflight=True
+    ).review_completion_mode == "strict"
+    assert service.start_qa_orchestration(task_type).review_completion_mode == "legacy"
 
 
 @pytest.mark.parametrize("profile", [ReviewAgent.PR_TEST_ANALYZER, ReviewAgent.CODE_EXPLORER])

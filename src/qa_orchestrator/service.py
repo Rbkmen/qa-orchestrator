@@ -108,7 +108,25 @@ class OrchestratorService:
         self,
         task_type: QaTaskType,
         review_context: ReviewContext | None = None,
+        *,
+        require_review_preflight: bool = False,
     ) -> QaOrchestrationSession:
+        """Start a session; Python callers may explicitly require the MCP preflight contract.
+
+        The default preserves the legacy Python API. The MCP endpoint always opts in.
+        """
+        if require_review_preflight and task_type in {"ordinary_review", "widget_review"}:
+            if review_context is None:
+                raise ValueError(
+                    "ordinary_review and widget_review require a bound review_context before start: exact "
+                    "base_sha and head_sha, diff_sha256, evidence_packet_sha256, changed_files, evidence_refs, "
+                    "and input_manifest.schema_version=2"
+                )
+            if review_context.input_manifest is None or review_context.input_manifest.schema_version != 2:
+                raise ValueError(
+                    "code review requires input_manifest.schema_version=2 with source_inventory_status "
+                    "and source_conflict_status"
+                )
         return self.orchestrator.start(task_type, review_context)
 
     def advance_qa_orchestration(

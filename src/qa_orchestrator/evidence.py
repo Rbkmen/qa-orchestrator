@@ -30,6 +30,7 @@ from qa_orchestrator.contracts import (
     review_changed_paths_sha256,
     review_diff_hunk_inventory_sha256,
 )
+from qa_orchestrator.git_evidence import _diff, _git, _is_text_source, _source_bytes, _source_lines
 
 _DISCOVERY_MAX_SYMBOLS = 128
 _DISCOVERY_MAX_TRACKED_PATHS = 200_000
@@ -248,47 +249,6 @@ _TEST_DEPENDENCY_MANIFESTS = {
     ".rs": {"Cargo.toml", "Cargo.lock"},
     ".java": {"pom.xml", "build.gradle", "build.gradle.kts"},
 }
-
-
-def _git(repository: Path, *args: str) -> bytes:
-    result = subprocess.run(["git", "-C", str(repository), *args], capture_output=True, check=False)
-    if result.returncode:
-        raise ValueError("pinned evidence object is unavailable in the local repository")
-    return result.stdout
-
-
-def _diff(context: ReviewContext, repository: Path) -> bytes:
-    for revision in (context.base_sha, context.head_sha):
-        if _git(repository, "cat-file", "-t", revision).strip() != b"commit":
-            raise ValueError("bound revisions must identify commits")
-    data = _git(
-        repository,
-        "diff",
-        "--binary",
-        "--no-ext-diff",
-        "--no-textconv",
-        context.base_sha,
-        context.head_sha,
-        "--",
-    )
-    if hashlib.sha256(data).hexdigest() != context.diff_sha256:
-        raise ValueError("local diff does not match the bound diff hash")
-    changed = _git(
-        repository,
-        "diff",
-        "--name-only",
-        "-z",
-        context.base_sha,
-        context.head_sha,
-        "--",
-    )
-    try:
-        changed_paths = {path.decode("utf-8") for path in changed.split(b"\0") if path}
-    except UnicodeDecodeError as exc:
-        raise ValueError("changed file paths must be valid UTF-8") from exc
-    if changed_paths != set(context.changed_files):
-        raise ValueError("bound changed_files do not match the pinned diff paths")
-    return data
 
 
 def _patch_path(raw_path: bytes) -> str | None:
@@ -549,30 +509,6 @@ def _diff_relationship_terms(
     return tuple(selected), len(ordered_terms) - len(selected)
 
 
-def _added_diff_relationship_terms(
-    diff: bytes, referenced_symbols: set[str]
-) -> tuple[str, ...]:
-    """Return changed calls, type references, and domain fields as search anchors."""
-    return _diff_relationship_terms(
-        diff,
-        referenced_symbols,
-        change_marker="+",
-        path_marker="+++ b/",
-    )[0]
-
-
-def _removed_diff_relationship_terms(
-    diff: bytes, referenced_symbols: set[str]
-) -> tuple[str, ...]:
-    """Return removed calls, type references, and domain fields as search anchors."""
-    return _diff_relationship_terms(
-        diff,
-        referenced_symbols,
-        change_marker="-",
-        path_marker="--- a/",
-    )[0]
-
-
 def _candidate_route_terms(source: bytes) -> tuple[str, ...]:
     try:
         text = source.decode("utf-8")
@@ -679,32 +615,6 @@ def _relationship_expandable_source(path: str) -> bool:
         PurePosixPath(path).suffix.lower() in _RELATIONSHIP_SOURCE_SUFFIXES
         and not _TEST_PATH.search(path)
     )
-
-
-def _source_bytes(entry: EvidenceRecord, repository: Path) -> bytes:
-    if _git(repository, "cat-file", "-t", f"{entry.revision}:{entry.path}").strip() != b"blob":
-        raise ValueError("source evidence must identify a file blob")
-    data = _git(repository, "show", f"{entry.revision}:{entry.path}")
-    if entry.start_line is None:
-        return data
-    lines = _source_lines(data)
-    end_line = entry.end_line or entry.start_line
-    if end_line > len(lines):
-        raise ValueError(f"evidence source line range is out of bounds: {entry.evidence_ref}")
-    return b"".join(lines[entry.start_line - 1 : end_line])
-
-
-def _source_lines(data: bytes) -> list[bytes]:
-    parts = data.split(b"\n")
-    return [part + b"\n" for part in parts[:-1]] + ([parts[-1]] if parts[-1] else [])
-
-
-def _is_text_source(data: bytes) -> bool:
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
-        return False
-    return "\x00" not in text
 
 
 def register_evidence(

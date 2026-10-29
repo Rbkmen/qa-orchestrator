@@ -49,8 +49,8 @@ index 0000000..1111111 100644
 +    return this.fetch({ query, lang: language as Locale, volume_24h: market.volume_24h, _options });
 """
 
-    terms = evidence_module._added_diff_relationship_terms(
-        diff, {"Locale", "URLSearchParams"}
+    terms, _ = evidence_module._diff_relationship_terms(
+        diff, {"Locale", "URLSearchParams"}, change_marker="+", path_marker="+++ b/"
     )
 
     assert "Locale" in terms
@@ -70,7 +70,9 @@ index 0000000..1111111 100644
 +    const volume_24h = market.volume_24h as Locale;
 """
 
-    assert evidence_module._added_diff_relationship_terms(diff, {"Locale"}) == ()
+    assert evidence_module._diff_relationship_terms(
+        diff, {"Locale"}, change_marker="+", path_marker="+++ b/"
+    )[0] == ()
 
     e2e_diff = b"""diff --git a/tests-e2e/consumer/download-helper.ts b/tests-e2e/consumer/download-helper.ts
 index 0000000..1111111 100644
@@ -79,7 +81,9 @@ index 0000000..1111111 100644
 @@ -20,1 +20,2 @@
 +    const volume_24h = market.volume_24h as Locale;
 """
-    assert evidence_module._added_diff_relationship_terms(e2e_diff, {"Locale"}) == ()
+    assert evidence_module._diff_relationship_terms(
+        e2e_diff, {"Locale"}, change_marker="+", path_marker="+++ b/"
+    )[0] == ()
 
     removed_test_diff = (
         b"diff --git a/tests-e2e/api/download.test.ts b/tests-e2e/api/download.test.ts\n"
@@ -88,7 +92,9 @@ index 0000000..1111111 100644
         b"@@ -20,1 +20,0 @@\n"
         b"-    const removed_audit_row_id = parseAuditRecord(payload);\n"
     )
-    assert evidence_module._removed_diff_relationship_terms(removed_test_diff, set()) == ()
+    assert evidence_module._diff_relationship_terms(
+        removed_test_diff, set(), change_marker="-", path_marker="--- a/"
+    )[0] == ()
 
 
 def test_discovery_uses_removed_diff_anchors_to_find_remaining_consumers(tmp_path):

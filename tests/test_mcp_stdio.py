@@ -50,10 +50,11 @@ async def test_stdio_bound_review_survives_restart(
             "task_type": "ordinary_review", "review_context": context.model_dump(mode="json"),
         })
         run_id = started.structured_content["run_id"]
-        await client.call_tool("advance_qa_orchestration", {
+        triage_request = {
             "run_id": run_id, "completed_step": "triage", "status": "completed",
-            "selected_profile": "code_reviewer",
-        })
+            "selected_profile": "code_reviewer", "request_id": "triage-1", "expected_revision": 0,
+        }
+        await client.call_tool("advance_qa_orchestration", triage_request)
         advanced = await client.call_tool("advance_qa_orchestration", {
             "run_id": run_id, "completed_step": "primary_review", "status": "completed",
             "completed_profile": "code_reviewer", "profile_reports": [profile.model_dump(mode="json")],
@@ -65,6 +66,11 @@ async def test_stdio_bound_review_survives_restart(
         recovered = await client.call_tool("get_qa_orchestration", {"run_id": run_id})
         assert recovered.structured_content["current_step"] == "synthesis"
         assert recovered.structured_content["profile_reports"][0]["profile"] == "code_reviewer"
+        # Simulate a lost triage response: replay the exact request after restart and
+        # verify that it neither reapplies the transition nor discards later progress.
+        replayed = await client.call_tool("advance_qa_orchestration", triage_request)
+        assert replayed.structured_content["revision"] == recovered.structured_content["revision"]
+        assert replayed.structured_content["current_step"] == "synthesis"
         await client.call_tool("advance_qa_orchestration", {
             "run_id": run_id, "completed_step": "synthesis", "status": "completed",
         })

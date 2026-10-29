@@ -10,7 +10,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from qa_orchestrator.contracts import EvidenceRecord, ReviewAgent, ReviewContext
-from qa_orchestrator.evidence import _diff, _git, _is_text_source, _source_lines
+from qa_orchestrator.git_evidence import _diff, _git, _is_text_source, _source_lines
 
 MAX_CONTEXT_PACKET_BYTES = 2_000_000
 
