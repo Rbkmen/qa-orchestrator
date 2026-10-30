@@ -115,6 +115,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
         The repository path is on the server host. This compares the resolved commits directly;
         choose the merge base explicitly when a merge-base comparison is required. It does not
         fetch refs, inspect uncommitted changes, or construct the evidence packet.
+        Unresolvable refs fail; both refs must resolve to different commits with a nonempty diff.
         """
         return resolve_git_input(Path(repository), base, head)
 
@@ -170,8 +171,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
         response is unavailable. In a session, the triage advance response includes the selected
         checklists and execution_groups. Run execution_groups in order;
         profiles in one group are independent and may run concurrently when the host supports it.
-        After every profile in the group finishes, record the complete group once in bundle order
-        with completed_profiles. Older hosts may continue using completed_profile one at a time.
+        For session transitions, follow advance_qa_orchestration's group-reporting rules.
         For a single profile, use prepare_qa_orchestration.
         This stateless lookup reads bundled definitions; it does not execute reviews, create a
         session, or call models.
@@ -486,9 +486,11 @@ def build_server(service: OrchestratorService) -> FastMCP:
     ) -> QaOrchestrationSession:
         """Extend an active session's TTL while host review work is running.
 
-        Renew before expires_at. This changes only the lease, without advancing a profile or
-        workflow revision. Active primary/deep/synthesis and awaiting-host-outcome sessions may be
-        renewed; terminal or expired sessions cannot be revived. No worker or model is launched.
+        Pass the retained run_id and, optionally, the latest session revision as expected_revision;
+        a stale revision fails without renewing. Before expires_at, active primary/deep/synthesis and
+        awaiting-host-outcome sessions may be renewed. Terminal or expired sessions cannot be revived.
+        Only the lease changes: no workflow revision advances and no worker or model is launched.
+        Use advance_qa_orchestration to record progress and finish_qa_orchestration for the outcome.
         """
         return service.renew_qa_orchestration(run_id, expected_revision)
 
@@ -587,16 +589,14 @@ def build_server(service: OrchestratorService) -> FastMCP:
         status.
 
         - A completed review-bound session requires `final_review_report`.
-        - Structured reports survive a restart only when the same session store is configured;
-          otherwise they are in-memory only. They remain until TTL expiry, capacity eviction, or
-          explicit deletion.
+        - Structured reports survive a restart only with the same configured session store;
+          otherwise they are in-memory only. Legacy finalized sessions without review artifacts
+          are removed at restart.
         - Same outcome: returns the retained terminal session.
         - Different outcome: `conflicting final outcome`; status unchanged.
         - Premature call: `outcome is not ready`.
-        Finalized sessions with review artifacts can be restored from the configured store and
-        expire at configured TTL (1800s default), or are removed by eviction or explicit deletion.
-        Legacy finalized sessions without review artifacts are removed at restart. Removed run_ids
-        cannot be deduplicated.
+        Retained sessions expire at the configured TTL (1800s default), or are removed by eviction
+        or explicit deletion. Removed run_ids cannot be deduplicated.
         """
         return service.finish_qa_orchestration(
             outcome=outcome,
