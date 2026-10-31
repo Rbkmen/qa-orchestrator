@@ -6,8 +6,11 @@ from qa_orchestrator.contracts import ReviewAgent, ReviewBundle, ReviewContext
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
     DeepReviewSignals,
+    OrchestrationError,
     OrchestrationStatus,
     OrchestrationStep,
+    QaOrchestrationSession,
+    execution_groups_for_session,
 )
 from qa_orchestrator.review_profiles import REVIEW_BUNDLES, bundle_execution_groups
 from qa_orchestrator.service import OrchestratorService
@@ -264,6 +267,49 @@ def test_service_replay_returns_routes_persisted_by_older_triage_resolver(tmp_pa
     assert replay.revision == restored.revision == first.revision
     assert [route.profile for route in replay.selected_review_routes.routes] == replay.review_profiles
     assert replay.selected_review_routes.execution_groups == [[ReviewAgent.PYTHON_REVIEWER]]
+
+
+def test_bundle_schedule_survives_restart_and_definition_change(tmp_path, monkeypatch):
+    settings = Settings(data_dir=tmp_path, orchestration_session_store_path=tmp_path / "sessions.sqlite3")
+    service = OrchestratorService(settings)
+    started = service.start_qa_orchestration("ordinary_review")
+    request = AdvanceQaOrchestrationRequest(
+        run_id=started.run_id, completed_step="triage", status="completed",
+        selected_bundle=ReviewBundle.ORDINARY_MR, request_id="triage", expected_revision=0,
+    )
+    selected = service.advance_qa_orchestration(request)
+    original_groups = selected.selected_review_routes.execution_groups
+    profiles = selected.review_profiles
+    monkeypatch.setattr(orchestration_module, "bundle_execution_groups", lambda _: (
+        (profiles[1],), (profiles[0],), *((profile,) for profile in profiles[2:]),
+    ))
+    restored = OrchestratorService(settings)
+    replay = restored.advance_qa_orchestration(request)
+    assert replay.selected_review_routes.execution_groups == original_groups
+    assert replay.review_profiles == profiles
+    with pytest.raises(OrchestrationError, match="next execution group"):
+        restored.advance_qa_orchestration(AdvanceQaOrchestrationRequest(
+            run_id=started.run_id, completed_step="primary_review", status="completed",
+            completed_profiles=[profiles[1]],
+        ))
+    progress = restored.advance_qa_orchestration(AdvanceQaOrchestrationRequest(
+        run_id=started.run_id, completed_step="primary_review", status="completed",
+        completed_profiles=original_groups[0],
+    ))
+    assert progress.completed_profiles == original_groups[0]
+    assert progress.current_profile == profiles[len(original_groups[0])]
+
+
+def test_legacy_session_without_saved_groups_resumes_sequentially(tmp_path):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("other")
+    selected = service.advance_qa_orchestration(AdvanceQaOrchestrationRequest(
+        run_id=started.run_id, completed_step="triage", status="completed",
+        selected_bundle=ReviewBundle.PYTHON_BACKEND,
+    ))
+    payload = selected.model_dump(exclude={"selected_review_routes", "route_warning", "review_execution_groups"})
+    legacy = QaOrchestrationSession.model_validate(payload)
+    assert execution_groups_for_session(legacy) == [[profile] for profile in legacy.review_profiles]
 
 
 @pytest.mark.parametrize("implementation_review", [None, False])

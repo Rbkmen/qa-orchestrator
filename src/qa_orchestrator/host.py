@@ -46,6 +46,7 @@ from qa_orchestrator.orchestration import (
     OrchestrationStep,
     QaOrchestrationSession,
     StageModelPolicy,
+    execution_groups_for_session,
     validate_final_report_profile_links,
     validate_final_report_verification_records,
 )
@@ -266,6 +267,7 @@ class HostReviewAdapter:
         cycle_enabled = isinstance(executor, CodexProfileExecutor) and profile not in {
             ReviewAgent.CODE_EXPLORER, ReviewAgent.PR_TEST_ANALYZER,
         }
+        previous_report_projection = getattr(executor, "checkpoint_previous_report_projection", None)
         if cycle_enabled:
             executor = CodexReviewCycle(
                 executor, stage_timeout_seconds=self.policy.profile_timeout_seconds
@@ -284,9 +286,7 @@ class HostReviewAdapter:
                     session.profile_reports,
                     self.executor_identity + ":review-cycle-v2" if cycle_enabled
                     else self.executor_identity,
-                    previous_report_projection=getattr(
-                        executor, "checkpoint_previous_report_projection", None
-                    ),
+                    previous_report_projection=previous_report_projection,
                 )
                 cached = self.checkpoint_store.load(key)
                 if cached is not None and (
@@ -490,12 +490,9 @@ class HostReviewAdapter:
             raise ValueError("host adapter requires an active review-bound primary review")
         if self.evidence_verifier is not None:
             self.evidence_verifier(session.review_context)
-        if session.selected_bundle is not None:
-            groups = self.service.prepare_review_bundle(session.selected_bundle).execution_groups
-        else:
-            if session.selected_profile is None or not session.review_profiles:
-                raise ValueError("host adapter requires a scheduled profile route or bundle")
-            groups = [[profile] for profile in session.review_profiles]
+        if session.selected_profile is None or not session.review_profiles:
+            raise ValueError("host adapter requires a scheduled profile route or bundle")
+        groups = execution_groups_for_session(session)
         semaphore = asyncio.Semaphore(self.policy.max_concurrency)
         unsaved: tuple[ProfileReviewReport, ...] = ()
         failures: tuple[HostProfileFailure, ...] = ()

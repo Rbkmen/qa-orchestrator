@@ -145,6 +145,60 @@ async def test_host_automatically_uses_cycle_for_finding_codex_profiles(
     assert calls == (["cycle"] if expected_cycle else ["single"])
 
 
+async def test_codex_cycle_checkpoint_uses_executor_projection(host_session, tmp_path, monkeypatch):
+    import qa_orchestrator.host as host_module
+    from qa_orchestrator.checkpoints import ProfileCheckpointStore
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+    from qa_orchestrator.codex_review_cycle import CodexReviewCycle
+
+    service, run_id = host_session(bundle="ordinary_mr")
+    seen = {}
+    real_key = host_module.checkpoint_key
+
+    def capture_key(context, route, policy, previous, identity, *, previous_report_projection):
+        seen[route.profile] = previous_report_projection
+        return real_key(context, route, policy, previous, identity,
+                        previous_report_projection=previous_report_projection)
+
+    async def execute(self, job):
+        return report(job.profile, job.session.review_context)
+
+    monkeypatch.setattr(host_module, "checkpoint_key", capture_key)
+    monkeypatch.setattr(CodexReviewCycle, "__call__", execute)
+    monkeypatch.setattr(CodexProfileExecutor, "__call__", execute)
+    executor = CodexProfileExecutor(tmp_path / "packet", model="test")
+    result = await HostReviewAdapter(
+        service, checkpoint_store=ProfileCheckpointStore(tmp_path / "checkpoints.sqlite"),
+        executor_identity="fixture-v1",
+    ).run_primary_review(run_id, executor, lambda _: DeepReviewSignals())
+
+    assert not result.failures
+    assert seen[ReviewAgent.CODE_REVIEWER] == executor.checkpoint_previous_report_projection
+
+
+async def test_host_uses_saved_bundle_groups_after_definition_change(host_session, monkeypatch):
+    import qa_orchestrator.orchestration as orchestration_module
+
+    service, run_id = host_session(bundle="ordinary_mr")
+    saved = service.get_qa_orchestration(run_id)
+    profiles = saved.review_profiles
+    monkeypatch.setattr(orchestration_module, "bundle_execution_groups", lambda _: (
+        (profiles[1],), (profiles[0],), *((profile,) for profile in profiles[2:]),
+    ))
+    seen = []
+
+    async def execute(job):
+        seen.append(job.profile)
+        return report(job.profile, job.session.review_context)
+
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, execute, lambda _: DeepReviewSignals(),
+    )
+    assert not result.failures
+    assert seen == profiles
+    assert result.session.completed_profiles == profiles
+
+
 async def test_synthesis_replay_rejects_a_report_for_another_profile(
     host_session, make_final_review_report,
 ):

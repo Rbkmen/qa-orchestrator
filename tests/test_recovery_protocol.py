@@ -133,14 +133,18 @@ def test_invalid_revision_and_unpaired_retry_keys_are_rejected():
         orchestrator.renew(started.run_id, expected_revision=True)
 
 
-def test_new_finalization_requires_the_expected_revision():
+@pytest.mark.parametrize("outcome", ["partial", "blocked"])
+def test_new_finalization_requires_the_expected_revision(outcome):
     orchestrator = QaOrchestrator(ttl_seconds=60, max_sessions=10)
     started = orchestrator.start("ordinary_review")
-    stopped = orchestrator.advance(run_id=started.run_id, completed_step="triage", status="partial")
+    stopped = orchestrator.advance(run_id=started.run_id, completed_step="triage", status=outcome)
     with pytest.raises(OrchestrationError, match="stale session revision"):
-        orchestrator.finish(run_id=started.run_id, outcome="partial", expected_revision=0)
+        orchestrator.finish(run_id=started.run_id, outcome=outcome, expected_revision=0)
     finished = orchestrator.finish(
-        run_id=started.run_id, outcome="partial", expected_revision=stopped.revision
+        run_id=started.run_id, outcome=outcome, expected_revision=stopped.revision
     )
     assert finished.revision == stopped.revision + 1
-    assert orchestrator.finish(run_id=started.run_id, outcome="partial") == finished
+    assert orchestrator.finish(run_id=started.run_id, outcome=outcome) == finished
+    assert orchestrator.finish(
+        run_id=started.run_id, outcome=outcome, expected_revision=stopped.revision
+    ) == finished

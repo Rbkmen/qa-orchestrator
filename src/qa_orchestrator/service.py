@@ -23,6 +23,7 @@ from qa_orchestrator.orchestration import (
     QaOrchestrationList,
     QaOrchestrationSession,
     QaOrchestrator,
+    execution_groups_for_session,
 )
 from qa_orchestrator.review_profiles import (
     build_review_catalog,
@@ -154,29 +155,22 @@ class OrchestratorService:
         if request.completed_step is OrchestrationStep.TRIAGE and request.status == "completed":
             if request.selected_bundle is not None:
                 batch = self.prepare_review_bundle(request.selected_bundle)
-                selected_review_routes = ReviewRouteSelection(
-                    routes=batch.routes,
-                    execution_groups=batch.execution_groups,
-                )
+                routes = batch.routes
             else:
-                assert request.selected_profile is not None
                 profiles = triage_review_profiles(
                     selected_bundle=None,
                     selected_profile=request.selected_profile,
                     implementation_review=request.implementation_review,
                 )
-                selected_review_routes = ReviewRouteSelection(
-                    routes=[self.prepare_review_route(profile) for profile in profiles],
-                    execution_groups=[[profile] for profile in profiles],
-                )
+                routes = [self.prepare_review_route(profile) for profile in profiles]
         session = self.orchestrator.advance(**request.model_dump())
-        if selected_review_routes is not None and session.selected_bundle is None:
-            prepared_profiles = [route.profile for route in selected_review_routes.routes]
-            if prepared_profiles != session.review_profiles:
-                selected_review_routes = ReviewRouteSelection(
-                    routes=[self.prepare_review_route(profile) for profile in session.review_profiles],
-                    execution_groups=[[profile] for profile in session.review_profiles],
-                )
+        if request.completed_step is OrchestrationStep.TRIAGE and request.status == "completed":
+            if [route.profile for route in routes] != session.review_profiles:
+                routes = [self.prepare_review_route(profile) for profile in session.review_profiles]
+            selected_review_routes = ReviewRouteSelection(
+                routes=routes,
+                execution_groups=execution_groups_for_session(session),
+            )
         return QaOrchestrationAdvanceResult.model_validate(
             {
                 **session.model_dump(),

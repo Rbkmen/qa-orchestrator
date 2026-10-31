@@ -445,6 +445,10 @@ class QaOrchestrationSession(BaseModel):
         description="Legacy preserves restored sessions; new bound sessions require complete inputs and impact coverage.",
     )
     review_profiles: list[ReviewAgent] = Field(default_factory=list)
+    review_execution_groups: list[list[ReviewAgent]] | None = Field(
+        default=None,
+        description="Execution groups fixed at triage; absent on older stored sessions.",
+    )
     current_profile: ReviewAgent | None = None
     completed_profiles: list[ReviewAgent] = Field(default_factory=list)
     stop_reason: str | None = Field(default=None, max_length=2000, description="Host-reported, sanitized reason for an early stop; not independently verified.")
@@ -461,6 +465,12 @@ class QaOrchestrationSession(BaseModel):
 
     @model_validator(mode="after")
     def validate_review_artifacts(self) -> "QaOrchestrationSession":
+        if self.review_execution_groups is not None and (
+            any(not group for group in self.review_execution_groups)
+            or [profile for group in self.review_execution_groups for profile in group]
+            != self.review_profiles
+        ):
+            raise ValueError("execution groups must match the saved review profile order")
         previous_event_sha256 = None
         previous_event_revision = None
         previous_event = None
@@ -884,6 +894,13 @@ _TERMINAL_SESSION_STATUSES = frozenset(
 _TASK_TYPE_ADAPTER = TypeAdapter(QaTaskType)
 
 
+def execution_groups_for_session(session: QaOrchestrationSession) -> list[list[ReviewAgent]]:
+    """Use the saved schedule; older sessions resume one profile at a time."""
+    if session.review_execution_groups is not None:
+        return [list(group) for group in session.review_execution_groups]
+    return [[profile] for profile in session.review_profiles]
+
+
 class QaOrchestrator:
     def __init__(
         self,
@@ -1250,6 +1267,13 @@ class QaOrchestrator:
                 and validated_report is not None
                 and validated_report == session.final_review_report
             )
+            is_finalized_empty_replay = (
+                session.status in _TERMINAL_SESSION_STATUSES
+                and session.status is final_status
+                and session.next_action == _FINALIZED_TERMINAL_ACTIONS[final_status]
+                and validated_report is None
+                and session.final_review_report is None
+            )
             if validated_report is not None:
                 if session.review_context is None:
                     raise OrchestrationError("final review report requires a bound review context")
@@ -1323,7 +1347,7 @@ class QaOrchestrator:
                 )
 
             if (expected_revision is not None and expected_revision != session.revision
-                and not is_idempotent_legacy_replay):
+                and not is_idempotent_legacy_replay and not is_finalized_empty_replay):
                 raise OrchestrationError("stale session revision")
             if (
                 validated_report is not None
@@ -1593,6 +1617,13 @@ class QaOrchestrator:
             )
             if not selected_profiles:
                 raise OrchestrationError("missing profile or bundle after triage")
+            groups = (
+                bundle_execution_groups(request.selected_bundle)
+                if request.selected_bundle is not None
+                else tuple((profile,) for profile in selected_profiles)
+            )
+            if tuple(profile for group in groups for profile in group) != tuple(selected_profiles):
+                raise OrchestrationError("execution groups do not match selected profiles")
             selected_profile = selected_profiles[0]
             return session.model_copy(
                 update={
@@ -1602,6 +1633,7 @@ class QaOrchestrator:
                     "profile_reports": [],
                     "final_review_report": None,
                     "review_profiles": list(selected_profiles),
+                    "review_execution_groups": [list(group) for group in groups],
                     "current_profile": selected_profile,
                     "completed_profiles": [],
                     "deep_assessment": None,
@@ -1621,12 +1653,7 @@ class QaOrchestrator:
             if session.current_profile is not expected_profile:
                 raise OrchestrationError("current profile state is inconsistent")
             if request.completed_profiles is not None:
-                if session.selected_bundle is not None:
-                    groups = bundle_execution_groups(session.selected_bundle)
-                elif session.selected_profile is not None:
-                    groups = tuple((profile,) for profile in session.review_profiles)
-                else:
-                    raise OrchestrationError("missing selected profile for execution group")
+                groups = execution_groups_for_session(session)
 
                 completed_count = len(session.completed_profiles)
                 offset = 0
@@ -1636,7 +1663,7 @@ class QaOrchestrator:
                         expected_group = group[completed_count - offset :]
                         break
                     offset += len(group)
-                if expected_group is None or tuple(request.completed_profiles) != expected_group:
+                if expected_group is None or list(request.completed_profiles) != list(expected_group):
                     raise OrchestrationError("completed profiles do not match next execution group")
                 transition_profiles = list(expected_group)
             else:
