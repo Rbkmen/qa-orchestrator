@@ -8,6 +8,7 @@ import sys
 import tempfile
 from dataclasses import replace
 from pathlib import Path
+from time import perf_counter
 
 from pydantic import ValidationError
 
@@ -19,6 +20,7 @@ from qa_orchestrator.contracts import (
     ProfileReviewReport,
     ReviewAgent,
     ReviewCycleReceipt,
+    ReviewCycleStageObservation,
     ReviewNote,
 )
 from qa_orchestrator.evidence import validate_context_selection
@@ -38,6 +40,7 @@ class CodexReviewCycle:
         self.executor = executor
         self.stage_timeout_seconds = stage_timeout_seconds
         self.observations: list[ProfileAttemptObservation] = []
+        self.stage_observations: list[ReviewCycleStageObservation] = []
         self.last_result = None
         self.completed_passes: list[ProfileReviewReport] = []
         self.report_truncated = False
@@ -191,10 +194,31 @@ class CodexReviewCycle:
             raise ValueError("review cycle requires a finding-producing profile")
         observations: list[ProfileAttemptObservation] = []
         self.completed_passes = []
+        self.stage_observations = []
 
-        async def review(request: ReviewPassRequest):
+        async def observed_stage(stage, operation):
             observation = ProfileAttemptObservation()
             observations.append(observation)
+            started = perf_counter()
+            outcome = "returned"
+            try:
+                return await operation(observation)
+            except asyncio.CancelledError:
+                outcome = "cancelled"
+                raise
+            except Exception:
+                outcome = "failed"
+                raise
+            finally:
+                self.stage_observations.append(ReviewCycleStageObservation(
+                    stage=stage, outcome=outcome, elapsed_seconds=perf_counter() - started,
+                    input_tokens=observation.input_tokens, output_tokens=observation.output_tokens,
+                    cached_input_tokens=observation.cached_input_tokens,
+                    prompt_write_status=observation.prompt_write_status,
+                    submitted_prompt_sha256=observation.submitted_prompt_sha256,
+                ))
+
+        async def review(request: ReviewPassRequest):
             route = job.route
             previous = job.previous_reports
             if request.phase == "second_look":
@@ -207,17 +231,21 @@ class CodexReviewCycle:
                 )
                 route = route.model_copy(update={"constraints": [*route.constraints, instruction]})
                 previous = (*previous, request.prior_report)
-            report = await self.executor(replace(job, route=route, previous_reports=previous,
-                                                 observation=observation))
-            report = ProfileReviewReport.model_validate(report)
-            ReviewCycle._validate_report(job.session.review_context, job.profile, report)
-            self.completed_passes.append(report)
-            return report
+            async def execute(observation):
+                report = await self.executor(replace(job, route=route, previous_reports=previous,
+                                                     observation=observation))
+                report = ProfileReviewReport.model_validate(report)
+                ReviewCycle._validate_report(job.session.review_context, job.profile, report)
+                self.completed_passes.append(report)
+                return report
+
+            return await observed_stage(request.phase, execute)
 
         async def verify(request: VerificationRequest):
-            observation = ProfileAttemptObservation()
-            observations.append(observation)
-            return await self._verify(job, request, observation)
+            async def execute(observation):
+                return await self._verify(job, request, observation)
+
+            return await observed_stage("verify", execute)
 
         try:
             return await ReviewCycle(review, verify, self.stage_timeout_seconds).run(

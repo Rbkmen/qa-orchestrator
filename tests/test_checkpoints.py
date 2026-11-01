@@ -20,6 +20,11 @@ def test_every_review_input_changes_checkpoint_identity(bound_review_context):
         changed = bound_review_context.model_copy(update={field: value})
         assert checkpoint_key(changed, route, None, (), "v1") != key
     assert checkpoint_key(bound_review_context, route, None, (), "v2") != key
+    assert checkpoint_key(bound_review_context, route, None, (), "v1",
+                          review_profiles=("code_explorer", "code_reviewer")) != checkpoint_key(
+        bound_review_context, route, None, (), "v1",
+        review_profiles=("code_explorer", "security_reviewer"),
+    )
     assert (
         checkpoint_key(
             bound_review_context,

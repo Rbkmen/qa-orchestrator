@@ -1,5 +1,8 @@
 # Local review benchmark
 
+For the single-reviewer versus complete-workflow evaluation, including blind
+adjudication and failure accounting, use [End-to-end quality evaluation](QUALITY_EVALUATION.md).
+
 `qa-orch benchmark` scores pinned review runs using explicit adjudications from the host or a reviewer. It does not launch models or infer a match from wording, location overlap, or confidence. Local scores are development results, not official ReviewBench leaderboard scores.
 
 ## Import a public reference case

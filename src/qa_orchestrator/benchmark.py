@@ -956,7 +956,7 @@ def score_benchmark(
             "recall": sum(r["matched_gold"] for r in rows) / gold_attempt_count
             if not missing_cases
             and gold_attempt_count
-            and all(r["recall"] is not None for r in rows)
+            and all(r["gold_complete"] for r in rows)
             else None,
             "precision_is_lower_bound": any(r["unverified"] for r in rows),
             "missed_high_impact": sum(r["missed_high_impact"] for r in rows),

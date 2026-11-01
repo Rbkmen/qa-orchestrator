@@ -711,6 +711,28 @@ class ReviewCycleReceipt(BaseModel):
     omitted_evidence_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=1000)
 
 
+class ReviewCycleStageObservation(BaseModel):
+    """Observed execution of one cycle stage; usage is not an inferred total."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    stage: Literal["review", "second_look", "verify"]
+    outcome: Literal["returned", "failed", "cancelled"]
+    elapsed_seconds: float = Field(ge=0, allow_inf_nan=False)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    cached_input_tokens: int | None = Field(default=None, ge=0)
+    prompt_write_status: Literal["prepared", "written"] | None = None
+    submitted_prompt_sha256: Sha256Digest | None = None
+
+    @model_validator(mode="after")
+    def validate_usage(self) -> "ReviewCycleStageObservation":
+        if (self.cached_input_tokens is not None and self.input_tokens is not None
+                and self.cached_input_tokens > self.input_tokens):
+            raise ValueError("cached input cannot exceed total input tokens")
+        return self
+
+
 class ProfileAttemptObservation(BaseModel):
     """Executor-supplied observations, including usage available before failure."""
 
@@ -738,6 +760,7 @@ class ProfileAttemptObservation(BaseModel):
     cli_exit_code: int | None = Field(default=None, ge=-255, le=255)
     cli_event_type: Literal["error", "turn.failed"] | None = None
     review_cycle_receipts: tuple[ReviewCycleReceipt, ...] = Field(default=(), max_length=3)
+    review_cycle_stages: tuple[ReviewCycleStageObservation, ...] = Field(default=(), max_length=3)
 
     @field_validator("cli_failure_detail")
     @classmethod
@@ -773,12 +796,17 @@ class ProfileAttemptMetrics(ProfileAttemptObservation):
                 payload.pop(field, None)
         if not self.review_cycle_receipts:
             payload.pop("review_cycle_receipts", None)
+        if not self.review_cycle_stages:
+            payload.pop("review_cycle_stages", None)
         return payload
 
     @model_validator(mode="after")
     def validate_interval(self) -> "ProfileAttemptMetrics":
         if self.completed_at < self.started_at:
             raise ValueError("completed_at must be at or after started_at")
+        stages = tuple(item.stage for item in self.review_cycle_stages)
+        if stages != ("review", "second_look", "verify")[:len(stages)]:
+            raise ValueError("review cycle stages must be in execution order")
         if (
             self.cached_input_tokens is not None and self.input_tokens is not None
             and self.cached_input_tokens > self.input_tokens

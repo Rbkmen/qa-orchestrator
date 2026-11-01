@@ -155,10 +155,12 @@ async def test_codex_cycle_checkpoint_uses_executor_projection(host_session, tmp
     seen = {}
     real_key = host_module.checkpoint_key
 
-    def capture_key(context, route, policy, previous, identity, *, previous_report_projection):
+    def capture_key(context, route, policy, previous, identity, *, previous_report_projection,
+                    review_profiles):
         seen[route.profile] = previous_report_projection
         return real_key(context, route, policy, previous, identity,
-                        previous_report_projection=previous_report_projection)
+                        previous_report_projection=previous_report_projection,
+                        review_profiles=review_profiles)
 
     async def execute(self, job):
         return report(job.profile, job.session.review_context)
@@ -758,6 +760,55 @@ async def test_checkpoint_rejects_different_executor_identity(host_session, tmp_
     assert len(called) == 2
 
 
+async def test_checkpoint_write_failure_preserves_completed_report(host_session, tmp_path, monkeypatch):
+    from qa_orchestrator.checkpoints import ProfileCheckpointStore
+
+    service, run_id = host_session(profile="python_reviewer")
+    store = ProfileCheckpointStore(tmp_path / "checkpoints.sqlite")
+
+    def fail_save(*_args):
+        raise OSError("private storage error")
+
+    monkeypatch.setattr(store, "save", fail_save)
+
+    async def execute(job):
+        return report(job.profile, job.session.review_context)
+
+    result = await HostReviewAdapter(
+        service, checkpoint_store=store, executor_identity="fixture-v1"
+    ).run_primary_review(run_id, execute, lambda _: DeepReviewSignals())
+
+    assert result.session.status == "partial"
+    assert result.session.completed_profiles == []
+    assert result.failures[0].reason == "checkpoint_write_failed"
+    assert len(result.unsaved_reports) == 1
+    assert result.unsaved_reports[0].profile is ReviewAgent.PYTHON_REVIEWER
+    assert result.execution_attempts[0].outcome == "completed"
+
+
+async def test_checkpoint_is_not_reused_across_different_bundle_profiles(host_session, tmp_path):
+    from qa_orchestrator.checkpoints import ProfileCheckpointStore
+
+    store = ProfileCheckpointStore(tmp_path / "checkpoints.sqlite")
+    calls = []
+
+    async def execute(job):
+        calls.append(job.profile)
+        return report(job.profile, job.session.review_context)
+
+    results = []
+    for bundle in ("ordinary_mr", "security", "security"):
+        service, run_id = host_session(bundle=bundle)
+        results.append(await HostReviewAdapter(
+            service, checkpoint_store=store, executor_identity="fixture-v1"
+        ).run_primary_review(run_id, execute, lambda _: DeepReviewSignals()))
+
+    assert all(not result.failures for result in results)
+    assert calls.count(ReviewAgent.CODE_EXPLORER) == 2
+    assert ReviewAgent.CODE_EXPLORER not in results[1].reused_profiles
+    assert ReviewAgent.CODE_EXPLORER in results[2].reused_profiles
+
+
 async def test_incomplete_cycle_is_not_reused_from_checkpoint(host_session, tmp_path, monkeypatch):
     from qa_orchestrator.checkpoints import ProfileCheckpointStore
     from qa_orchestrator.codex_executor import CodexProfileExecutor
@@ -985,6 +1036,87 @@ async def test_profile_timeout_is_bounded_and_does_not_complete_a_profile(host_s
     assert result.session.completed_profiles == []
 
 
+async def test_codex_profile_timeout_covers_all_passes_and_retains_first(
+    host_session, tmp_path, monkeypatch,
+):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+
+    service, run_id = host_session(profile="python_reviewer")
+    calls = []
+
+    async def execute(self, job):
+        calls.append(job.attempt)
+        try:
+            await asyncio.sleep(0.08)
+        except asyncio.CancelledError:
+            job.observation.failure_kind = "cancelled"
+            raise
+        if len(calls) == 1:
+            job.observation.input_tokens = 42
+            job.observation.output_tokens = 7
+            return report(job.profile, job.session.review_context)
+        return report(job.profile, job.session.review_context)
+
+    monkeypatch.setattr(CodexProfileExecutor, "__call__", execute)
+    policy = HostExecutionPolicy(profile_timeout_seconds=0.12, run_timeout_seconds=5,
+                                 max_retries=0, retry_delay_seconds=0)
+    result = await HostReviewAdapter(service, policy).run_primary_review(
+        run_id, CodexProfileExecutor(tmp_path / "packet", model="test"),
+        lambda _: DeepReviewSignals(),
+    )
+
+    assert len(calls) == 2
+    assert result.failures[0].reason == "profile_timeout"
+    assert result.execution_attempts[0].failure_kind == "timeout"
+    assert result.execution_attempts[0].input_tokens is None
+    stages = result.execution_attempts[0].review_cycle_stages
+    assert [(stage.stage, stage.outcome) for stage in stages] == [
+        ("review", "returned"), ("second_look", "cancelled")
+    ]
+    assert (stages[0].input_tokens, stages[0].output_tokens) == (42, 7)
+    assert stages[1].input_tokens is None
+    restored = type(result.execution_attempts[0]).model_validate_json(
+        result.execution_attempts[0].model_dump_json()
+    )
+    assert restored.review_cycle_stages == stages
+    with pytest.raises(ValueError, match="execution order"):
+        type(restored).model_validate({
+            **restored.model_dump(), "review_cycle_stages": tuple(reversed(stages)),
+        })
+    assert result.session.completed_profiles == []
+    assert len(result.unsaved_reports) == 1
+    assert any("interrupted after pass 1" in gap.text for gap in result.unsaved_reports[0].coverage_gaps)
+
+
+async def test_successful_codex_cycle_exposes_each_pass_and_observed_usage(
+    host_session, tmp_path, monkeypatch,
+):
+    from qa_orchestrator.codex_executor import CodexProfileExecutor
+
+    service, run_id = host_session(profile="python_reviewer")
+    calls = 0
+
+    async def execute(self, job):
+        nonlocal calls
+        calls += 1
+        job.observation.input_tokens = 10 * calls
+        return report(job.profile, job.session.review_context).model_copy(update={"scope": f"pass {calls}"})
+
+    monkeypatch.setattr(CodexProfileExecutor, "__call__", execute)
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, CodexProfileExecutor(tmp_path / "packet", model="test"),
+        lambda _: DeepReviewSignals(),
+    )
+
+    assert not result.failures
+    assert [item.scope for item in result.retained_cycles[0].result.reports] == ["pass 1", "pass 2"]
+    assert not result.retained_outputs
+    assert [(stage.stage, stage.outcome, stage.input_tokens)
+            for stage in result.execution_attempts[0].review_cycle_stages] == [
+        ("review", "returned", 10), ("second_look", "returned", 20),
+    ]
+
+
 async def test_run_timeout_preserves_completed_first_pass(host_session, tmp_path, monkeypatch):
     from qa_orchestrator.codex_executor import CodexProfileExecutor
 
@@ -1009,8 +1141,9 @@ async def test_run_timeout_preserves_completed_first_pass(host_session, tmp_path
     assert any("interrupted after pass 1" in n.text for n in result.unsaved_reports[0].coverage_gaps)
 
 
-async def test_run_timeout_during_verifier_preserves_both_passes(
-    host_session, tmp_path, monkeypatch, review_finding_candidate,
+@pytest.mark.parametrize("timeout_kind", ["run", "profile"])
+async def test_timeout_during_verifier_preserves_both_passes(
+    host_session, tmp_path, monkeypatch, review_finding_candidate, timeout_kind,
 ):
     from qa_orchestrator.codex_executor import CodexProfileExecutor
     from qa_orchestrator.codex_review_cycle import CodexReviewCycle
@@ -1032,13 +1165,21 @@ async def test_run_timeout_during_verifier_preserves_both_passes(
     monkeypatch.setattr(CodexProfileExecutor, "__call__", execute)
     monkeypatch.setattr(CodexReviewCycle, "_verify", verify)
     result = await HostReviewAdapter(
-        service, HostExecutionPolicy(run_timeout_seconds=0.05, profile_timeout_seconds=1),
+        service, HostExecutionPolicy(
+            run_timeout_seconds=0.05 if timeout_kind == "run" else 2,
+            profile_timeout_seconds=0.05 if timeout_kind == "profile" else 1,
+            max_retries=0,
+        ),
     ).run_primary_review(
         run_id, CodexProfileExecutor(tmp_path / "packet", model="test"), lambda _: DeepReviewSignals()
     )
-    assert result.failures[0].reason == "run_timeout"
+    assert result.failures[0].reason == f"{timeout_kind}_timeout"
     assert [item.scope for item in result.unsaved_reports] == ["pass 1", "pass 2"]
     assert result.unsaved_reports[1].finding_candidates == (review_finding_candidate,)
+    assert [(stage.stage, stage.outcome)
+            for stage in result.execution_attempts[0].review_cycle_stages] == [
+        ("review", "returned"), ("second_look", "returned"), ("verify", "cancelled"),
+    ]
     assert [ProfileReviewReport.model_validate_json(item.raw_output).scope
             for item in result.retained_outputs] == ["pass 1", "pass 2"]
 

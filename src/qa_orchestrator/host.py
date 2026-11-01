@@ -269,9 +269,7 @@ class HostReviewAdapter:
         }
         previous_report_projection = getattr(executor, "checkpoint_previous_report_projection", None)
         if cycle_enabled:
-            executor = CodexReviewCycle(
-                executor, stage_timeout_seconds=self.policy.profile_timeout_seconds
-            )
+            executor = CodexReviewCycle(executor)
         queued = perf_counter()
         async with semaphore:
             queue_seconds = perf_counter() - queued
@@ -287,6 +285,7 @@ class HostReviewAdapter:
                     self.executor_identity + ":review-cycle-v2" if cycle_enabled
                     else self.executor_identity,
                     previous_report_projection=previous_report_projection,
+                    review_profiles=session.review_profiles,
                 )
                 cached = self.checkpoint_store.load(key)
                 if cached is not None and (
@@ -302,24 +301,42 @@ class HostReviewAdapter:
             for attempt in range(1, self.policy.max_retries + 2):
                 observation = ProfileAttemptObservation()
                 cycle_retained = False
+                cycle_outputs_retained = False
 
-                def retain_cycle(attempt_number: int = attempt) -> None:
-                    nonlocal cycle_retained
-                    if not cycle_enabled or cycle_retained or executor.last_result is None:
+                def retain_cycle(attempt_number: int = attempt, *, include_outputs: bool = True) -> None:
+                    nonlocal cycle_retained, cycle_outputs_retained
+                    if not cycle_enabled or executor.last_result is None:
                         return
-                    retained_cycles.append(RetainedReviewCycle(
-                        profile, attempt_number, executor.last_result,
-                        context.diff_sha256, context.evidence_packet_sha256,
-                    ))
-                    retained_outputs.extend(
-                        RetainedProfileOutput(
-                            profile, attempt_number, original.model_dump_json().encode("utf-8"),
-                            original.context_selection, (), context.head_sha,
+                    if not cycle_retained:
+                        retained_cycles.append(RetainedReviewCycle(
+                            profile, attempt_number, executor.last_result,
                             context.diff_sha256, context.evidence_packet_sha256,
+                        ))
+                        cycle_retained = True
+                    if include_outputs and not cycle_outputs_retained:
+                        retained_outputs.extend(
+                            RetainedProfileOutput(
+                                profile, attempt_number, original.model_dump_json().encode("utf-8"),
+                                original.context_selection, (), context.head_sha,
+                                context.diff_sha256, context.evidence_packet_sha256,
+                            )
+                            for original in executor.last_result.reports
                         )
-                        for original in executor.last_result.reports
-                    )
-                    cycle_retained = True
+                        cycle_outputs_retained = True
+
+                def retain_interrupted_passes(attempt_number: int = attempt) -> None:
+                    if not cycle_enabled:
+                        return
+                    for index, completed in enumerate(executor.completed_passes, 1):
+                        retained_outputs.append(RetainedProfileOutput(
+                            profile, attempt_number, completed.model_dump_json().encode("utf-8"),
+                            completed.context_selection, (), context.head_sha,
+                            context.diff_sha256, context.evidence_packet_sha256,
+                        ))
+                        note = ReviewNote(text=f"Review cycle interrupted after pass {index}.")
+                        interrupted_reports.append(completed.model_copy(update={
+                            "coverage_gaps": (*completed.coverage_gaps[:99], note),
+                        }))
                 job = HostProfileJob(
                     session.model_copy(deep=True), profile, route.model_copy(deep=True),
                     tuple(session.profile_reports), attempt,
@@ -332,11 +349,11 @@ class HostReviewAdapter:
                 clock = perf_counter()
                 outcome, failure = "failed", None
                 try:
-                    async with asyncio.timeout(None if cycle_enabled else self.policy.profile_timeout_seconds):
+                    async with asyncio.timeout(self.policy.profile_timeout_seconds):
                         raw_report = await executor(job)
                     report = ProfileReviewReport.model_validate(raw_report)
-                    if cycle_enabled and executor.report_truncated:
-                        retain_cycle()
+                    if cycle_enabled:
+                        retain_cycle(include_outputs=executor.report_truncated)
                     selection = report.context_selection
                     if selection is not None:
                         selected_paths = tuple(
@@ -389,6 +406,8 @@ class HostReviewAdapter:
                         )
                         outcome = "completed"
                 except (TimeoutError, RetryableProfileError) as exc:
+                    if isinstance(exc, TimeoutError):
+                        retain_interrupted_passes()
                     if isinstance(exc, ProfileOutputError) and exc.retained_output is not None:
                         retained_outputs.append(RetainedProfileOutput(
                             profile, attempt, exc.retained_output, exc.context_selection,
@@ -396,24 +415,14 @@ class HostReviewAdapter:
                             exc.review_diff_sha256, exc.source_packet_sha256,
                         ))
                     outcome = "timeout" if isinstance(exc, TimeoutError) else "retryable_error"
-                    if isinstance(exc, TimeoutError) and observation.failure_kind is None:
+                    if isinstance(exc, TimeoutError):
                         observation.failure_kind = "timeout"
                     if attempt > self.policy.max_retries:
                         failure = HostProfileFailure(
                             profile, "profile_timeout" if outcome == "timeout" else "retry_exhausted"
                         )
                 except asyncio.CancelledError:
-                    if cycle_enabled and executor.completed_passes:
-                        for index, completed in enumerate(executor.completed_passes, 1):
-                            retained_outputs.append(RetainedProfileOutput(
-                                profile, attempt, completed.model_dump_json().encode("utf-8"),
-                                completed.context_selection, (), context.head_sha,
-                                context.diff_sha256, context.evidence_packet_sha256,
-                            ))
-                            note = ReviewNote(text=f"Review cycle interrupted after pass {index}.")
-                            interrupted_reports.append(completed.model_copy(update={
-                                "coverage_gaps": (*completed.coverage_gaps[:99], note),
-                            }))
+                    retain_interrupted_passes()
                     observation.failure_kind = observation.failure_kind or "cancelled"
                     outcome = "cancelled"
                     raise
@@ -428,6 +437,8 @@ class HostReviewAdapter:
                     observation.failure_kind = observation.failure_kind or "executor_error"
                     failure = HostProfileFailure(profile, "executor_error")
                 finally:
+                    if cycle_enabled:
+                        observation.review_cycle_stages = tuple(executor.stage_observations)
                     record = ProfileAttemptMetrics(
                         **observation.model_dump(), profile=profile, attempt=attempt,
                         outcome=outcome, started_at=attempt_started, completed_at=datetime.now(UTC),
@@ -470,7 +481,11 @@ class HostReviewAdapter:
                         self._validate_report(session.review_context, profile, completed_report)
                     except ValueError:
                         return completed_report
-                    self.checkpoint_store.save(key, completed_report)
+                    try:
+                        self.checkpoint_store.save(key, completed_report)
+                    except Exception:  # noqa: BLE001 -- preserve the report without exposing storage errors
+                        interrupted_reports.append(completed_report)
+                        return HostProfileFailure(profile, "checkpoint_write_failed")
                 return completed_report
         raise AssertionError("unreachable executor state")
 

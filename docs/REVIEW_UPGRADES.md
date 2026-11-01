@@ -69,7 +69,9 @@ waves continue to use the existing session-store semantics.
 
 Reuse requires the same entire context (repository, revisions, diff/packet hashes,
 refs/registry/rules), route/checklist, model policy, previous-wave reports and
-explicit executor/instruction version. Changing any input causes fresh execution.
+explicit executor/instruction version, and the ordered selected profile route.
+The route affects the packet subset sent to support profiles. Checkpoint key
+schema v2 includes that route; v1 entries are not reused. Changing any input causes fresh execution.
 The store validates report hashes and evidence links; corrupt entries fail closed.
 SQLite rows are bounded (1000 by default), insert-only per identity, private on
 POSIX, and paths containing symlinks are refused. Reports contain structured

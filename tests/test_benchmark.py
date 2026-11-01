@@ -114,6 +114,21 @@ def _score_for_quality_policy(benchmark_inputs):
     )
 
 
+def test_complete_clean_case_does_not_block_aggregate_recall(benchmark_inputs):
+    dataset_data, results_data = deepcopy(benchmark_inputs)
+    clean = deepcopy(dataset_data["cases"][0])
+    clean.update(case_id="clean", gold=[], gold_complete=True)
+    dataset_data["cases"].append(clean)
+    clean_run = deepcopy(results_data["runs"][0])
+    clean_run.update(run_id="clean-run", case_id="clean", candidates=[], adjudications=[])
+    results_data["runs"].append(clean_run)
+
+    score = score_benchmark(
+        BenchmarkDataset.model_validate(dataset_data), BenchmarkResults.model_validate(results_data)
+    )
+    assert score["configurations"]["baseline"]["recall"] == 0.5
+
+
 def _quality_policy(score, **overrides):
     policy = {
         "policy_id": "test-quality-policy",
