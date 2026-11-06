@@ -128,12 +128,68 @@ class OrchestratorService:
                     "code review requires input_manifest.schema_version=2 with source_inventory_status "
                     "and source_conflict_status"
                 )
+            if review_context.input_manifest.expected_source_kinds is None:
+                raise ValueError(
+                    "Declare expected_source_kinds from the supplied inputs (use an empty list when none "
+                    "are supplied); add each required source, rebuild the evidence packet, and start again."
+                )
+            missing = sorted(
+                set(review_context.input_manifest.expected_source_kinds)
+                - {source.kind for source in review_context.input_manifest.sources if source.required}
+            )
+            if missing:
+                raise ValueError(
+                    f"Expected {', '.join(missing)} source missing from input manifest; add the source "
+                    "with its actual retrieval status, rebuild the evidence packet, and start again."
+                )
             if review_context.input_kind == "diff" and (
                 review_context.diff_hunk_inventory_status != "complete"
                 or not review_context.diff_hunks
                 or not any(entry.kind == "diff" for entry in review_context.evidence_registry)
             ):
                 raise ValueError("diff-only review requires bound diff evidence and complete hunk inventory")
+            unassessed = [
+                source.source_id for source in review_context.input_manifest.sources
+                if source.required
+                and source.kind in {"task", "issue", "jira", "merge_request"}
+                and source.retrieval_status == "complete"
+                and source.extraction_status == "complete"
+                and source.criteria_status == "unknown"
+            ]
+            if unassessed:
+                raise ValueError(
+                    f"Available sources {', '.join(unassessed)} need criteria assessment: register each "
+                    "requirement or MR claim and set criteria_status=recorded, or explicitly set "
+                    "criteria_status=none when none exist; rebuild the evidence packet and start again. "
+                    "If a source is unavailable, record its actual retrieval status and continue with a partial review."
+                )
+            registered = {
+                item.evidence_ref for item in review_context.evidence_registry
+                if item.kind in {"requirement", "claim"}
+            }
+            missing_refs = sorted({
+                ref for source in review_context.input_manifest.sources
+                if source.required and source.criteria_status == "recorded"
+                for ref in source.criterion_refs if ref not in registered
+            })
+            if missing_refs:
+                raise ValueError(
+                    f"Criteria {', '.join(missing_refs)} are not registered as requirement or claim evidence; "
+                    "register each ref, rebuild the evidence packet, and start again."
+                )
+            ref_kinds = {item.evidence_ref: item.kind for item in review_context.evidence_registry}
+            for source in review_context.input_manifest.sources:
+                expected_kind = (
+                    "requirement" if source.kind in {"task", "issue", "jira"}
+                    else "claim" if source.kind == "merge_request" else None
+                )
+                if source.required and source.criteria_status == "recorded" and expected_kind:
+                    for ref in source.criterion_refs:
+                        if ref_kinds.get(ref) != expected_kind:
+                            raise ValueError(
+                                f"Criteria {ref} for {source.source_id} must be registered as {expected_kind}; "
+                                "correct the evidence registry, rebuild the packet, and start again."
+                            )
         return self.orchestrator.start(task_type, review_context)
 
     def advance_qa_orchestration(
@@ -150,6 +206,12 @@ class OrchestratorService:
             warning = (
                 "This profile cannot report implementation findings. For an implementation review, "
                 "choose an implementation reviewer or bundle, or explicitly acknowledge the limitation."
+            )
+        if request.completed_step is OrchestrationStep.TRIAGE and request.status in {"partial", "blocked"}:
+            warning = (
+                "Before finalizing, check whether preparation can be recovered: register missing sources "
+                "and criteria, rebuild the packet, and start a new session if inputs are available. "
+                "Record genuinely unavailable sources and continue feasible review work with a partial scope."
             )
         selected_review_routes = None
         if request.completed_step is OrchestrationStep.TRIAGE and request.status == "completed":

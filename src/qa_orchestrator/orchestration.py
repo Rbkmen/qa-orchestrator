@@ -452,6 +452,9 @@ class QaOrchestrationSession(BaseModel):
     current_profile: ReviewAgent | None = None
     completed_profiles: list[ReviewAgent] = Field(default_factory=list)
     stop_reason: str | None = Field(default=None, max_length=2000, description="Host-reported, sanitized reason for an early stop; not independently verified.")
+    preparation_recovery: Literal["attempted", "unavailable", "not_attempted"] | None = Field(
+        default=None, description="Host-reported triage recovery assessment; not independently verified."
+    )
     profile_reports: list[ProfileReviewReport] = Field(default_factory=list, max_length=11)
     final_review_report: FinalReviewReport | None = None
     risk_signals: DeepReviewSignals | None = None
@@ -612,6 +615,7 @@ class AdvanceQaOrchestrationRequest(BaseModel):
     completed_step: OrchestrationStep
     status: QaTaskOutcome
     stop_reason: str | None = Field(default=None, min_length=1, max_length=2000)
+    preparation_recovery: Literal["attempted", "unavailable", "not_attempted"] | None = None
     request_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     expected_revision: int | None = Field(default=None, ge=0, strict=True)
     selected_bundle: ReviewBundle | None = None
@@ -639,6 +643,10 @@ class AdvanceQaOrchestrationRequest(BaseModel):
                 raise ValueError("stop_reason must not be blank")
             if self.status == "completed":
                 raise ValueError("stop_reason is only valid for an early stop")
+        if self.preparation_recovery is not None and not (
+            self.completed_step is OrchestrationStep.TRIAGE and self.status in {"partial", "blocked"}
+        ):
+            raise ValueError("preparation_recovery is only valid for an early triage stop")
         if (self.implementation_review is not None or self.acknowledge_limited_profile) and not (
             self.completed_step is OrchestrationStep.TRIAGE and self.status == "completed"
         ):
@@ -1026,6 +1034,7 @@ class QaOrchestrator:
         completed_step: OrchestrationStep,
         status: QaTaskOutcome,
         stop_reason: str | None = None,
+        preparation_recovery: Literal["attempted", "unavailable", "not_attempted"] | None = None,
         request_id: str | None = None,
         expected_revision: int | None = None,
         selected_bundle: ReviewBundle | None = None,
@@ -1044,6 +1053,7 @@ class QaOrchestrator:
                 completed_step=completed_step,
                 status=status,
                 stop_reason=stop_reason,
+                preparation_recovery=preparation_recovery,
                 request_id=request_id,
                 expected_revision=expected_revision,
                 selected_bundle=selected_bundle,
@@ -1066,6 +1076,8 @@ class QaOrchestrator:
             excluded = set()
             if request.stop_reason is None:
                 excluded.add("stop_reason")
+            if request.preparation_recovery is None:
+                excluded.add("preparation_recovery")
             if request.implementation_review is None:
                 excluded.add("implementation_review")
             if not request.acknowledge_limited_profile:
@@ -1090,11 +1102,22 @@ class QaOrchestrator:
                 raise OrchestrationError("illegal transition")
 
             if request.status in ("partial", "blocked"):
+                if (
+                    session.current_step is OrchestrationStep.TRIAGE
+                    and session.review_context is not None
+                    and session.review_context.input_manifest is not None
+                    and session.review_context.input_manifest.schema_version == 2
+                ):
+                    if request.preparation_recovery is None:
+                        raise ValueError("Record preparation_recovery as attempted or unavailable before stopping triage")
+                    if request.preparation_recovery == "not_attempted":
+                        raise ValueError("Recover the available preparation inputs and retry before stopping triage")
                 updated = self._refresh_expiry(
                     session.model_copy(
                         update={
                             "status": OrchestrationStatus(request.status),
                             "stop_reason": request.stop_reason,
+                            "preparation_recovery": request.preparation_recovery,
                             "model_policy": None,
                             "next_action": _TERMINAL_ACTIONS[OrchestrationStatus(request.status)],
                         }

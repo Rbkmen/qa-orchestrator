@@ -47,6 +47,7 @@ def bound_review_context():
         changed_files=("src/service.py",),
         evidence_refs=("E1", "E2"),
         input_manifest={
+            "expected_source_kinds": [],
             "sources": (
                 {
                     "source_id": "MR-123",
@@ -57,6 +58,7 @@ def bound_review_context():
                     "pagination_status": "not_applicable",
                     "extraction_status": "complete",
                     "criterion_refs": (),
+                    "criteria_status": "none",
                 },
             )
         },

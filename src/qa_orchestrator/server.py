@@ -264,6 +264,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
         with source_inventory_status and source_conflict_status. A task or MR URL alone is not enough. If an exact
         repository, required Git revisions, diff, or packet identity cannot be pinned, do not start; resolve it or tell the user
         what is missing. Record unavailable requirement/spec sources with partial or unknown manifest statuses.
+        List supplied task/MR kinds in expected_source_kinds. For each available required task or MR source,
+        record criteria_status and register its criteria, or explicitly attest that none exist. If preflight
+        rejects a recoverable omission, correct and rebuild the packet before retrying; unavailable sources
+        may remain partial. These checks validate host metadata, not extraction completeness.
 
         Every call creates a separate session. Use prepare_qa_orchestration for a stateless profile
         checklist. `task_type` narrows the bundle shortlist; the host still selects the review route.
@@ -416,6 +420,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
             str | None,
             Field(min_length=1, max_length=2000, description="Required for partial or blocked early stops: state the observed cause or explicitly say it is unknown, without secrets or raw private output."),
         ] = None,
+        preparation_recovery: Annotated[
+            Literal["attempted", "unavailable", "not_attempted"] | None,
+            Field(description="For a bound v2 review stopped at triage, report whether preparation recovery was attempted or unavailable; explain the actual cause in stop_reason. Host attestation only."),
+        ] = None,
     ) -> QaOrchestrationAdvanceResult:
         """Record one active QA step's result; return updated state and next_action instructions for the host.
 
@@ -460,6 +468,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
                 completed_step=completed_step,
                 status=status,
                 stop_reason=stop_reason,
+                preparation_recovery=preparation_recovery,
                 selected_bundle=selected_bundle,
                 selected_profile=selected_profile,
                 completed_profile=completed_profile,

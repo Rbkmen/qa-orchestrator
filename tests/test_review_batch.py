@@ -298,6 +298,7 @@ async def test_mcp_sessions_remain_available_when_cli_and_codegraph_are_missing(
                     "completed_step": "triage",
                     "status": "partial",
                     "stop_reason": "test stop",
+                    "preparation_recovery": "attempted",
                 },
             )
             finished = await client.call_tool(

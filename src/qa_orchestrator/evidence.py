@@ -4171,6 +4171,16 @@ def evidence_main(argv: list[str]) -> int:
     gitlab.add_argument("--input", required=True, type=Path)
     gitlab.add_argument("--output", required=True, type=Path)
     gitlab.add_argument("--unfiltered", action="store_true", help="Attest no path filter and max_files=100")
+    prepare_gitlab = subparsers.add_parser("prepare-gitlab", help="Build a host-owned packet from GitLab MCP diff and assessed sources")
+    prepare_gitlab.add_argument("--input", required=True, type=Path)
+    prepare_gitlab.add_argument("--spec", required=True, type=Path)
+    prepare_gitlab.add_argument("--output-dir", required=True, type=Path)
+    prepare_gitlab.add_argument("--unfiltered", action="store_true", help="Attest no path filter and max_files=100")
+    compare_gitlab = subparsers.add_parser("compare-gitlab", help="Compare a refreshed GitLab MCP diff with a saved patch digest")
+    compare_gitlab.add_argument("--input", required=True, type=Path)
+    compare_gitlab.add_argument("--ref", required=True)
+    compare_gitlab.add_argument("--diff-sha256", required=True)
+    compare_gitlab.add_argument("--unfiltered", action="store_true", help="Attest no path filter and max_files=100")
     bind_diff.add_argument("--context", required=True, type=Path)
     bind_diff.add_argument("--diff", required=True, type=Path)
     bind_diff.add_argument("--output", required=True, type=Path)
@@ -4238,6 +4248,25 @@ def evidence_main(argv: list[str]) -> int:
     verify.add_argument("--packet", type=Path)
     verify.add_argument("--report", type=Path)
     args = parser.parse_args(argv)
+    if args.command == "compare-gitlab":
+        from qa_orchestrator.gitlab_diff import compare_gitlab_diff
+
+        payload = json.loads(args.input.read_text(encoding="utf-8"))
+        comparison = compare_gitlab_diff(payload, args.ref, args.diff_sha256, unfiltered=args.unfiltered)
+        print(json.dumps(comparison, ensure_ascii=False))
+        return 1 if comparison["diff_changed"] else 0
+    if args.command == "prepare-gitlab":
+        from qa_orchestrator.gitlab_diff import prepare_gitlab_review
+
+        payload = json.loads(args.input.read_text(encoding="utf-8"))
+        spec = json.loads(args.spec.read_text(encoding="utf-8"))
+        diff, packet, context, summary = prepare_gitlab_review(payload, spec, unfiltered=args.unfiltered)
+        args.output_dir.mkdir(mode=0o700)
+        (args.output_dir / "change.diff").write_bytes(diff)
+        (args.output_dir / "packet.json").write_bytes(packet)
+        (args.output_dir / "context.json").write_text(context.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(summary, ensure_ascii=False))
+        return 0
     if args.command == "import-gitlab-diff":
         from qa_orchestrator.gitlab_diff import import_gitlab_diff
 

@@ -31,6 +31,7 @@ def test_service_preflight_opt_in_and_legacy_compatibility(tmp_path, bound_revie
         "source_inventory_status": "complete",
         "source_conflict_status": "clear",
     })
+    context["input_manifest"]["sources"][0]["criteria_status"] = "none"
     valid = ReviewContext.model_validate(context)
     assert service.start_qa_orchestration(
         task_type, valid, require_review_preflight=True

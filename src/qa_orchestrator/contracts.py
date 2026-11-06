@@ -184,6 +184,10 @@ class ReviewInputSource(BaseModel):
     pagination_status: Literal["complete", "incomplete", "not_applicable", "unknown"] = "unknown"
     extraction_status: Literal["complete", "partial", "failed", "unknown"] = "unknown"
     criterion_refs: tuple[EvidenceRefId, ...] = Field(default=(), max_length=500)
+    criteria_status: Literal["recorded", "none", "unknown"] = Field(
+        default="unknown",
+        description="Host assessment: criteria recorded, explicitly absent, or not yet assessed; not independently verified.",
+    )
 
     @field_validator("locator")
     @classmethod
@@ -237,7 +241,23 @@ class ReviewInputSource(BaseModel):
     def validate_criterion_refs(self) -> "ReviewInputSource":
         if len(set(self.criterion_refs)) != len(self.criterion_refs):
             raise ValueError("source criterion refs must be unique")
+        if self.criteria_status == "recorded" and not self.criterion_refs:
+            raise ValueError("criteria_status recorded requires criterion refs")
+        if self.criteria_status == "none" and self.criterion_refs:
+            raise ValueError("criteria_status none cannot have criterion refs")
+        if self.criteria_status == "none" and (
+            self.retrieval_status != "complete" or self.extraction_status != "complete"
+            or self.pagination_status not in {"complete", "not_applicable"}
+        ):
+            raise ValueError("criteria_status none requires complete retrieval, pagination, and extraction")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_criteria_status(self, handler):
+        payload = handler(self)
+        if self.criteria_status == "unknown":
+            payload.pop("criteria_status", None)
+        return payload
 
 
 class ReviewInputConflict(BaseModel):
@@ -284,12 +304,18 @@ class ReviewInputManifest(BaseModel):
 
     schema_version: Literal[1, 2] = 1
     sources: tuple[ReviewInputSource, ...] = Field(default=(), max_length=100)
+    expected_source_kinds: tuple[str, ...] | None = Field(
+        default=None, max_length=100,
+        description="Host-declared kinds of supplied inputs, including unavailable ones; not inferred by the server.",
+    )
     source_inventory_status: Literal["complete", "partial", "unknown"] | None = None
     source_conflict_status: Literal["clear", "resolved", "unresolved", "unknown"] | None = None
     source_conflicts: tuple[ReviewInputConflict, ...] = Field(default=(), max_length=100)
 
     @model_validator(mode="after")
     def validate_unique_sources_and_criteria(self) -> "ReviewInputManifest":
+        if self.expected_source_kinds is not None and len(set(self.expected_source_kinds)) != len(self.expected_source_kinds):
+            raise ValueError("expected source kinds must be unique")
         if self.schema_version == 1 and (
             self.source_inventory_status is not None
             or self.source_conflict_status is not None
@@ -332,6 +358,13 @@ class ReviewInputManifest(BaseModel):
         if self.source_conflict_status == "unresolved" and not unresolved:
             raise ValueError("unresolved source conflict status needs an unresolved conflict")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_expected_source_kinds(self, handler):
+        payload = handler(self)
+        if self.expected_source_kinds is None:
+            payload.pop("expected_source_kinds", None)
+        return payload
 
 
 class ReviewDiffHunk(BaseModel):
