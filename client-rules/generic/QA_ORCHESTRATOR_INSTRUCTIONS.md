@@ -36,7 +36,7 @@ orchestration/evidence/finding contract. Workspace and repository rules may add 
 | `widget` | `code_explorer` → `react_reviewer` + `typescript_reviewer` + `pr_test_analyzer` |
 | `widget_js` | `code_explorer` → `code_reviewer` + `react_reviewer` + `pr_test_analyzer` |
 | `ruby_backend` | `code_explorer` → `ruby_reviewer` + `pr_test_analyzer` |
-| `python_backend` | `code_explorer` + `python_reviewer` + `pr_test_analyzer` |
+| `python_backend` | `code_explorer` → `python_reviewer` + `pr_test_analyzer` |
 | `mobile` | `code_explorer` → `mobile_reviewer` + `pr_test_analyzer` |
 | `security` | `code_explorer` → `security_reviewer` + `silent_failure_hunter` |
 | `autotest` | `code_reviewer` + `typescript_reviewer` + `pr_test_analyzer` |
@@ -240,8 +240,8 @@ are confirmed, say so only for the reviewed scope; do not imply untested areas a
   restart subject to TTL/capacity; finalized legacy sessions without artifacts are removed. Reads do not refresh TTL. Use `delete_qa_orchestration(run_id)` only at the user's
   explicit request; it irreversibly deletes memory/recovery state, records no outcome, and does not stop host work. `deleted=true` confirms absence even for a missing ID; retries
   are safe. If storage deletion fails, memory state remains. Never use deletion as automatic cleanup or instead of finalization.
-- Exactly eleven tools are published: `prepare_qa_orchestration`, `prepare_qa_orchestration_bundle`, `get_qa_orchestration_catalog`, `get_qa_orchestration_model_policy`,
-  `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `renew_qa_orchestration`, `list_qa_orchestrations`, `finish_qa_orchestration`, and
+- Exactly thirteen tools are published: `resolve_git_review_input`, `prepare_qa_orchestration`, `prepare_qa_orchestration_bundle`, `get_qa_orchestration_catalog`, `get_qa_orchestration_model_policy`,
+  `start_qa_orchestration`, `advance_qa_orchestration`, `get_qa_orchestration`, `get_qa_orchestration_status`, `renew_qa_orchestration`, `list_qa_orchestrations`, `finish_qa_orchestration`, and
   `delete_qa_orchestration`. Use `get_qa_orchestration_catalog` with no args when route/profile purpose is unclear; it is read-only and does not change state/TTL. Triage's
   successful advance returns selected checklists/groups. Use prepare tools only for standalone lookup/recovery.
 - If `run_id` is lost, use `list_qa_orchestrations` with no args, identify by task/route/stage/expiry, then call `get_qa_orchestration`. Ask which one to resume if multiple match;

@@ -318,6 +318,7 @@ only when the host intentionally discards that particular session.
 
 The orchestrator must publish exactly:
 
+- `resolve_git_review_input`;
 - `prepare_qa_orchestration`;
 - `prepare_qa_orchestration_bundle`;
 - `get_qa_orchestration_model_policy`;
@@ -325,9 +326,10 @@ The orchestrator must publish exactly:
 - `start_qa_orchestration`;
 - `advance_qa_orchestration`;
 - `get_qa_orchestration`;
+- `get_qa_orchestration_status`;
 - `list_qa_orchestrations`;
 - `finish_qa_orchestration`;
-- `delete_qa_orchestration`.
+- `delete_qa_orchestration`;
 - `renew_qa_orchestration`.
 
 `read_only=true` and `host_owns_decisions=true` must be preserved in every orchestration state. Do not add a tool that generates text, accepts evidence, changes external state, selects a model for the host, or silently calls another agent.

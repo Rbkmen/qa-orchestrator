@@ -103,13 +103,13 @@ In the schedules below, `+` means one concurrent-capable group; `→` means a ba
 | `widget` | `code_explorer` → `react_reviewer` + `typescript_reviewer` + `pr_test_analyzer` |
 | `widget_js` | `code_explorer` → `code_reviewer` + `react_reviewer` + `pr_test_analyzer` |
 | `ruby_backend` | `code_explorer` → `ruby_reviewer` + `pr_test_analyzer` |
-| `python_backend` | `code_explorer` + `python_reviewer` + `pr_test_analyzer` |
+| `python_backend` | `code_explorer` → `python_reviewer` + `pr_test_analyzer` |
 | `mobile` | `code_explorer` → `mobile_reviewer` + `pr_test_analyzer` |
 | `security` | `code_explorer` → `security_reviewer` + `silent_failure_hunter` |
 | `autotest` | `code_reviewer` + `typescript_reviewer` + `pr_test_analyzer` |
 | `requirements` | `code_explorer` → `code_reviewer` |
 
-The Python bundle starts its three profiles together. Required context must be supplied upfront. Reports from previous groups are available only to subsequent groups. The installed catalog is authoritative; see the [bundle and profile catalog](docs/ORCHESTRATION_POLICY.md#fixed-bundles-and-profile-names).
+The Python bundle starts `code_explorer` first; its report is available to the Python and test reviewers in the next group. Reports from previous groups are available only to subsequent groups. The installed catalog is authoritative; see the [bundle and profile catalog](docs/ORCHESTRATION_POLICY.md#fixed-bundles-and-profile-names).
 
 ## Evidence and context
 
@@ -155,6 +155,7 @@ Speed comparisons report p95 and sample counts, keep missing queue measurements 
 
 | Tool | Purpose |
 |---|---|
+| `resolve_git_review_input` | Pin local Git refs and exact diff metadata |
 | `get_qa_orchestration_catalog` | Profiles, bundles and schedules |
 | `prepare_qa_orchestration` | One profile checklist |
 | `prepare_qa_orchestration_bundle` | Bundle checklists and groups |
