@@ -75,6 +75,11 @@ finalization, stages the file, finalizes through the service, then atomically
 renames the artifact into place. This keeps the structured report authoritative;
 the Markdown file is a rendered export. If the file rename fails after the
 session is finalized, render the retained report with `qa-orch report render`.
+For a partial or blocked session, the host export includes its recorded stop
+reason, labeled host-reported. Standalone report rendering can use `--session`
+with a saved full session to recover the outcome, context, and stop reason; it
+rejects a report, context, or outcome that does not match the session. Without
+the session, an unavailable reason is labeled not supplied.
 
 The adapter renews active leases during execution at `heartbeat_interval_seconds` (shortened when the remaining initial lease requires it). It submits each group with a unique request key and the revision used for that wave. Lost-response/connection retries reuse the exact payload; stale submissions cannot advance or stop a session progressed by another host. Failed lease renewal interrupts the wave, and expired sessions require a new run.
 

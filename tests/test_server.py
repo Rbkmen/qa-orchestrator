@@ -36,6 +36,7 @@ async def test_server_exposes_ten_tools(tmp_path):
         "start_qa_orchestration",
         "advance_qa_orchestration",
         "get_qa_orchestration",
+        "get_qa_orchestration_status",
         "list_qa_orchestrations",
         "get_qa_orchestration_catalog",
         "delete_qa_orchestration",
@@ -306,6 +307,30 @@ async def test_early_stop_requires_and_retains_reason(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_mcp_replays_legacy_keyed_stop_without_reason_after_restart(tmp_path):
+    from qa_orchestrator.config import Settings
+    from qa_orchestrator.orchestration import AdvanceQaOrchestrationRequest
+
+    settings = Settings(data_dir=tmp_path, orchestration_session_store_path=tmp_path / "sessions.sqlite")
+    service = OrchestratorService(settings)
+    started = service.start_qa_orchestration("other")
+    payload = {"run_id": started.run_id, "completed_step": "triage", "status": "partial",
+               "request_id": "legacy-stop", "expected_revision": 0}
+    original = service.advance_qa_orchestration(AdvanceQaOrchestrationRequest(**payload))
+    restored = OrchestratorService(settings)
+    async with Client(build_server(restored)) as client:
+        replay = await client.call_tool("advance_qa_orchestration", payload)
+        assert replay.structured_content["revision"] == original.revision
+        assert replay.structured_content["stop_reason"] is None
+        assert replay.structured_content["expires_at"] == original.model_dump(mode="json")["expires_at"]
+        with pytest.raises(ToolError, match="different transition"):
+            await client.call_tool("advance_qa_orchestration", {**payload, "status": "blocked"})
+        fresh = (await client.call_tool("start_qa_orchestration", {"task_type": "other"})).structured_content
+        with pytest.raises(ToolError, match="stop_reason is required"):
+            await client.call_tool("advance_qa_orchestration", {**payload, "run_id": fresh["run_id"]})
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("state", ["active", "early_stop", "awaiting_host_outcome", "finalized"])
 async def test_delete_session_removes_only_requested_run_and_is_idempotent(tmp_path, state):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
@@ -449,7 +474,8 @@ async def test_catalog_discovers_profiles_and_ordered_bundles_without_a_session(
         ["code_reviewer", "pr_test_analyzer"],
     ]
     assert bundles["python_backend"]["execution_groups"] == [
-        ["code_explorer", "python_reviewer", "pr_test_analyzer"],
+        ["code_explorer"],
+        ["python_reviewer", "pr_test_analyzer"],
     ]
     assert bundles["requirements"]["execution_groups"] == [
         ["code_explorer"],
@@ -1173,3 +1199,14 @@ async def test_compact_advance_preserves_recovery_state_and_default_response(tmp
             "selected_profile": "code_reviewer",
         })).structured_content
         assert "audit_events" in default and "profile_reports" in default
+
+
+@pytest.mark.asyncio
+async def test_mcp_status_renders_session_without_file(tmp_path, bound_review_context):
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    session = service.start_qa_orchestration("ordinary_review", bound_review_context)
+    async with Client(build_server(service)) as client:
+        result = await client.call_tool("get_qa_orchestration_status", {"run_id": session.run_id})
+    assert session.run_id in result.structured_content["markdown"]
+    assert "triage" in result.structured_content["markdown"]
+    assert service.get_qa_orchestration(session.run_id).revision == session.revision

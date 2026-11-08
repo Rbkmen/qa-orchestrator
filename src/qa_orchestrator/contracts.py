@@ -1706,6 +1706,23 @@ class ReviewCandidateDecision(BaseModel):
         return self
 
 
+class ManualReviewCheck(BaseModel):
+    """A host-proposed, unexecuted manual check grounded in supplied evidence."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    action: str = Field(min_length=1, max_length=1000)
+    expected_result: str = Field(min_length=1, max_length=1000)
+    evidence_refs: tuple[EvidenceRefId, ...] = Field(min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def validate_check(self) -> "ManualReviewCheck":
+        if not self.action.strip() or not self.expected_result.strip():
+            raise ValueError("manual check text must not be blank")
+        if len(set(self.evidence_refs)) != len(self.evidence_refs):
+            raise ValueError("manual check evidence refs must be unique")
+        return self
+
+
 class FinalReviewReport(BaseModel):
     """Structured synthesis stored with a review-bound orchestration session."""
 
@@ -1729,6 +1746,10 @@ class FinalReviewReport(BaseModel):
     verification_records: tuple[ReviewVerificationRecord, ...] = Field(
         default=(), max_length=250,
         description="Host-supplied test, CI and runtime checks bound to the reviewed head SHA.",
+    )
+    manual_checks: tuple[ManualReviewCheck, ...] = Field(
+        default=(), max_length=50,
+        description="Host-proposed checks, not execution results; each must cite bound evidence.",
     )
     coverage_ledger: ReviewCoverageLedger | None = Field(
         default=None,
@@ -1800,6 +1821,8 @@ class FinalReviewReport(BaseModel):
         payload = handler(self)
         if self.impact_coverage is None:
             payload.pop("impact_coverage", None)
+        if not self.manual_checks:
+            payload.pop("manual_checks", None)
         return payload
 
 

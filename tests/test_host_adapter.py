@@ -589,6 +589,57 @@ async def test_finish_review_exports_markdown_with_the_accepted_outcome(
     assert "provenance: host reported, unverified" in output.read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("outcome", ["partial", "blocked"])
+async def test_finish_review_exports_recorded_stop_reason(host_session, tmp_path, outcome):
+    service, run_id = host_session(profile="python_reviewer")
+    adapter = HostReviewAdapter(service)
+
+    async def execute(job):
+        return report(job.profile, job.session.review_context)
+
+    await adapter.run_primary_review(run_id, execute, lambda _: DeepReviewSignals())
+    service.advance_qa_orchestration(AdvanceQaOrchestrationRequest(
+        run_id=run_id, completed_step="synthesis", status=outcome,
+        stop_reason="Profile timed out <retry unavailable>",
+    ))
+    final_report = FinalReviewReport(summary="Review interrupted.", profiles_reviewed=(ReviewAgent.PYTHON_REVIEWER,))
+    output = tmp_path / "review.md"
+    finished = adapter.finish_review(
+        run_id, outcome=outcome, final_review_report=final_report, markdown_output=output,
+    )
+    assert finished.stop_reason == "Profile timed out <retry unavailable>"
+    assert "Stop reason (host-reported)" in output.read_text()
+    assert "Profile timed out &lt;retry unavailable&gt;" in output.read_text()
+    from qa_orchestrator.report import report_main
+
+    session_path = tmp_path / "session.json"
+    report_path = tmp_path / "report.json"
+    session_path.write_text(finished.model_dump_json())
+    report_path.write_text(finished.final_review_report.model_dump_json())
+    for brief in (False, True):
+        export = tmp_path / ("brief.md" if brief else "full.md")
+        args = ["render", "--input", str(report_path), "--session", str(session_path), "--output", str(export)]
+        if brief:
+            args.append("--brief")
+        assert report_main(args) == 0
+        content = export.read_text()
+        assert "Profile timed out &lt;retry unavailable&gt;" in content
+        assert outcome in content
+        assert "python_reviewer" in content
+
+    with pytest.raises(ValueError, match="session outcome"):
+        report_main(["render", "--input", str(report_path), "--session", str(session_path),
+                     "--outcome", "completed"])
+    context_path = tmp_path / "other-context.json"
+    context_path.write_text(finished.review_context.model_copy(update={"repository": "example.org/other"}).model_dump_json())
+    with pytest.raises(ValueError, match="session review context"):
+        report_main(["render", "--input", str(report_path), "--session", str(session_path),
+                     "--context", str(context_path)])
+    report_path.write_text(final_report.model_copy(update={"summary": "Another report"}).model_dump_json())
+    with pytest.raises(ValueError, match="session.*report"):
+        report_main(["render", "--input", str(report_path), "--session", str(session_path)])
+
+
 async def test_attempt_ledger_preserves_failed_usage_and_sums_known_retries(host_session):
     from qa_orchestrator.codex_executor import RetryableProfileOutputError
 
@@ -917,7 +968,7 @@ async def test_wave_barriers_and_fixed_order_are_enforced(host_session):
     assert all(r.execution_metrics for r in result.session.profile_reports)
 
 
-async def test_host_concurrency_limit_bounds_the_python_single_wave(host_session):
+async def test_host_concurrency_limit_bounds_the_python_specialist_group(host_session):
     service, run_id = host_session(bundle="python_backend")
     active = peak = 0
 
@@ -934,6 +985,23 @@ async def test_host_concurrency_limit_bounds_the_python_single_wave(host_session
     ).run_primary_review(run_id, execute, lambda reports: DeepReviewSignals())
     assert peak == 2
     assert len(result.session.completed_profiles) == 3
+
+
+async def test_python_specialists_receive_explorer_report(host_session):
+    service, run_id = host_session(bundle="python_backend")
+    received = {}
+
+    async def execute(job):
+        received[job.profile] = tuple(item.profile for item in job.previous_reports)
+        return report(job.profile, job.session.review_context)
+
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, execute, lambda reports: DeepReviewSignals()
+    )
+    assert result.session.current_step == "synthesis"
+    assert received[ReviewAgent.CODE_EXPLORER] == ()
+    assert received[ReviewAgent.PYTHON_REVIEWER] == (ReviewAgent.CODE_EXPLORER,)
+    assert received[ReviewAgent.PR_TEST_ANALYZER] == (ReviewAgent.CODE_EXPLORER,)
 
 
 async def test_only_explicit_transient_failures_retry_and_retry_tokens_stay_unknown(host_session):
@@ -978,8 +1046,8 @@ async def test_permanent_failure_stops_partial_without_recording_a_false_group(h
         run_id, execute, lambda reports: DeepReviewSignals()
     )
     assert result.session.status == "partial"
-    assert result.session.completed_profiles == []
-    assert len(result.unsaved_reports) == 2
+    assert result.session.completed_profiles == [ReviewAgent.CODE_EXPLORER]
+    assert len(result.unsaved_reports) == 1
     assert result.failures[0].reason == "executor_error"
     assert len(calls) == 3
 
@@ -989,6 +1057,8 @@ async def test_run_timeout_cancels_and_drains_workers(host_session):
     stopped = []
 
     async def execute(job):
+        if job.profile == ReviewAgent.CODE_EXPLORER:
+            return report(job.profile, job.session.review_context)
         try:
             await asyncio.Event().wait()
         finally:
@@ -998,7 +1068,7 @@ async def test_run_timeout_cancels_and_drains_workers(host_session):
     result = await adapter.run_primary_review(run_id, execute, lambda reports: DeepReviewSignals())
     assert result.session.status == "partial"
     assert result.failures[0].reason == "run_timeout"
-    assert len(stopped) == 3
+    assert len(stopped) == 2
 
 
 async def test_invalid_evidence_does_not_advance_the_group(host_session):
@@ -1585,7 +1655,7 @@ async def test_cancellation_retains_completed_profiles_even_if_stop_fails(host_s
     task.cancel()
     with pytest.raises(asyncio.CancelledError) as caught:
         await task
-    assert len(caught.value.unsaved_reports) == 2
+    assert len(caught.value.unsaved_reports) == 1
     assert len(caught.value.execution_attempts) == 3
 
 

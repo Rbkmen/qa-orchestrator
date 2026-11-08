@@ -248,7 +248,7 @@ flowchart LR
 | `widget` | `code_explorer` → `react_reviewer` → `typescript_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`react_reviewer`, `typescript_reviewer`, `pr_test_analyzer`) |
 | `widget_js` | `code_explorer` → `code_reviewer` → `react_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`code_reviewer`, `react_reviewer`, `pr_test_analyzer`) |
 | `ruby_backend` | `code_explorer` → `ruby_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`ruby_reviewer`, `pr_test_analyzer`) |
-| `python_backend` | `code_explorer` → `python_reviewer` → `pr_test_analyzer` | (`code_explorer`, `python_reviewer`, `pr_test_analyzer`) |
+| `python_backend` | `code_explorer` → `python_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`python_reviewer`, `pr_test_analyzer`) |
 | `mobile` | `code_explorer` → `mobile_reviewer` → `pr_test_analyzer` | (`code_explorer`) → (`mobile_reviewer`, `pr_test_analyzer`) |
 | `security` | `code_explorer` → `security_reviewer` → `silent_failure_hunter` | (`code_explorer`) → (`security_reviewer`, `silent_failure_hunter`) |
 | `autotest` | `code_reviewer` → `typescript_reviewer` → `pr_test_analyzer` | (`code_reviewer`, `typescript_reviewer`, `pr_test_analyzer`) |
@@ -291,6 +291,8 @@ Every review must separate confirmed findings from hypotheses and unverified run
 ## Retry-safe transitions and active leases
 
 Sessions expose a workflow `revision`. Each accepted transition and first finalization increments it. Pass `expected_revision` to reject a new stale write; pass it with a unique `request_id` to make an advance retry safe. The server retains bounded request hashes and applied revisions with recovery state. The exact same keyed payload returns current state without repeating work or refreshing TTL, including after restart when the same store is configured. Changed payloads under an existing key fail. A replay can return later progress, so follow the returned current step/revision. Unkeyed callers keep the legacy behavior.
+
+MCP requires a reason for new partial or blocked stops. A retained keyed stop from an older client without a reason may still be replayed exactly; its original payload hash must match. Direct Python callers may omit the reason for backward compatibility, in which case it remains unknown. New integrations should always record the observed reason or explicitly state that it is unknown.
 
 `renew_qa_orchestration(run_id, expected_revision)` refreshes an active session's lease without changing its workflow revision, reports, or request receipts. Renew before expiry while a host worker runs. Awaiting-host-outcome sessions are also active; terminal and expired sessions cannot be revived. The host adapter renews during work, uses versioned keyed submissions, and retries transport timeouts/lost connections with the same payload. A stale host cannot mark another host's progressed session partial.
 

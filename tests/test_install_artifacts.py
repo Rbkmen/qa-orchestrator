@@ -410,6 +410,7 @@ async def test_launcher_exposes_ten_tools(monkeypatch, tmp_path):
         "start_qa_orchestration",
         "advance_qa_orchestration",
         "get_qa_orchestration",
+        "get_qa_orchestration_status",
         "list_qa_orchestrations",
         "get_qa_orchestration_catalog",
         "delete_qa_orchestration",

@@ -84,13 +84,13 @@ Record per case:
 - correct/unsupported rates for `high`, `medium`, and `low` confidence separately;
 - total wall-clock time, per-profile start/completion time, worker start skew, barrier wait, and available input/output token counts.
 
-Attach `execution_metrics` to a profile report only when the host can report accurate UTC start/completion timestamps and token usage. Compute full-run elapsed time and concurrency/barrier measurements in the host scheduler; the orchestrator cannot observe them. Compare the `python_backend` single-wave schedule with the former two-wave schedule on the same task set. Interleave or randomize baseline/candidate run order and pair attempts on the same case; the scorer requires matching attempt numbers but cannot enforce run order. Keep raw model responses and source snippets outside the repository; publish only aggregate results. Do not claim a quality, calibration, or speed improvement until this benchmark has actually run.
+Attach `execution_metrics` to a profile report only when the host can report accurate UTC start/completion timestamps and token usage. Compute full-run elapsed time and concurrency/barrier measurements in the host scheduler; the orchestrator cannot observe them. Compare the `python_backend` two-wave schedule with the experimental single-wave schedule on the same task set. Interleave or randomize baseline/candidate run order and pair attempts on the same case; the scorer requires matching attempt numbers but cannot enforce run order. Keep raw model responses and source snippets outside the repository; publish only aggregate results. Do not claim a quality, calibration, or speed improvement until this benchmark has actually run.
 
 ### Python backend parallel-start experiment
 
-`python_backend` starts `code_explorer`, `python_reviewer`, and `pr_test_analyzer` in one execution group. This removes the explorer barrier from the critical path, but the specialist reviewers cannot use the explorer's evidence map at dispatch time. The parent must prepare a complete compact Evidence Packet before starting the group and reconcile all outputs before synthesis.
+`python_backend` now runs `code_explorer` first, then starts `python_reviewer` and `pr_test_analyzer` together with the relevant explorer report. Existing sessions retain their recorded schedule.
 
-The schedule remains an unmeasured experiment. Apply the benchmark protocol above to compare it with the former two-wave schedule; keep it only if measured time savings are material and adjudicated review quality stays acceptable.
+The former single-wave schedule has not been evaluated against the two-wave schedule. Apply the benchmark protocol above before reintroducing it; assess both quality and operational cost. The two-wave schedule also has no measured quality advantage yet.
 
 ## Synthetic profile cases
 

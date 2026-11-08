@@ -1495,6 +1495,7 @@ class QaOrchestrator:
                     for item in validated_report.verification_records
                     for reference in item.evidence_refs
                 )
+                report_refs.update(reference for item in validated_report.manual_checks for reference in item.evidence_refs)
                 unknown_refs = report_refs - context_refs
                 if unknown_refs:
                     raise OrchestrationError("final review report cites unknown evidence refs")

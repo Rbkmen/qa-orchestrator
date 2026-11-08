@@ -578,6 +578,7 @@ def _render_verification_records(
 def render_final_report(
     report: FinalReviewReport, *, context: ReviewContext | None = None,
     outcome: QaTaskOutcome | None = None,
+    stop_reason: str | None = None,
 ) -> str:
     """Render findings and non-finding outcomes without inventing evidence."""
     if context is not None:
@@ -613,9 +614,13 @@ def render_final_report(
         )
     if outcome in {"partial", "blocked"}:
         lines.append(
+            "- **Stop reason (host-reported):** "
+            + (_text(stop_reason) if stop_reason else "not supplied")
+        )
+        lines.append(
             "- **Known completion gaps (host-selected outcome):** "
             + ("; ".join(_text(gap) for gap in completion_gaps) if completion_gaps else
-               "no structured completion reason recorded; see reported limitations")
+               "no structured completion gaps recorded; see reported limitations")
         )
     lines.append("")
     source_counts = input_summary["source_counts"]
@@ -853,6 +858,7 @@ def render_final_report(
                 lines.append("- **Refutation status:** проверка не сохранена")
             lines.append("")
 
+    lines.extend(_render_manual_checks(report, context))
     lines.extend(_render_coverage_ledger(report, context))
     lines.extend(_render_impact_coverage(report, context))
     lines.extend(_render_profile_execution(report))
@@ -974,6 +980,7 @@ def validate_final_report_context(report: FinalReviewReport, context: ReviewCont
     report_refs.update(
         ref for item in report.verification_records for ref in item.evidence_refs
     )
+    report_refs.update(ref for item in report.manual_checks for ref in item.evidence_refs)
     registry = {entry.evidence_ref: entry for entry in context.evidence_registry}
     for item in report.verification_records:
         for ref in item.evidence_refs:
@@ -997,6 +1004,103 @@ def validate_final_report_context(report: FinalReviewReport, context: ReviewCont
     )
 
 
+def _render_manual_checks(report: FinalReviewReport, context: ReviewContext | None) -> list[str]:
+    if not report.manual_checks:
+        return []
+    lines = ["## Manual checks (proposed, not executed)", ""]
+    for check in report.manual_checks:
+        lines.append(f"- {_text(check.action)} → {_text(check.expected_result)} (evidence: {_refs(check.evidence_refs, context)})")
+    return [*lines, ""]
+
+
+def render_session_status(session) -> str:
+    """Summarize recorded state without asserting that reported work occurred."""
+    context = session.review_context
+    lines = ["# Review status", "", f"- Run: {_code(session.run_id)}",
+             f"- Status: {_text(session.status.value)}; stage: {_text(session.current_step.value)}",
+             f"- Next: {_text(session.next_action)}",
+             "- Completed profiles (reported): " + (", ".join(_code(p.value) for p in session.completed_profiles) or "none")]
+    if session.status.value in {"partial", "blocked"}:
+        reason = _text(session.stop_reason) if session.stop_reason else "not recorded"
+        lines.append(f"- Stop reason (host-reported): {reason}")
+    if context is None:
+        lines.append("- Review input: not recorded")
+    else:
+        lines.extend((f"- Repository: {_code(context.repository)}",
+                      f"- Diff SHA-256: {_code(context.diff_sha256)}",
+                      f"- Base: {_code(context.base_sha) if context.base_sha else 'unknown'}; head: {_code(context.head_sha) if context.head_sha else 'unknown'}",
+                      "- Changed paths: " + ", ".join(_code(path) for path in context.changed_files)))
+        manifest = context.input_manifest
+        if manifest is None:
+            lines.append("- Sources: unknown; manifest unavailable")
+        else:
+            for source in manifest.sources:
+                lines.append(f"- Source {_code(source.source_id)} ({_text(source.kind)}, {_code(source.locator)}): retrieval {_text(source.retrieval_status)}, pagination {_text(source.pagination_status)}, extraction {_text(source.extraction_status)}, criteria {_text(source.criteria_status)}")
+            completeness = input_manifest_completeness(context)
+            lines.append(f"- Input completeness (host-reported): {_text(completeness['status'])} — {_text(completeness['status_reason'])}")
+    return "\n".join(lines) + "\n"
+
+
+def render_brief_report(report: FinalReviewReport, *, context: ReviewContext | None = None,
+                        outcome: QaTaskOutcome | None = None,
+                        stop_reason: str | None = None) -> str:
+    """Render a concise view of recorded findings and limitations."""
+    if context is not None:
+        report = complete_criterion_coverage(context, report)
+    lines = ["# QA review", "", _text(report.summary), "",
+             f"Outcome: {_text(outcome) if outcome else 'not provided'}",
+             "Reported profiles: " + ", ".join(_code(profile.value) for profile in report.profiles_reviewed)]
+    if outcome in {"partial", "blocked"}:
+        lines.append("Stop reason (host-reported): " + (_text(stop_reason) if stop_reason else "not supplied"))
+    lines.extend(("", "## Confirmed findings", ""))
+    if not report.finding_candidates:
+        lines.append("No confirmed findings in the reviewed scope.")
+    for finding in sorted(report.finding_candidates, key=lambda f: (_SEVERITY_ORDER[f.severity], f.candidate_id)):
+        locations = ", ".join(_code(f"{loc.path}:{loc.start_line}") for loc in finding.source_locations)
+        lines.append(f"- **{_text(finding.severity)} · {_text(finding.title)}:** {_text(finding.description)} (evidence: {_refs(finding.evidence_refs, context)}{'; ' + locations if locations else ''})")
+        if finding.next_step:
+            lines.append(f"  - Next: {_text(finding.next_step)}")
+    lines.extend(("", *_render_manual_checks(report, context)))
+    lines.extend(("", "## Coverage gaps and unverified", ""))
+    gaps_start = len(lines)
+    notes = (*report.coverage_gaps, *report.unverified)
+    lines.extend(f"- {_text(note.text)} (evidence: {_refs(note.evidence_refs, context)})" for note in notes)
+    for item in report.scenario_coverage:
+        if item.disposition in {"unverified", "candidate"}:
+            lines.append(f"- Scenario {_text(item.scenario)} ({_text(item.disposition)}): {_text(item.rationale)} (evidence: {_refs(item.evidence_refs, context)})")
+    for decision in report.candidate_decisions:
+        if decision.verdict == "unverified":
+            lines.append(f"- Unverified candidate {_text(decision.source.candidate_id)}: {_text(decision.rationale)} (evidence: {_refs(decision.evidence_refs, context)})")
+            if decision.candidate_snapshot is not None:
+                candidate = decision.candidate_snapshot
+                lines.append(f"  - {_text(candidate.title)}: {_text(candidate.description)}")
+                if candidate.verification_gap:
+                    lines.append(f"  - Verification gap: {_text(candidate.verification_gap)}")
+    unresolved_criteria = [item for item in report.criterion_coverage if item.outcome in {"unverified", "contradicted"}]
+    if unresolved_criteria:
+        lines.append("- Requirements and MR claims requiring attention:")
+        for item in unresolved_criteria:
+            lines.append(f"  - {_refs((item.criterion_ref,), context)}: {_text(item.outcome)} — {_text(item.rationale)}")
+    if context is None or context.input_manifest is None:
+        lines.append("- Source completeness unknown; input manifest unavailable.")
+    else:
+        completeness = input_manifest_completeness(context)
+        if completeness["status"] != "complete":
+            lines.append(f"- Input completeness: {_text(completeness['status'])} — {_text(completeness['status_reason'])}")
+    if context is not None and context.input_kind == "diff":
+        lines.append("- Diff-only input does not verify Git revisions or surrounding source.")
+    if context is not None and outcome in {"partial", "blocked"}:
+        for gap in review_completion_gaps(context, report):
+            lines.append(f"- Completion gap: {_text(gap)}")
+    if not report.verification_records:
+        lines.append("- no verification records supplied; tests, CI and runtime are not established.")
+    if len(lines) == gaps_start:
+        lines.append("None reported.")
+    if report.verification_records:
+        lines.extend(("", *_render_verification_records(report, context)))
+    return "\n".join(lines) + "\n"
+
+
 def report_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="qa-orch report")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1004,15 +1108,48 @@ def report_main(argv: list[str]) -> int:
     render.add_argument("--input", required=True, type=Path)
     render.add_argument("--output", type=Path, help="Write Markdown to this file instead of stdout")
     render.add_argument("--context", type=Path, help="Optional bound context for evidence locators")
+    render.add_argument("--session", type=Path, help="Saved full session containing the final report")
     render.add_argument("--outcome", choices=("completed", "partial", "blocked"), help="Recorded session outcome")
+    render.add_argument("--brief", action="store_true", help="Render a concise user-facing report")
+    status = subparsers.add_parser("status", help="Summarize a saved session JSON")
+    status.add_argument("--input", required=True, type=Path)
+    status.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
+    if args.command == "status":
+        from qa_orchestrator.orchestration import QaOrchestrationSession
+
+        session = QaOrchestrationSession.model_validate_json(args.input.read_bytes())
+        output = render_session_status(session)
+        if args.output:
+            args.output.write_text(output, encoding="utf-8")
+        else:
+            print(output, end="")
+        return 0
     report = FinalReviewReport.model_validate_json(args.input.read_bytes())
     context = (
         ReviewContext.model_validate_json(args.context.read_bytes()) if args.context else None
     )
+    outcome = args.outcome
+    stop_reason = None
+    if args.session:
+        from qa_orchestrator.orchestration import QaOrchestrationSession
+
+        session = QaOrchestrationSession.model_validate_json(args.session.read_bytes())
+        if session.final_review_report is None or report != session.final_review_report:
+            raise ValueError("session final report does not match input report")
+        if session.review_context is None or (context is not None and context != session.review_context):
+            raise ValueError("session review context does not match input context")
+        if session.status.value not in {"completed", "partial", "blocked"}:
+            raise ValueError("session outcome is not final")
+        if outcome is not None and outcome != session.status.value:
+            raise ValueError("session outcome does not match requested outcome")
+        context = session.review_context
+        outcome = session.status.value
+        stop_reason = session.stop_reason or "not recorded"
     if context is not None:
         validate_final_report_context(report, context)
-    output = render_final_report(report, context=context, outcome=args.outcome)
+    renderer = render_brief_report if args.brief else render_final_report
+    output = renderer(report, context=context, outcome=outcome, stop_reason=stop_reason)
     if args.output:
         args.output.write_text(output, encoding="utf-8")
     else:

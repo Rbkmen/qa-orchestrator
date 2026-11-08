@@ -461,7 +461,14 @@ def build_server(service: OrchestratorService) -> FastMCP:
           if the session is unknown or expired, start a new session.
         """
         if status in ("partial", "blocked") and (stop_reason is None or not stop_reason.strip()):
-            raise ValueError("stop_reason is required for partial or blocked early stops")
+            # Old persisted requests can lack this field. Only a known keyed request
+            # may reach the core replay check, which compares the complete payload hash.
+            legacy_replay = False
+            if stop_reason is None and request_id is not None and expected_revision is not None:
+                session = service.get_qa_orchestration(run_id)
+                legacy_replay = any(receipt.request_id == request_id for receipt in session.transition_receipts)
+            if not legacy_replay:
+                raise ValueError("stop_reason is required for partial or blocked early stops")
         result = service.advance_qa_orchestration(
             AdvanceQaOrchestrationRequest(
                 run_id=run_id,
@@ -517,6 +524,13 @@ def build_server(service: OrchestratorService) -> FastMCP:
         Local stdio access requires no additional credentials.
         """
         return service.get_qa_orchestration(run_id)
+
+    @mcp.tool(title="Summarize QA session status", annotations=READ_ONLY_TOOL_ANNOTATIONS)
+    def get_qa_orchestration_status(run_id: RunId) -> dict[str, str]:
+        """Render retained session progress, sources and next action; does not resume or verify it."""
+        from qa_orchestrator.report import render_session_status
+
+        return {"markdown": render_session_status(service.get_qa_orchestration(run_id))}
 
     @mcp.tool(title="List retained QA sessions", annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def list_qa_orchestrations() -> QaOrchestrationList:

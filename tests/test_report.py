@@ -64,6 +64,12 @@ def test_review_boundaries_do_not_invent_outcome_or_sources():
     assert "unknown; manifest unavailable" in rendered
 
 
+def test_partial_standalone_report_does_not_assume_stop_reason_was_unrecorded():
+    report = FinalReviewReport(summary="Interrupted", profiles_reviewed=(ReviewAgent.CODE_REVIEWER,))
+    rendered = render_final_report(report, outcome="partial")
+    assert "Stop reason (host-reported):** not supplied" in rendered
+
+
 def test_review_boundaries_show_source_and_unverified_receipt(bound_review_context):
     report = FinalReviewReport(
         summary="Partial review", profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
@@ -1850,3 +1856,127 @@ def test_report_context_rejects_refutation_refs_outside_bound_evidence(
         validate_final_report_context(
             report, bound_review_context.model_copy(update={"evidence_refs": ("E1",)})
         )
+
+
+def test_compact_report_keeps_findings_and_unknowns_separate(bound_review_context):
+    from qa_orchestrator.report import render_brief_report
+
+    report = FinalReviewReport(
+        summary="Review summary", profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        finding_candidates=(_finding("F-01", severity="high", title="Broken response"),),
+        coverage_gaps=(ReviewNote(text="Caller not inspected"),),
+        unverified=(ReviewNote(text="CI not checked"),),
+    )
+    result = render_brief_report(report, context=bound_review_context, outcome="partial")
+    assert "Broken response" in result and "src/api.py:12" in result
+    assert "Caller not inspected" in result and "CI not checked" in result
+    assert "partial" in result and "no verification records" in result
+    assert "## Candidate decisions" not in result
+
+
+def test_session_status_reports_identity_progress_and_source_gap(tmp_path, bound_review_context):
+    from qa_orchestrator.report import render_session_status
+    from qa_orchestrator.service import OrchestratorService
+
+    session = OrchestratorService.from_settings(data_dir=tmp_path).start_qa_orchestration(
+        "ordinary_review", bound_review_context
+    )
+    result = render_session_status(session)
+    assert session.run_id in result
+    assert bound_review_context.repository in result
+    assert bound_review_context.diff_sha256 in result
+    assert "triage" in result and "Host performs triage" in result
+    assert "MR-123" in result
+
+
+def test_early_stop_status_explicitly_marks_missing_reason(tmp_path):
+    from qa_orchestrator.orchestration import QaOrchestrator
+    from qa_orchestrator.report import render_session_status
+
+    orchestrator = QaOrchestrator(ttl_seconds=60, max_sessions=5)
+    session = orchestrator.start("other")
+    stopped = orchestrator.advance(run_id=session.run_id, completed_step="triage", status="partial")
+    assert "Stop reason (host-reported): not recorded" in render_session_status(stopped)
+    assert "Stop reason" not in render_session_status(session)
+
+
+def test_brief_report_exposes_unverified_criteria_and_diff_only_limit(bound_review_context):
+    from qa_orchestrator.report import render_brief_report
+
+    context = bound_review_context.model_copy(update={"input_kind": "diff", "base_sha": None, "head_sha": None,
+        "evidence_registry": (EvidenceRecord(evidence_ref="E1", kind="requirement", locator="host:task", sha256="a" * 64),)})
+    report = FinalReviewReport(summary="Limited", profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+        criterion_coverage=(ReviewCriterionCoverage(criterion_ref="E1", criterion_kind="requirement",
+            outcome="unverified", rationale="Needs runtime check"),))
+    result = render_brief_report(report, context=context, outcome="partial")
+    assert "Diff-only input" in result
+    assert "Requirements and MR claims" in result
+    assert "unverified" in result.lower()
+    assert "None reported." not in result
+
+
+@pytest.mark.parametrize("head_sha,binding", [("0" * 40, "stale"), (None, "unknown")])
+def test_brief_report_distinguishes_pass_without_current_head(bound_review_context, head_sha, binding):
+    record = ReviewVerificationRecord(
+        verification_id="V-01", check_type="ci", scenario="CI suite", status="passed",
+        head_sha=head_sha, environment="Linux", source="ci_provider", source_ref="job 123",
+        scope="unit tests", run_url="https://example.com/runs/123",
+    )
+    report = FinalReviewReport(summary="Review", profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),
+                               verification_records=(record,))
+    result = report_module.render_brief_report(report, context=bound_review_context)
+    assert f"head binding: {binding}" in result
+    assert "unit tests" in result and "https://example.com/runs/123" in result
+
+
+def test_brief_report_does_not_claim_no_gaps_when_sources_unknown():
+    report = FinalReviewReport(summary="Review", profiles_reviewed=(ReviewAgent.CODE_REVIEWER,))
+    result = report_module.render_brief_report(report)
+    assert "Source completeness unknown" in result
+    assert "None reported." not in result
+
+
+def test_report_status_cli_renders_saved_session(tmp_path, bound_review_context, capsys):
+    from qa_orchestrator.report import report_main
+    from qa_orchestrator.service import OrchestratorService
+
+    session = OrchestratorService.from_settings(data_dir=tmp_path).start_qa_orchestration("ordinary_review", bound_review_context)
+    path = tmp_path / "session.json"
+    path.write_text(session.model_dump_json(), encoding="utf-8")
+    assert report_main(["status", "--input", str(path)]) == 0
+    assert session.run_id in capsys.readouterr().out
+
+
+def test_manual_checks_and_unverified_scenarios_survive_brief_and_full(bound_review_context):
+    from qa_orchestrator.report import render_brief_report
+
+    report = FinalReviewReport.model_validate({
+        "summary": "Review", "profiles_reviewed": ["code_reviewer"],
+        "manual_checks": [{"action": "Open checkout", "expected_result": "Total is shown", "evidence_refs": ["E1"]}],
+        "scenario_coverage": [{"scenario": "Expired session", "disposition": "unverified", "evidence_refs": ["E1"], "rationale": "Session behavior unavailable"}],
+        "candidate_decisions": [{"source": {"profile": "code_reviewer", "candidate_id": "F-01"}, "verdict": "unverified", "rationale": "Missing caller", "evidence_refs": ["E1"]}],
+    })
+    for text in (render_brief_report(report), render_final_report(report)):
+        assert "Open checkout" in text and "Total is shown" in text
+        assert "Expired session" in text and "Session behavior unavailable" in text
+        assert "Missing caller" in text
+    validate_final_report_context(report, bound_review_context)
+
+
+def test_manual_check_requires_bound_evidence(bound_review_context):
+    report = FinalReviewReport.model_validate({"summary": "Review", "profiles_reviewed": ["code_reviewer"],
+        "manual_checks": [{"action": "Open page", "expected_result": "Page loads", "evidence_refs": ["MISSING"]}]})
+    with pytest.raises(ValueError, match="outside the bound context"):
+        validate_final_report_context(report, bound_review_context)
+
+
+def test_empty_manual_checks_preserve_legacy_serialization():
+    report = FinalReviewReport(summary="Legacy", profiles_reviewed=(ReviewAgent.CODE_REVIEWER,))
+    assert "manual_checks" not in report.model_dump(mode="json")
+
+
+def test_manual_check_cannot_be_empty_or_unfounded():
+    payload = {"summary": "Review", "profiles_reviewed": ["code_reviewer"],
+        "manual_checks": [{"action": " ", "expected_result": "Visible", "evidence_refs": []}]}
+    with pytest.raises(ValueError):
+        FinalReviewReport.model_validate(payload)

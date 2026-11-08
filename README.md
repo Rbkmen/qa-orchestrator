@@ -163,6 +163,7 @@ Speed comparisons report p95 and sample counts, keep missing queue measurements 
 | `advance_qa_orchestration` | Validate and record a transition/reports |
 | `renew_qa_orchestration` | Extend an active lease |
 | `get_qa_orchestration` | Read a retained session |
+| `get_qa_orchestration_status` | Render a concise retained-session status directly over MCP |
 | `list_qa_orchestrations` | Discover retained session IDs |
 | `finish_qa_orchestration` | Finalize host outcome and report |
 | `delete_qa_orchestration` | Irreversibly discard local session state |
@@ -180,11 +181,24 @@ Reads do not extend TTL. Deletion neither finalizes a review nor cancels host ex
 | `qa-orch evidence check-links` | Explicit, host-allowlisted reachability check for external evidence URLs; does not verify external content hashes |
 | `qa-orch evidence pack` / `chunks` | Exact context packets/source chunks |
 | `qa-orch repo profile` / `audit-tests` | Profile tracked project/test/CI metadata and report source-anchored test-suite review candidates |
+| `qa-orch report status --input session.json` | Summarize a saved full session, input identity, source statuses, progress and next action |
+| `qa-orch report render --input report.json --brief` | Render a concise view; add `--session session.json` for the matching saved session's outcome, context and stop reason |
 | `qa-orch rules` | Bind explicit review rules |
 | `qa-orch benchmark import-reviewbench` / `import-reviewbench-set` / `split` / `diff-budget` / `score` / `reliability` / `compare` / `quality-gate` | Import references, split cases by pull request, score explicit adjudications, compare speed, and enforce declared quality thresholds |
 | `qa-orchestrator-doctor --json` | Read-only local diagnostics |
 
 `qa-orchestrator` aliases `qa-orch`. Running either without a subcommand starts the MCP server. These tools do not provide a one-command MR review and publication flow.
+
+Save a full response from `get_qa_orchestration` as session JSON to use `report status`;
+compact transition responses omit data needed for a complete view. Status and brief output
+only render recorded, host-reported data: they do not fetch sources, validate connector
+completeness, resume a session, or generate manual test instructions. The host can add
+`manual_checks` to a final report with an action, expected result and bound evidence refs;
+these are proposed checks, not execution records. Both report formats preserve them and
+the brief version also exposes unverified scenarios and candidates. The default report
+remains the detailed version; `--brief` is optional. Add `--session session.json` to
+render the report saved in that session with its recorded outcome and stop reason;
+conflicting report, context or outcome inputs are rejected.
 
 Repository profiling and test-suite audit operate on committed Git objects and do not change the repository; `profile` writes a local cache unless `--no-cache` is set. Candidate signals are not confirmed findings; see [Repository profile and test audit](docs/REPOSITORY_AUDIT.md) for limits and examples.
 
