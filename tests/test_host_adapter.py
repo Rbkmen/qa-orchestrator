@@ -608,8 +608,9 @@ async def test_finish_review_exports_recorded_stop_reason(host_session, tmp_path
         run_id, outcome=outcome, final_review_report=final_report, markdown_output=output,
     )
     assert finished.stop_reason == "Profile timed out <retry unavailable>"
-    assert "Stop reason (host-reported)" in output.read_text()
-    assert "Profile timed out &lt;retry unavailable&gt;" in output.read_text()
+    content = output.read_text(encoding="utf-8")
+    assert "Stop reason (host-reported)" in content
+    assert "Profile timed out &lt;retry unavailable&gt;" in content
     from qa_orchestrator.report import report_main
 
     session_path = tmp_path / "session.json"
@@ -622,7 +623,7 @@ async def test_finish_review_exports_recorded_stop_reason(host_session, tmp_path
         if brief:
             args.append("--brief")
         assert report_main(args) == 0
-        content = export.read_text()
+        content = export.read_text(encoding="utf-8")
         assert "Profile timed out &lt;retry unavailable&gt;" in content
         assert outcome in content
         assert "python_reviewer" in content
