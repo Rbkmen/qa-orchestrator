@@ -66,7 +66,7 @@ replay = await adapter.replay_synthesis(
 
 This is a host-side experiment hook, not a built-in model call. Keep the model,
 reasoning, review inputs and adjudication protocol fixed, compare report quality
-on a pinned benchmark, and only then decide whether to adopt a prompt change.
+on the same inputs before deciding whether to adopt a prompt change.
 
 After host synthesis, `adapter.finish_review(...)` can submit the final report and
 write its Markdown rendering to `markdown_output` in the same host flow. The
@@ -144,11 +144,11 @@ Final findings support a `blocker` severity and a `change_origin` value (`introd
 qa-orch report render --input final-report.json --context bound-context.json --output review.md
 ```
 
-For latency, inspect `HostExecutionResult.execution_attempts`: separate semaphore wait from executor duration, and compare end-to-end wall time across identical pinned inputs. `max_concurrency` defaults to 3 and can be raised up to 32 subject to provider limits. Token totals remain unknown when any attempt omits its usage counter. Use the [benchmark protocol](BENCHMARK.md) with the same snapshot, packet, profiles, model, and reasoning before claiming a speed or quality improvement; host-reported timings do not establish provider-only inference latency.
+For latency, inspect `HostExecutionResult.execution_attempts`: separate semaphore wait from executor duration, and compare end-to-end wall time across identical pinned inputs. `max_concurrency` defaults to 3 and can be raised up to 32 subject to provider limits. Token totals remain unknown when any attempt omits its usage counter. Host-reported timings do not establish provider-only inference latency.
 
 Optional scoped repository rules, per-profile checkpoints and a read-only Codex CLI
 executor are described in [Review Upgrades](REVIEW_UPGRADES.md). Checkpoint reuse
-is explicit and reported separately from fresh execution; disable it for benchmarks.
+is explicit and reported separately from fresh execution.
 
 When a CLI profile returns bounded output that fails validation or accompanies a CLI error, the adapter retains it only in memory in `HostExecutionResult.retained_outputs`, including outputs from failed retries. The bytes are excluded from repr, session storage and logs; they may contain private evidence and are untrusted. The host may inspect or revalidate them with `revalidate_retained_profile_output(retained, context)`; the same profile and evidence validation runs again. A host may explicitly supply corrected bytes using `output=`, but must review those edits. Revalidation does not certify model completion or turn the retained output into an executor receipt; no validation is bypassed. Outputs disappear when the result is discarded or the process ends.
 

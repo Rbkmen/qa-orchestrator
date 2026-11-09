@@ -638,7 +638,6 @@ def _help() -> int:
     print("  qa-orch setup --host-default  использовать модель хоста")
     print("  qa-orch config show    показать текущую модельную политику")
     print("  qa-orch reload         перечитать и проверить модельную политику")
-    print("  qa-orch benchmark      импортировать, сравнить скорость и оценить локальный benchmark")
     print("  qa-orch evidence       найти соседний код, собрать и проверить реестр evidence")
     print("  qa-orch repo           составить профиль проекта и выполнить аудит тестового набора")
     print("  qa-orch rules          привязать явные правила к контексту ревью")
@@ -655,10 +654,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args[0] == "setup":
             return _setup(args[1:])
-        if args[0] == "benchmark":
-            from qa_orchestrator.benchmark import benchmark_main
-
-            return benchmark_main(args[1:])
         if args[0] == "evidence":
             from qa_orchestrator.evidence import evidence_main
 

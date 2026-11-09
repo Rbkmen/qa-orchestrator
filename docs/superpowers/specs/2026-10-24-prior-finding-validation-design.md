@@ -20,7 +20,7 @@ profile, run, provider, or model call.
 ## Non-goals
 
 - Add a new review profile or execution group.
-- Change finding acceptance, merge decisions, severity, or benchmark scoring.
+- Change finding acceptance, merge decisions, or severity.
 - Copy implementation or prompt text from source-available Klaussy projects.
 
 ## Approaches
@@ -51,5 +51,3 @@ disposition is correct.
 
 - Add a focused profile-contract test and confirm it fails before implementation.
 - Run the review-profile tests, the full test suite, Ruff, and `git diff --check`.
-- Do not run a provider-backed benchmark; a quality claim needs a blind,
-  adjudicated comparison.

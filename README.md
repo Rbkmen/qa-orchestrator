@@ -41,7 +41,6 @@ Reference the [canonical host rules](client-rules/generic/QA_ORCHESTRATOR_INSTRU
 | Evidence utilities | Immutable Git source/diff hashes, citation coordinates, exact context packets |
 | `HostReviewAdapter` | Async executor supervision, concurrency/time budgets, group barriers, attempts, and fixed-input synthesis replay |
 | `CodexProfileExecutor` | Installed CLI execution, strict output schema, report validation and reported usage |
-| Benchmark tools | Snapshot identity and scoring of explicitly adjudicated runs |
 
 The host owns source retrieval, defect confirmation, severity, final decisions, code edits, and external writes. Jira, GitLab, CI, TestRail, Sentry, and other sources come through the host's tools. Initialization instructions are advisory; `read_only=true` and `host_owns_decisions=true` describe review ownership, while session tools mutate local state.
 
@@ -139,7 +138,7 @@ Timeouts and explicit `RetryableProfileError` can be retried. Permanent failures
 
 `CodexProfileExecutor` uses an authenticated installed CLI, a fresh temporary workspace, read-only sandbox, no inherited user configuration, and a strict JSON schema. Invalid output or detected forbidden tool actions fail the call; timeout/cancellation terminates its process tree. In `host_default`, it requires an explicit model. Other runtimes use a custom executor.
 
-Optional checkpoints reuse validated reports only when context, rules, checklist, model policy, previous-group reports and executor/instruction identity match. Reuse is reported separately; disable it for independent benchmark repetitions. See [Host Adapter](docs/HOST_ADAPTER.md) and [execution tools](docs/REVIEW_UPGRADES.md).
+Optional checkpoints reuse validated reports only when context, rules, checklist, model policy, previous-group reports and executor/instruction identity match. Reuse is reported separately. See [Host Adapter](docs/HOST_ADAPTER.md) and [execution tools](docs/REVIEW_UPGRADES.md).
 
 ## Performance and evaluation
 
@@ -147,9 +146,7 @@ Narrow routing, concurrent groups, the clean-profile synthesis shortcut, checkpo
 
 `execution_attempts` records fresh successful, failed and cancelled calls, queue wait, duration and available phase/token observations. Missing usage remains unknown, never zero. Checkpoint reuse is separate; `model_seconds` includes the CLI/process interval rather than provider-only inference. No automatic price estimate is produced.
 
-Benchmark tools score pinned runs using explicit adjudications; they do not launch models or decide matches. The explicit-threshold quality gate is experimental. A named policy pins the dataset kind and digest, case/gold coverage and quality thresholds; `blocked` means its evidence is incomplete or mismatched, while `failed` means measured quality misses a threshold. No approved production policy ships in this repository.
 
-Speed comparisons report p95 and sample counts, keep missing queue measurements unknown, and assess recorded run order. Interleaving must alternate configurations; randomized order is reported as host-declared, not independently verified. `compare` is exploratory without `--quality-policy`; a gated candidate must meet the same pinned policy as its baseline and the policy's minimum repetition count. These tools do not prove adjudicator correctness or fresh independent model execution. See [Benchmark](docs/BENCHMARK.md), [Profile Evaluation](docs/PROFILE_EVALUATION.md), and the [audited ReviewBench baseline](docs/REVIEWBENCH_BASELINE.md).
 
 ## MCP tools
 
@@ -186,7 +183,6 @@ Reads do not extend TTL. Deletion neither finalizes a review nor cancels host ex
 | `qa-orch report status --input session.json` | Summarize a saved full session, input identity, source statuses, progress and next action |
 | `qa-orch report render --input report.json --brief` | Render a concise view; add `--session session.json` for the matching saved session's outcome, context and stop reason |
 | `qa-orch rules` | Bind explicit review rules |
-| `qa-orch benchmark import-reviewbench` / `import-reviewbench-set` / `split` / `diff-budget` / `score` / `reliability` / `compare` / `quality-gate` | Import references, split cases by pull request, score explicit adjudications, compare speed, and enforce declared quality thresholds |
 | `qa-orchestrator-doctor --json` | Read-only local diagnostics |
 
 `qa-orchestrator` aliases `qa-orch`. Running either without a subcommand starts the MCP server. These tools do not provide a one-command MR review and publication flow.
@@ -222,7 +218,7 @@ Pass overrides through the MCP client's environment. Restart the server connecti
 
 Session state is bounded and in memory by default. Optional SQLite restores non-expired unfinished sessions and finalized bound reviews with structured reports. Finalized legacy sessions without artifacts are removed. Checkpoints use a separate opt-in store; use one server process per session-store file. Persisted sessions containing the removed `omission_auditor` profile or its report fields are incompatible with this version and cause the configured session store to fail validation; use a different store path if needed.
 
-Stored reports can contain source-derived findings and descriptions. Raw packets, prompts, transcripts and benchmark artifacts are managed separately by the host. Profile reports are limited to 72 KiB each, final reports to 80 KiB each, and combined review artifacts to 288 KiB per session. Normal MCP calls need no network; installation, evidence tools and model execution may need it.
+Stored reports can contain source-derived findings and descriptions. Raw packets, prompts, and transcripts are managed separately by the host. Profile reports are limited to 72 KiB each, final reports to 80 KiB each, and combined review artifacts to 288 KiB per session. Normal MCP calls need no network; installation, evidence tools and model execution may need it.
 
 Validation proves structure, identity and reported sequence, not source completeness, defect truth or runtime success. The CLI read-only sandbox restricts writes, not all reads; strict read isolation needs an OS/container boundary. Forbidden-action detection cannot prove an action never started. No autonomous external writes or learned persistent QA memory are added.
 

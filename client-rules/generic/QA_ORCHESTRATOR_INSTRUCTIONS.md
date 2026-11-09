@@ -173,10 +173,10 @@ For a supplied MR URL, obtain its complete diff from the configured GitLab MCP a
   evidence. Rules never suppress findings automatically. The host adapter supplies the complete digest as `review_rules_sha256` in every profile and final report; omit it without a
   bound ruleset. Rule changes require a new session.
 - Per-profile checkpoints may reuse validated reports only for the same complete input and explicit executor/instruction version. Mark reused profiles separately from fresh
-  execution; disable reuse for independent benchmarks. The optional Codex CLI executor reviews only the packet and uses a read-only writes sandbox; strict filesystem read isolation
+  execution. The optional Codex CLI executor reviews only the packet and uses a read-only writes sandbox; strict filesystem read isolation
   requires host OS/container controls. See `docs/REVIEW_UPGRADES.md` for configuration/limits.
 - For synthesis-prompt experiments, use `HostReviewAdapter.replay_synthesis` with the same completed session and an injected host executor. Compare the returned `inputs_sha256`,
-  `prompt_sha256`, and report on a pinned benchmark; the replay report is not persisted or substituted for the host's final decision.
+  `prompt_sha256`, and report; the replay report is not persisted or substituted for the host's final decision.
 
 ### Confirmation and traceability
 

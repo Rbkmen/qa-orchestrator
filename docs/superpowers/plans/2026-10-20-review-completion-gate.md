@@ -18,7 +18,7 @@
 - A strict `completed` outcome requires complete required-input metadata and a closed ledger bound to the same head, changed paths, and discovery digest; any ledger evidence refs must belong to the bound packet.
 - `partial` and `blocked` outcomes remain available when coverage is incomplete.
 - Closure remains scoped to the recorded bounded discovery; it is not exhaustive repository coverage.
-- No external provider reads, credentials, benchmark thresholds, or adjudicated corpus are introduced.
+- No external provider reads, or credentials are introduced.
 
 ## Review Focus
 

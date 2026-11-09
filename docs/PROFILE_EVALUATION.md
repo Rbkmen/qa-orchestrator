@@ -1,6 +1,6 @@
 # Profile and Bundle Evaluation
 
-This is a small, synthetic smoke pack for checking role boundaries and bundle selection. It is not a model benchmark, and the MCP server does not collect host execution statistics. Bound profile reports can carry optional host-reported timing and token counts; they are not independently verified. Run smoke cases locally with the model configuration you intend to use; do not save raw model responses or per-run scores in the repository.
+This is a small, synthetic smoke pack for checking role boundaries and bundle selection. The MCP server does not collect host execution statistics. Bound profile reports can carry optional host-reported timing and token counts; they are not independently verified. Run smoke cases locally with the model configuration you intend to use; do not save raw model responses or per-run scores in the repository.
 
 ## How to use it
 
@@ -55,42 +55,6 @@ These checks validate host scheduling semantics, not model quality or elapsed-ti
 5. Make one worker fail; confirm it is retried or run in the parent before the group is recorded, and an unresolved failure ends as `partial` or `blocked` rather than a false completion.
 
 The MCP server only publishes the schedule and validates reported transition order; it does not launch workers or verify concurrency. Run these checks in a client adapter or host that can expose worker-start and completion events.
-
-## Representative quality and speed benchmark
-
-Use the [local benchmark runner](BENCHMARK.md) to import pinned ReviewBench references and score explicit adjudications. It keeps missing cases and unknown token usage visible and does not perform automatic semantic judging.
-
-After scoring, `qa-orch benchmark quality-gate` can enforce approved minimum
-precision/recall and maximum high-impact misses, with optional evidence,
-location, and latency limits. No representative adjudicated benchmark is checked
-into this repository, so CI tests the gate behavior with synthetic data; run the
-gate on a complete, locally adjudicated set before claiming review-quality
-improvement. Scores carry a canonical dataset SHA-256; a promotion gate should
-require both `--require-dataset-kind curated` and the separately approved
-`--require-dataset-sha256` value. No approved representative dataset digest is
-currently checked into this repository.
-
-Use a fixed set of real, completed changes with human-adjudicated expected findings. Keep the same source snapshot, Evidence Packet, host instructions, profile checklists, model, and reasoning for each schedule under comparison. Match findings by the underlying failure mode, not wording; have a reviewer confirm evidence before counting a match.
-
-### Historical single-profile omission-audit comparison
-
-Historical evaluation compared `code_reviewer` with an additional `omission_auditor` on pinned cases. The auditor is no longer scheduled in new reviews. Existing runs do not establish that removing it preserves recall; future evaluation should compare the old and new routes on the same adjudicated cases and include latency and token cost.
-
-Record per case:
-
-- valid matched findings, unsupported candidates, and expected findings missed;
-- precision and recall, plus missed high-impact findings;
-- evidence-reference validity and source-location accuracy;
-- correct/unsupported rates for `high`, `medium`, and `low` confidence separately;
-- total wall-clock time, per-profile start/completion time, worker start skew, barrier wait, and available input/output token counts.
-
-Attach `execution_metrics` to a profile report only when the host can report accurate UTC start/completion timestamps and token usage. Compute full-run elapsed time and concurrency/barrier measurements in the host scheduler; the orchestrator cannot observe them. Compare the `python_backend` two-wave schedule with the experimental single-wave schedule on the same task set. Interleave or randomize baseline/candidate run order and pair attempts on the same case; the scorer requires matching attempt numbers but cannot enforce run order. Keep raw model responses and source snippets outside the repository; publish only aggregate results. Do not claim a quality, calibration, or speed improvement until this benchmark has actually run.
-
-### Python backend parallel-start experiment
-
-`python_backend` now runs `code_explorer` first, then starts `python_reviewer` and `pr_test_analyzer` together with the relevant explorer report. Existing sessions retain their recorded schedule.
-
-The former single-wave schedule has not been evaluated against the two-wave schedule. Apply the benchmark protocol above before reintroducing it; assess both quality and operational cost. The two-wave schedule also has no measured quality advantage yet.
 
 ## Synthetic profile cases
 

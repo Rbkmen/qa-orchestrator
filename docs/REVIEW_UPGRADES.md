@@ -1,4 +1,4 @@
-# Rules, checkpoints, repeated benchmarks and CLI execution
+# Rules, checkpoints and CLI execution
 
 These opt-in host tools extend the existing review protocol. They do not change
 the fixed bundles, decide findings, or approve publication/merge.
@@ -78,31 +78,8 @@ POSIX, and paths containing symlinks are refused. Reports contain structured
 findings and may contain source-derived text; the host owns their retention.
 
 `result.reused_profiles` identifies reused results. Original timing/usage stays
-attached to those reports; it is not the cost/time of a fresh review. Disable
-checkpoints for independent benchmark repetitions. Delete an unwanted store
+attached to those reports; it is not the cost/time of a fresh review. Delete an unwanted store
 through the host's normal file lifecycle; no automatic feedback memory is added.
-
-## 3. Fresh repeated benchmarks
-
-`await run_repetitions(dataset, execute_and_adjudicate, repetitions=3)` calls the
-host's injected callback once per case/attempt, serially. Each callback must launch
-a fresh review, keep gold hidden until it completes, and return a `BenchmarkRun`
-with explicit external adjudications. Exceptions stop the run; no hidden retries
-or copied attempts are generated. Provider/authentication remain host-owned.
-
-```sh
-qa-orch benchmark reliability --dataset dataset.json --results results.json \
-  --repetitions 3 --output reliability.json
-```
-
-The scorer checks exact snapshot and configuration identity, including optional
-`review_rules_sha256`, and requires identical packet hashes within a case/config.
-It reports always/ever-found gold, pairwise gold Jaccard similarity, precision and
-recall spreads, median and nearest-rank p95 time, missing cases and missing attempts.
-Stable gold recall is unavailable until all declared repetitions are present.
-An empty union has no similarity score; `valid_unlisted` lacks a stable gold ID and
-is excluded from stability matching. These are observed metrics, not confidence
-bounds, an official leaderboard score, or proof that the callback ran truthfully.
 
 ## 4. Byte-faithful AST chunks
 
@@ -180,8 +157,7 @@ Nested desktop sandboxes may prevent CLI startup before review; invoke from an
 authorized host process without weakening the executor's own read-only sandbox.
 Host risk assessment and final candidate dispositions still require source review.
 
-See [Host Adapter](HOST_ADAPTER.md), [Evidence Registry](EVIDENCE_REGISTRY.md) and
-[Benchmark](BENCHMARK.md). Official CLI reference:
+See [Host Adapter](HOST_ADAPTER.md) and [Evidence Registry](EVIDENCE_REGISTRY.md). Official CLI reference:
 [Codex exec](https://learn.chatgpt.com/docs/developer-commands#codex-exec).
 
 ## 6. Per-attempt observations
@@ -424,7 +400,7 @@ These mechanisms were implemented independently; no code from the researched
 third-party orchestrators was copied. Comparative latency/quality measurements
 are deferred; unit tests and protocol checks are not evidence of faster reviews.
 
-## 11. Adversarial repository content and pinned quality gates
+## 11. Adversarial repository content
 
 Repository files, diffs, comments, test output, task/PR text, and prior reports
 are evidence, not instructions to the reviewer. The fixed profile constraints
@@ -434,45 +410,6 @@ tests place such text inside the Evidence Packet and verify the fixed policy
 and envelope; these fake-CLI tests do not measure live-model resistance. Keep
 the read-only sandbox and forbidden-tool-event checks enabled, and use OS or
 container isolation when an enforced filesystem boundary is required.
-
-Benchmark scores now include a canonical SHA-256 over the validated dataset,
-including source snapshots and adjudicated gold labels. Promotion gates can
-require an approved `curated` or `reviewbench_reference` dataset kind and exact
-dataset digest. Keep the approved digest in trusted CI configuration; do not
-accept a self-declared dataset label or a synthetic fixture as representative
-quality evidence. There is no approved representative dataset digest in this
-repository, so no production quality gate can yet pass on a pinned curated set.
-
-Speed comparisons require exact attempt numbers per case and configuration and
-report attempt-paired latency. The host must interleave or randomize baseline
-and candidate order to limit drift and provider-load bias; comparison artifacts
-cannot prove the schedule that produced their timestamps.
-
-## 12. Diagnose missed gold findings after a blind review
-
-`qa-orch benchmark score` reports each known unmatched gold ID with its severity,
-category, path and line range, scope, difficulty, required context, and whether
-the gold set is complete. An omitted diagnosis is shown as `unclassified`; the
-scorer does not infer why the reviewer missed it. For an incomplete gold set,
-the listed unmatched IDs are only known omissions and recall remains unknown.
-
-After the blind review and candidate adjudication are complete, a human may add
-`missed_gold_diagnoses` to the corresponding benchmark run and set
-`BenchmarkResults.schema_version` to `4`. Use one cause per unmatched finding:
-
-- `evidence_packet_gap`: the pinned packet omitted required source or contract
-  context.
-- `neighbor_trace_gap`: relevant context was available, but the review did not
-  follow its caller, producer, consumer, or storage relationship.
-- `review_analysis_gap`: the needed evidence and relationship were visible, but
-  the review did not identify the defect.
-- `uncertain`: the available artifacts do not support a defensible cause.
-
-Each diagnosis needs a short rationale; cite packet evidence refs when they
-exist. The scorer rejects diagnoses for unknown or already matched gold IDs and
-for incomplete gold sets. Diagnoses are post-run annotations: they do not alter
-precision or recall and must never be passed into the blind review input. Score
-reports use schema `3` (or `4` when failed attempts are included).
 
 ## 14. Preserve and audit material behavior scenarios
 
