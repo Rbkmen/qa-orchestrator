@@ -361,7 +361,7 @@ def test_documentation_contains_no_retired_runtime_terms():
 
 
 @pytest.mark.asyncio
-async def test_launcher_exposes_ten_tools(monkeypatch, tmp_path):
+async def test_launcher_exposes_tools(monkeypatch, tmp_path):
     virtual_env = str(Path(sys.executable).parent.parent)
     monkeypatch.setenv("VIRTUAL_ENV", virtual_env)
     monkeypatch.setenv("QA_ORCHESTRATOR_DATA_DIR", str(tmp_path))
@@ -416,6 +416,7 @@ async def test_launcher_exposes_ten_tools(monkeypatch, tmp_path):
         "delete_qa_orchestration",
         "renew_qa_orchestration",
         "resolve_git_review_input",
+        "prepare_remote_git_review_input",
     }
     assert prepared.structured_content["profile"] == "code_explorer"
     assert prepared_batch.structured_content["bundle"] == "ruby_backend"

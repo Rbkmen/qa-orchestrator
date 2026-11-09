@@ -1,10 +1,71 @@
 """Read and verify evidence from pinned Git objects."""
 
 import hashlib
+import os
+import re
 import subprocess
+import uuid
 from pathlib import Path
 
 from qa_orchestrator.contracts import EvidenceRecord, ReviewContext
+
+
+def prepare_remote_git_input(
+    repository: Path, remote: str, target: str, source: str, *,
+    observed_branch_head: str | None = None, mr_head: str | None = None, mr_base: str | None = None,
+) -> dict[str, object]:
+    """Fetch two named remote branches into temporary refs, leaving the worktree untouched."""
+    if not repository.is_absolute() or not remote or remote.startswith("-"):
+        raise ValueError("absolute repository path and configured remote name required")
+    for revision in (observed_branch_head, mr_head, mr_base):
+        if revision is not None and not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision):
+            raise ValueError("observed revisions must be full lowercase Git object IDs")
+    remotes = _git(repository, "remote").decode("utf-8").splitlines()
+    if remote not in remotes:
+        return {"status": "fetch_failed", "reason": "configured remote not found",
+                "next_action": "Continue with the complete GitLab diff if available."}
+    for branch in (target, source):
+        if not branch or branch.startswith(("-", "refs/")):
+            raise ValueError("expected remote branch names")
+        _git(repository, "check-ref-format", f"refs/heads/{branch}")
+    namespace = f"refs/qa-orchestrator/{uuid.uuid4().hex}"
+    target_ref, source_ref = f"{namespace}/target", f"{namespace}/source"
+    command = ["git", "-C", str(repository), "-c", "maintenance.auto=false", "fetch",
+               "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--",
+               remote, f"refs/heads/{target}:{target_ref}", f"refs/heads/{source}:{source_ref}"]
+    try:
+        try:
+            result = subprocess.run(command, capture_output=True, check=False, timeout=60,
+                                    env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+        except (OSError, subprocess.TimeoutExpired):
+            return {"status": "fetch_failed", "reason": "fetch could not complete",
+                    "next_action": "Continue with the complete GitLab diff if available."}
+        if result.returncode:
+            return {"status": "fetch_failed", "reason": "fetch failed",
+                    "next_action": "Continue with the complete GitLab diff if available."}
+        target_sha = _git(repository, "rev-parse", "--verify", target_ref).decode("ascii").strip()
+        head_sha = _git(repository, "rev-parse", "--verify", source_ref).decode("ascii").strip()
+        try:
+            base_sha = _git(repository, "merge-base", target_sha, head_sha).decode("ascii").strip()
+            result_data = resolve_git_input(repository, base_sha, head_sha)
+        except ValueError:
+            return {"status": "comparison_unavailable", "reason": "merge base or diff unavailable",
+                    "next_action": "Continue with the complete GitLab diff if available."}
+        def compare(observed: str | None, actual: str) -> str:
+            return "unavailable" if observed is None else ("match" if observed == actual else "mismatch")
+
+        return {"status": "resolved", "target_sha": target_sha, **result_data,
+                "revision_comparison": {
+                    "branch_head": compare(observed_branch_head, head_sha),
+                    "mr_head": compare(mr_head, head_sha),
+                    "mr_base": compare(mr_base, base_sha),
+                    "scope": "Host-supplied observations; patch identity, provenance and freshness are not verified.",
+                },
+                "comparison_note": "Local merge base; verify it matches the authoritative MR comparison."}
+    finally:
+        for ref in (target_ref, source_ref):
+            subprocess.run(["git", "-C", str(repository), "update-ref", "-d", ref],
+                           capture_output=True, check=False)
 
 
 def _git(repository: Path, *args: str) -> bytes:

@@ -117,6 +117,49 @@ def test_partial_task_extraction_keeps_review_partial_but_does_not_prevent_triag
     assert input_manifest_completeness(context)["status"] == "partial"
 
 
+def test_bound_review_cannot_stop_unfinished_profile_without_execution_blocker(tmp_path, bound_review_context):
+    context = context_with_sources(bound_review_context, [source("MR", "merge_request", criteria_status="none")])
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review", context, require_review_preflight=True)
+    service.advance_qa_orchestration(AdvanceQaOrchestrationRequest(
+        run_id=started.run_id, completed_step="triage", status="completed",
+        selected_profile="ruby_reviewer", implementation_review=True,
+    ))
+    stop = AdvanceQaOrchestrationRequest(
+        run_id=started.run_id, completed_step="primary_review", status="partial",
+        stop_reason="MR revisions unavailable",
+    )
+    with pytest.raises(ValueError, match="review_execution_blocker"):
+        service.advance_qa_orchestration(stop)
+    assert service.get_qa_orchestration(started.run_id).status == "active"
+    stopped = service.advance_qa_orchestration(stop.model_copy(update={
+        "review_execution_blocker": "Review executor failed to start"
+    }))
+    assert stopped.status == "partial"
+
+
+@pytest.mark.asyncio
+async def test_mcp_preserves_unfinished_bound_review_when_blocker_is_missing(tmp_path, bound_review_context):
+    context = context_with_sources(bound_review_context, [source("MR", "merge_request", criteria_status="none")])
+    async with Client(build_server(OrchestratorService.from_settings(data_dir=tmp_path))) as client:
+        started = await client.call_tool("start_qa_orchestration", {
+            "task_type": "ordinary_review", "review_context": context.model_dump(mode="json"),
+        })
+        run_id = started.structured_content["run_id"]
+        await client.call_tool("advance_qa_orchestration", {
+            "run_id": run_id, "completed_step": "triage", "status": "completed",
+            "selected_profile": "ruby_reviewer", "implementation_review": True,
+        })
+        with pytest.raises(ToolError, match="review_execution_blocker"):
+            await client.call_tool("advance_qa_orchestration", {
+                "run_id": run_id, "completed_step": "primary_review", "status": "partial",
+                "stop_reason": "MR revisions unavailable",
+            })
+        state = await client.call_tool("get_qa_orchestration", {"run_id": run_id})
+        assert state.structured_content["status"] == "active"
+        assert state.structured_content["current_step"] == "primary_review"
+
+
 @pytest.mark.parametrize("blocker", ["", "   "])
 def test_execution_blocker_rejects_blank_text(blocker):
     with pytest.raises(ValueError):

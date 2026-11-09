@@ -156,6 +156,7 @@ Speed comparisons report p95 and sample counts, keep missing queue measurements 
 | Tool | Purpose |
 |---|---|
 | `resolve_git_review_input` | Pin local Git refs and exact diff metadata |
+| `prepare_remote_git_review_input` | Fetch remote branches into temporary refs and prepare a merge-base diff |
 | `get_qa_orchestration_catalog` | Profiles, bundles and schedules |
 | `prepare_qa_orchestration` | One profile checklist |
 | `prepare_qa_orchestration_bundle` | Bundle checklists and groups |

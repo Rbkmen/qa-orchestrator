@@ -22,7 +22,7 @@ def _manifest_v2(context):
 
 
 @pytest.mark.asyncio
-async def test_server_exposes_ten_tools(tmp_path):
+async def test_server_exposes_tools(tmp_path):
     service = OrchestratorService.from_settings(data_dir=tmp_path)
 
     async with Client(build_server(service)) as client:
@@ -42,7 +42,32 @@ async def test_server_exposes_ten_tools(tmp_path):
         "delete_qa_orchestration",
         "renew_qa_orchestration",
         "resolve_git_review_input",
+        "prepare_remote_git_review_input",
     }
+
+
+@pytest.mark.asyncio
+async def test_remote_preparation_reports_fetch_failure_through_mcp(tmp_path):
+    import asyncio
+
+    process = await asyncio.create_subprocess_exec("git", "init", "-q", str(tmp_path))
+    assert await process.wait() == 0
+    async with Client(build_server(OrchestratorService.from_settings(data_dir=tmp_path))) as client:
+        result = await client.call_tool("prepare_remote_git_review_input", {
+            "repository": str(tmp_path), "remote": "missing", "target": "main", "source": "feature",
+        })
+    assert result.structured_content["status"] == "fetch_failed"
+    assert "diff" in result.structured_content["next_action"].lower()
+
+
+@pytest.mark.asyncio
+async def test_remote_preparation_rejects_short_observed_revision_through_mcp(tmp_path):
+    async with Client(build_server(OrchestratorService.from_settings(data_dir=tmp_path))) as client:
+        with pytest.raises(ToolError, match="full lowercase"):
+            await client.call_tool("prepare_remote_git_review_input", {
+                "repository": str(tmp_path), "remote": "origin", "target": "main", "source": "feature",
+                "observed_branch_head": "1a1011a6",
+            })
 
 
 @pytest.mark.asyncio
@@ -178,6 +203,9 @@ async def test_server_publishes_tool_annotations_and_schemas(tmp_path):
         tools = {tool.name: tool for tool in await client.list_tools()}
 
     advance_properties = tools["advance_qa_orchestration"].inputSchema["properties"]
+    fetch_annotations = tools["prepare_remote_git_review_input"].annotations
+    assert fetch_annotations.readOnlyHint is False
+    assert fetch_annotations.openWorldHint is True
     assert {"needs_deep_analysis", "reason_code"}.isdisjoint(advance_properties)
     assert tools["advance_qa_orchestration"].inputSchema["properties"]["completed_step"][
         "enum"

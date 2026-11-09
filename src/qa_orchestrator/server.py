@@ -17,7 +17,7 @@ from qa_orchestrator.contracts import (
     ReviewRoute,
     ReviewRouteBatch,
 )
-from qa_orchestrator.git_evidence import resolve_git_input
+from qa_orchestrator.git_evidence import prepare_remote_git_input, resolve_git_input
 from qa_orchestrator.model_policy import ModelPolicyResponse
 from qa_orchestrator.orchestration import (
     AdvanceQaOrchestrationRequest,
@@ -66,6 +66,8 @@ CompletableStep = Literal["triage", "primary_review", "deep_review", "synthesis"
 SERVER_INSTRUCTIONS = (
     "These instructions are advisory; the host owns review decisions and model execution. "
     "For local Git branches or refs, resolve_git_review_input can pin both commits and their exact diff metadata. "
+    "When local MR refs are missing and policy permits fetch, call prepare_remote_git_review_input with "
+    "the configured remote and source/target branch names; if fetch fails, continue with a complete GitLab diff. "
     "Before calling start_qa_orchestration for ordinary_review or widget_review, complete review-context "
     "preflight: resolve the authoritative task/MR and repository; for Git input pin exact base_sha and head_sha; "
     "for an MR diff use input_kind=diff with no Git revisions and bind its exact hash and hunks; inspect the diff "
@@ -120,6 +122,30 @@ def build_server(service: OrchestratorService) -> FastMCP:
         Unresolvable refs fail; both refs must resolve to different commits with a nonempty diff.
         """
         return resolve_git_input(Path(repository), base, head)
+
+    @mcp.tool(title="Fetch and prepare Git review input", annotations={
+        "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True,
+    })
+    def prepare_remote_git_review_input(
+        repository: Annotated[str, Field(description="Absolute path to the local repository.")],
+        remote: Annotated[str, Field(description="Existing configured Git remote name, not a URL.")],
+        target: Annotated[str, Field(description="Target branch name from MR metadata.")],
+        source: Annotated[str, Field(description="Source branch name from MR metadata on the same remote.")],
+        observed_branch_head: Annotated[str | None, Field(description="Full current source branch commit ID observed independently; omit if unknown.")] = None,
+        mr_head: Annotated[str | None, Field(description="Full MR diff head ID from current MR version metadata; omit if unknown.")] = None,
+        mr_base: Annotated[str | None, Field(description="Full MR diff base ID from the same MR version metadata; omit if unknown.")] = None,
+    ) -> dict[str, object]:
+        """Fetch named branches into temporary refs and resolve their merge-base diff.
+
+        Does not change the checkout or worktree. Fetch writes Git objects and temporary local refs,
+        contacts the configured remote, and removes the temporary refs. Validate the merge base and
+        head against host-supplied observations, when present. The server does not retrieve or
+        authenticate those observations, confirm their freshness, or bind the GitLab patch to them.
+        Different source repositories require another route.
+        If fetch fails, continue with an available complete GitLab diff and record its limitations.
+        """
+        return prepare_remote_git_input(Path(repository), remote, target, source,
+                                        observed_branch_head=observed_branch_head, mr_head=mr_head, mr_base=mr_base)
 
     @mcp.tool(title="Read specialist review checklist", annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def prepare_qa_orchestration(
@@ -428,7 +454,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
         ] = None,
         review_execution_blocker: Annotated[
             str | None,
-            Field(min_length=1, max_length=2000, description="When a task source failed but the MR is bound, explain separately why review profiles cannot run. A source failure alone is not a blocker; host attestation, not independently verified."),
+            Field(min_length=1, max_length=2000, description="Required to stop an unfinished bound v2 primary review and when task retrieval failed at triage but the MR is bound: state the observed reason profiles cannot run. Missing local refs or SHA alone do not block a bound diff review. Host attestation, not independently verified."),
         ] = None,
     ) -> QaOrchestrationAdvanceResult:
         """Record one active QA step's result; return updated state and next_action instructions for the host.

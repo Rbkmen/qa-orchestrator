@@ -641,10 +641,10 @@ class AdvanceQaOrchestrationRequest(BaseModel):
     @model_validator(mode="after")
     def validate_transition_signal(self) -> "AdvanceQaOrchestrationRequest":
         if self.review_execution_blocker is not None and (
-            not self.review_execution_blocker.strip() or self.completed_step is not OrchestrationStep.TRIAGE
+            not self.review_execution_blocker.strip() or self.completed_step not in {OrchestrationStep.TRIAGE, OrchestrationStep.PRIMARY_REVIEW}
             or self.status not in {"partial", "blocked"}
         ):
-            raise ValueError("review_execution_blocker requires a nonblank early triage stop reason")
+            raise ValueError("review_execution_blocker requires a nonblank early triage or primary review stop reason")
         if self.stop_reason is not None:
             if not self.stop_reason.strip():
                 raise ValueError("stop_reason must not be blank")
@@ -1113,6 +1113,19 @@ class QaOrchestrator:
                 raise OrchestrationError("illegal transition")
 
             if request.status in ("partial", "blocked"):
+                if (
+                    session.current_step is OrchestrationStep.PRIMARY_REVIEW
+                    and session.review_context is not None
+                    and session.review_context.input_manifest is not None
+                    and session.review_context.input_manifest.schema_version == 2
+                    and not request.review_execution_blocker
+                ):
+                    raise ValueError(
+                        "The primary review is unfinished. Continue the selected profiles or provide "
+                        "review_execution_blocker with the observed reason they cannot run. Missing "
+                        "local refs or SHA alone do not block a complete bound diff review. Fetch missing "
+                        "refs when permitted, or continue with the bound diff and record its limits."
+                    )
                 if (
                     session.current_step is OrchestrationStep.TRIAGE
                     and session.review_context is not None

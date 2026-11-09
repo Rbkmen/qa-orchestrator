@@ -319,6 +319,7 @@ only when the host intentionally discards that particular session.
 The orchestrator must publish exactly:
 
 - `resolve_git_review_input`;
+- `prepare_remote_git_review_input`;
 - `prepare_qa_orchestration`;
 - `prepare_qa_orchestration_bundle`;
 - `get_qa_orchestration_model_policy`;
