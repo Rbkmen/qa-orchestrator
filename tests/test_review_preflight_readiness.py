@@ -61,6 +61,85 @@ def test_unavailable_source_may_start_but_remains_partial(tmp_path, bound_review
     assert input_manifest_completeness(context)["status"] == "partial"
 
 
+def test_failed_task_with_bound_mr_requires_separate_review_blocker(tmp_path, bound_review_context):
+    context = context_with_sources(bound_review_context, [
+        source("JIRA", "task", retrieval_status="failed", extraction_status="unknown"),
+        source("MR", "merge_request", criteria_status="none"),
+    ])
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review", context, require_review_preflight=True)
+    request = AdvanceQaOrchestrationRequest(
+        run_id=started.run_id, completed_step="triage", status="partial",
+        stop_reason="Jira 503", preparation_recovery="attempted",
+    )
+    with pytest.raises(ValueError, match="review_execution_blocker"):
+        service.advance_qa_orchestration(request)
+    assert service.get_qa_orchestration(started.run_id).status == "active"
+    stopped = service.advance_qa_orchestration(request.model_copy(update={
+        "review_execution_blocker": "Review executor unavailable: connection failed"
+    }))
+    assert stopped.review_execution_blocker == "Review executor unavailable: connection failed"
+
+
+def test_execution_blocker_visible_in_restored_session_status(tmp_path, bound_review_context):
+    from qa_orchestrator.orchestration import QaOrchestrator
+    from qa_orchestrator.report import render_session_status
+    from qa_orchestrator.session_store import SqliteSessionStore
+
+    context = context_with_sources(bound_review_context, [
+        source("JIRA", "task", retrieval_status="failed", extraction_status="unknown"),
+        source("MR", "merge_request", criteria_status="none"),
+    ])
+    store = SqliteSessionStore(tmp_path / "sessions.sqlite3")
+    orchestrator = QaOrchestrator(ttl_seconds=60, max_sessions=10, session_store=store)
+    started = orchestrator.start("ordinary_review", context)
+    orchestrator.advance(run_id=started.run_id, completed_step="triage", status="partial",
+                         stop_reason="Jira 503", preparation_recovery="attempted",
+                         review_execution_blocker="Executor unavailable")
+    restored = QaOrchestrator(ttl_seconds=60, max_sessions=10, session_store=store).get(started.run_id)
+    status = render_session_status(restored)
+    assert "Stop reason (host-reported): Jira 503" in status
+    assert "Review execution blocker (host-reported): Executor unavailable" in status
+
+
+def test_partial_task_extraction_keeps_review_partial_but_does_not_prevent_triage(tmp_path, bound_review_context):
+    context = context_with_sources(bound_review_context, [
+        source("JIRA", "task", extraction_status="partial"),
+        source("MR", "merge_request", criteria_status="none"),
+    ])
+    service = OrchestratorService.from_settings(data_dir=tmp_path)
+    started = service.start_qa_orchestration("ordinary_review", context, require_review_preflight=True)
+    advanced = service.advance_qa_orchestration(AdvanceQaOrchestrationRequest(
+        run_id=started.run_id, completed_step="triage", status="completed",
+        selected_profile="code_reviewer", implementation_review=True,
+    ))
+    assert advanced.current_step == "primary_review"
+    assert input_manifest_completeness(context)["status"] == "partial"
+
+
+@pytest.mark.parametrize("blocker", ["", "   "])
+def test_execution_blocker_rejects_blank_text(blocker):
+    with pytest.raises(ValueError):
+        AdvanceQaOrchestrationRequest(run_id="qar-test", completed_step="triage", status="partial",
+                                      review_execution_blocker=blocker)
+
+
+@pytest.mark.asyncio
+async def test_mcp_failed_task_can_continue_review_or_record_execution_blocker(tmp_path, bound_review_context):
+    context = context_with_sources(bound_review_context, [
+        source("JIRA", "task", retrieval_status="failed", extraction_status="unknown"),
+        source("MR", "merge_request", criteria_status="none"),
+    ])
+    async with Client(build_server(OrchestratorService.from_settings(data_dir=tmp_path))) as client:
+        started = await client.call_tool("start_qa_orchestration", {"task_type": "ordinary_review", "review_context": context.model_dump(mode="json")})
+        run_id = started.structured_content["run_id"]
+        stop = {"run_id": run_id, "completed_step": "triage", "status": "partial", "stop_reason": "Jira 503", "preparation_recovery": "attempted"}
+        with pytest.raises(ToolError, match="review_execution_blocker"):
+            await client.call_tool("advance_qa_orchestration", stop)
+        selected = await client.call_tool("advance_qa_orchestration", {"run_id": run_id, "completed_step": "triage", "status": "completed", "selected_profile": "code_reviewer", "implementation_review": True})
+        assert selected.structured_content["current_step"] == "primary_review"
+
+
 def test_recorded_criteria_require_references(bound_review_context):
     with pytest.raises(ValueError, match="criteria_status"):
         context_with_sources(bound_review_context, [source("MR", "merge_request", criteria_status="recorded")])

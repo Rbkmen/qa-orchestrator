@@ -70,6 +70,17 @@ def test_partial_standalone_report_does_not_assume_stop_reason_was_unrecorded():
     assert "Stop reason (host-reported):** not supplied" in rendered
 
 
+def test_report_renders_separate_execution_blocker():
+    from qa_orchestrator.report import render_brief_report
+
+    report = FinalReviewReport(summary="Interrupted", profiles_reviewed=(ReviewAgent.CODE_REVIEWER,))
+    for renderer in (render_final_report, render_brief_report):
+        rendered = renderer(report, outcome="partial", stop_reason="Jira 503",
+                            review_execution_blocker="Executor unavailable")
+        assert "Jira 503" in rendered
+        assert "Executor unavailable" in rendered
+
+
 def test_review_boundaries_show_source_and_unverified_receipt(bound_review_context):
     report = FinalReviewReport(
         summary="Partial review", profiles_reviewed=(ReviewAgent.CODE_REVIEWER,),

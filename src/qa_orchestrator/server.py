@@ -424,6 +424,10 @@ def build_server(service: OrchestratorService) -> FastMCP:
             Literal["attempted", "unavailable", "not_attempted"] | None,
             Field(description="For a bound v2 review stopped at triage, report whether preparation recovery was attempted or unavailable; explain the actual cause in stop_reason. Host attestation only."),
         ] = None,
+        review_execution_blocker: Annotated[
+            str | None,
+            Field(min_length=1, max_length=2000, description="When a task source failed but the MR is bound, explain separately why review profiles cannot run. A source failure alone is not a blocker; host attestation, not independently verified."),
+        ] = None,
     ) -> QaOrchestrationAdvanceResult:
         """Record one active QA step's result; return updated state and next_action instructions for the host.
 
@@ -476,6 +480,7 @@ def build_server(service: OrchestratorService) -> FastMCP:
                 status=status,
                 stop_reason=stop_reason,
                 preparation_recovery=preparation_recovery,
+                review_execution_blocker=review_execution_blocker,
                 selected_bundle=selected_bundle,
                 selected_profile=selected_profile,
                 completed_profile=completed_profile,

@@ -452,6 +452,7 @@ class QaOrchestrationSession(BaseModel):
     current_profile: ReviewAgent | None = None
     completed_profiles: list[ReviewAgent] = Field(default_factory=list)
     stop_reason: str | None = Field(default=None, max_length=2000, description="Host-reported, sanitized reason for an early stop; not independently verified.")
+    review_execution_blocker: str | None = Field(default=None, max_length=2000, description="Host-reported reason review profiles cannot run; not independently verified.")
     preparation_recovery: Literal["attempted", "unavailable", "not_attempted"] | None = Field(
         default=None, description="Host-reported triage recovery assessment; not independently verified."
     )
@@ -615,6 +616,7 @@ class AdvanceQaOrchestrationRequest(BaseModel):
     completed_step: OrchestrationStep
     status: QaTaskOutcome
     stop_reason: str | None = Field(default=None, min_length=1, max_length=2000)
+    review_execution_blocker: str | None = Field(default=None, min_length=1, max_length=2000)
     preparation_recovery: Literal["attempted", "unavailable", "not_attempted"] | None = None
     request_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     expected_revision: int | None = Field(default=None, ge=0, strict=True)
@@ -638,6 +640,11 @@ class AdvanceQaOrchestrationRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_transition_signal(self) -> "AdvanceQaOrchestrationRequest":
+        if self.review_execution_blocker is not None and (
+            not self.review_execution_blocker.strip() or self.completed_step is not OrchestrationStep.TRIAGE
+            or self.status not in {"partial", "blocked"}
+        ):
+            raise ValueError("review_execution_blocker requires a nonblank early triage stop reason")
         if self.stop_reason is not None:
             if not self.stop_reason.strip():
                 raise ValueError("stop_reason must not be blank")
@@ -1035,6 +1042,7 @@ class QaOrchestrator:
         status: QaTaskOutcome,
         stop_reason: str | None = None,
         preparation_recovery: Literal["attempted", "unavailable", "not_attempted"] | None = None,
+        review_execution_blocker: str | None = None,
         request_id: str | None = None,
         expected_revision: int | None = None,
         selected_bundle: ReviewBundle | None = None,
@@ -1054,6 +1062,7 @@ class QaOrchestrator:
                 status=status,
                 stop_reason=stop_reason,
                 preparation_recovery=preparation_recovery,
+                review_execution_blocker=review_execution_blocker,
                 request_id=request_id,
                 expected_revision=expected_revision,
                 selected_bundle=selected_bundle,
@@ -1078,6 +1087,8 @@ class QaOrchestrator:
                 excluded.add("stop_reason")
             if request.preparation_recovery is None:
                 excluded.add("preparation_recovery")
+            if request.review_execution_blocker is None:
+                excluded.add("review_execution_blocker")
             if request.implementation_review is None:
                 excluded.add("implementation_review")
             if not request.acknowledge_limited_profile:
@@ -1112,12 +1123,18 @@ class QaOrchestrator:
                         raise ValueError("Record preparation_recovery as attempted or unavailable before stopping triage")
                     if request.preparation_recovery == "not_attempted":
                         raise ValueError("Recover the available preparation inputs and retry before stopping triage")
+                    sources = session.review_context.input_manifest.sources
+                    if (any(s.kind in {"task", "issue", "jira"} and s.required and s.retrieval_status == "failed" for s in sources)
+                        and any(s.kind == "merge_request" and s.retrieval_status == "complete" for s in sources)
+                        and not request.review_execution_blocker):
+                        raise ValueError("Jira or task retrieval failed but the MR is bound. Continue review or provide review_execution_blocker explaining why profiles cannot run; source failure alone is not a blocker")
                 updated = self._refresh_expiry(
                     session.model_copy(
                         update={
                             "status": OrchestrationStatus(request.status),
                             "stop_reason": request.stop_reason,
                             "preparation_recovery": request.preparation_recovery,
+                            "review_execution_blocker": request.review_execution_blocker,
                             "model_policy": None,
                             "next_action": _TERMINAL_ACTIONS[OrchestrationStatus(request.status)],
                         }

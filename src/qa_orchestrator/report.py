@@ -579,6 +579,7 @@ def render_final_report(
     report: FinalReviewReport, *, context: ReviewContext | None = None,
     outcome: QaTaskOutcome | None = None,
     stop_reason: str | None = None,
+    review_execution_blocker: str | None = None,
 ) -> str:
     """Render findings and non-finding outcomes without inventing evidence."""
     if context is not None:
@@ -617,6 +618,8 @@ def render_final_report(
             "- **Stop reason (host-reported):** "
             + (_text(stop_reason) if stop_reason else "not supplied")
         )
+        if review_execution_blocker:
+            lines.append("- **Review execution blocker (host-reported):** " + _text(review_execution_blocker))
         lines.append(
             "- **Known completion gaps (host-selected outcome):** "
             + ("; ".join(_text(gap) for gap in completion_gaps) if completion_gaps else
@@ -1023,6 +1026,8 @@ def render_session_status(session) -> str:
     if session.status.value in {"partial", "blocked"}:
         reason = _text(session.stop_reason) if session.stop_reason else "not recorded"
         lines.append(f"- Stop reason (host-reported): {reason}")
+        if session.review_execution_blocker:
+            lines.append("- Review execution blocker (host-reported): " + _text(session.review_execution_blocker))
     if context is None:
         lines.append("- Review input: not recorded")
     else:
@@ -1043,7 +1048,8 @@ def render_session_status(session) -> str:
 
 def render_brief_report(report: FinalReviewReport, *, context: ReviewContext | None = None,
                         outcome: QaTaskOutcome | None = None,
-                        stop_reason: str | None = None) -> str:
+                        stop_reason: str | None = None,
+                        review_execution_blocker: str | None = None) -> str:
     """Render a concise view of recorded findings and limitations."""
     if context is not None:
         report = complete_criterion_coverage(context, report)
@@ -1052,6 +1058,8 @@ def render_brief_report(report: FinalReviewReport, *, context: ReviewContext | N
              "Reported profiles: " + ", ".join(_code(profile.value) for profile in report.profiles_reviewed)]
     if outcome in {"partial", "blocked"}:
         lines.append("Stop reason (host-reported): " + (_text(stop_reason) if stop_reason else "not supplied"))
+        if review_execution_blocker:
+            lines.append("Review execution blocker (host-reported): " + _text(review_execution_blocker))
     lines.extend(("", "## Confirmed findings", ""))
     if not report.finding_candidates:
         lines.append("No confirmed findings in the reviewed scope.")
@@ -1131,6 +1139,7 @@ def report_main(argv: list[str]) -> int:
     )
     outcome = args.outcome
     stop_reason = None
+    review_execution_blocker = None
     if args.session:
         from qa_orchestrator.orchestration import QaOrchestrationSession
 
@@ -1146,10 +1155,12 @@ def report_main(argv: list[str]) -> int:
         context = session.review_context
         outcome = session.status.value
         stop_reason = session.stop_reason or "not recorded"
+        review_execution_blocker = session.review_execution_blocker
     if context is not None:
         validate_final_report_context(report, context)
     renderer = render_brief_report if args.brief else render_final_report
-    output = renderer(report, context=context, outcome=outcome, stop_reason=stop_reason)
+    output = renderer(report, context=context, outcome=outcome, stop_reason=stop_reason,
+                      review_execution_blocker=review_execution_blocker)
     if args.output:
         args.output.write_text(output, encoding="utf-8")
     else:

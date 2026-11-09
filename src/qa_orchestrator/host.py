@@ -768,6 +768,7 @@ class HostReviewAdapter:
                 rendered = render_final_report(
                     render_report, context=current.review_context, outcome=outcome,
                     stop_reason=current.stop_reason,
+                    review_execution_blocker=current.review_execution_blocker,
                 )
                 if output_path.exists() and output_path.is_dir():
                     raise ValueError("Markdown output path must be a file")
