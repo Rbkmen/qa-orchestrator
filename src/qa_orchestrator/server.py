@@ -560,7 +560,12 @@ def build_server(service: OrchestratorService) -> FastMCP:
 
     @mcp.tool(title="Summarize QA session status", annotations=READ_ONLY_TOOL_ANNOTATIONS)
     def get_qa_orchestration_status(run_id: RunId) -> dict[str, str]:
-        """Render retained session progress, sources and next action; does not resume or verify it."""
+        """Render retained profile progress, available reported metrics, sources and next action.
+
+        Checkpoint reuse and attempts absent from retained reports remain unknown; the host owns
+        execution and its result.summary_markdown() provides the current adapter invocation's
+        fuller ledger. This tool does not resume or verify a review.
+        """
         from qa_orchestrator.report import render_session_status
 
         return {"markdown": render_session_status(service.get_qa_orchestration(run_id))}

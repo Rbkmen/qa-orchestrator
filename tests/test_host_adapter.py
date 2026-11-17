@@ -1726,3 +1726,162 @@ async def test_concurrent_terminal_transition_is_reported_as_conflict(host_sessi
     assert result.session.revision == terminal.revision
     assert any(failure.reason == "session_revision_conflict" for failure in result.failures)
     assert len(result.unsaved_reports) == 1
+
+async def test_execution_summary_reports_fresh_attempts_and_unknown_usage(host_session):
+    service, run_id = host_session(profile=ReviewAgent.PYTHON_REVIEWER)
+
+    async def execute(job):
+        return report(job.profile, job.session.review_context)
+
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, execute, lambda _: DeepReviewSignals(),
+    )
+    summary = result.summary_markdown()
+    assert "python_reviewer" in summary
+    assert "completed" in summary
+    assert "unknown" in summary
+    assert "host-reported" in summary
+    assert "checkpoint" in summary.lower()
+
+async def test_execution_summary_distinguishes_retry_and_partial_failure(host_session):
+    service, run_id = host_session(profile=ReviewAgent.PYTHON_REVIEWER)
+
+    async def execute(job):
+        raise RetryableProfileError("temporary")
+
+    result = await HostReviewAdapter(
+        service, policy=HostExecutionPolicy(max_retries=1, retry_delay_seconds=0),
+    ).run_primary_review(run_id, execute, lambda _: DeepReviewSignals())
+    summary = result.summary_markdown()
+    assert "partial" in summary
+    assert "fresh attempts: 2" in summary
+    assert r"retryable\_error" in summary
+    assert "not reported complete" in summary
+    assert "Stop reason" in summary
+
+
+async def test_execution_summary_shows_reused_checkpoint_without_fresh_attempt(host_session):
+    from dataclasses import replace
+
+    service, run_id = host_session(profile=ReviewAgent.PYTHON_REVIEWER)
+
+    async def execute(job):
+        return report(job.profile, job.session.review_context)
+
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, execute, lambda _: DeepReviewSignals(),
+    )
+    reused = replace(result, reused_profiles=(ReviewAgent.PYTHON_REVIEWER,), execution_attempts=())
+    summary = reused.summary_markdown()
+    assert "checkpoint reused; fresh attempts: 0" in summary
+    assert "Checkpoints reused: 1" in summary
+
+@pytest.mark.parametrize("fail", [False, True])
+async def test_execution_progress_reaches_mcp_status(host_session, fail):
+    from fastmcp import Client
+
+    from qa_orchestrator.server import build_server
+
+    service, run_id = host_session(profile=ReviewAgent.PYTHON_REVIEWER)
+
+    async def execute(job):
+        if fail:
+            raise RetryableProfileError("temporary")
+        return report(job.profile, job.session.review_context)
+
+    await HostReviewAdapter(service, policy=HostExecutionPolicy(max_retries=0)).run_primary_review(
+        run_id, execute, lambda _: DeepReviewSignals(),
+    )
+    async with Client(build_server(service)) as client:
+        response = await client.call_tool("get_qa_orchestration_status", {"run_id": run_id})
+    summary = response.structured_content["markdown"]
+    assert "python_reviewer" in summary
+    assert ("not reported complete" if fail else "reported complete") in summary
+    assert "checkpoint reuse" in summary.lower() and "not retained" in summary.lower()
+    if fail:
+        assert "partial" in summary and "Stop reason" in summary
+
+
+async def test_failure_summary_explains_observed_preparation_error_without_secrets(host_session):
+    from fastmcp import Client
+
+    from qa_orchestrator.server import build_server
+
+    service, run_id = host_session(profile=ReviewAgent.PYTHON_REVIEWER)
+
+    async def execute(job):
+        job.observation.failure_kind = "input_preparation"
+        raise ValueError("secret-provider-detail")
+
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, execute, lambda _: DeepReviewSignals(),
+    )
+    assert "input_preparation" in result.session.stop_reason
+    for summary in (result.summary_markdown(),):
+        assert "preparing" in summary.lower()
+        assert "evidence packet" in summary.lower()
+        assert "secret-provider-detail" not in summary
+    async with Client(build_server(service)) as client:
+        response = await client.call_tool("get_qa_orchestration_status", {"run_id": run_id})
+    summary = response.structured_content["markdown"]
+    assert "preparing" in summary.lower()
+    assert "evidence packet" in summary.lower()
+    assert "secret-provider-detail" not in summary
+
+
+async def test_failure_summary_explains_timeout_without_guessing_provider_cause(host_session):
+    service, run_id = host_session(profile=ReviewAgent.PYTHON_REVIEWER)
+
+    async def execute(job):
+        await asyncio.sleep(1)
+
+    result = await HostReviewAdapter(service, HostExecutionPolicy(
+        profile_timeout_seconds=0.01, max_retries=0,
+    )).run_primary_review(run_id, execute, lambda _: DeepReviewSignals())
+    summary = result.summary_markdown().lower()
+    assert "time limit" in summary
+    assert "provider cause" in summary
+    assert "profile_timeout" in result.session.stop_reason
+
+
+async def test_checkpoint_read_failure_reports_specific_safe_reason(host_session, tmp_path, monkeypatch):
+    from qa_orchestrator.checkpoints import ProfileCheckpointStore
+    from qa_orchestrator.report import render_session_status
+
+    service, run_id = host_session(profile=ReviewAgent.PYTHON_REVIEWER)
+    store = ProfileCheckpointStore(tmp_path / "checkpoints.sqlite")
+
+    def fail_load(*_args):
+        raise OSError("private-storage-detail")
+
+    monkeypatch.setattr(store, "load", fail_load)
+
+    async def execute(job):
+        raise AssertionError("must not execute when checkpoint cannot be read")
+
+    result = await HostReviewAdapter(
+        service, checkpoint_store=store, executor_identity="fixture-v1"
+    ).run_primary_review(run_id, execute, lambda _: DeepReviewSignals())
+    assert result.failures[0].reason == "checkpoint_read_failed"
+    summary = render_session_status(result.session)
+    assert "checkpoint could not be read" in summary.lower()
+    assert "private-storage-detail" not in summary
+
+
+async def test_route_setup_failure_is_not_reported_as_assessment_error(host_session, monkeypatch):
+    service, run_id = host_session(profile=ReviewAgent.PYTHON_REVIEWER)
+
+    def fail_route(_profile):
+        raise ValueError("private-route-detail")
+
+    monkeypatch.setattr(service, "prepare_review_route", fail_route)
+
+    async def execute(job):
+        raise AssertionError("executor should not run")
+
+    result = await HostReviewAdapter(service).run_primary_review(
+        run_id, execute, lambda _: DeepReviewSignals(),
+    )
+    assert result.failures[0].reason == "profile_setup_failed"
+    assert "preparing the profile" in result.summary_markdown().lower()
+    assert "private-route-detail" not in result.summary_markdown()

@@ -618,6 +618,7 @@ def render_final_report(
             "- **Stop reason (host-reported):** "
             + (_text(stop_reason) if stop_reason else "not supplied")
         )
+        lines.extend(f"  - {_text(hint)}" for hint in _failure_hints(stop_reason))
         if review_execution_blocker:
             lines.append("- **Review execution blocker (host-reported):** " + _text(review_execution_blocker))
         lines.append(
@@ -1016,6 +1017,107 @@ def _render_manual_checks(report: FinalReviewReport, context: ReviewContext | No
     return [*lines, ""]
 
 
+_FAILURE_EXPLANATIONS = {
+    "input_preparation": "Failed while preparing the review input. Check the Evidence Packet, bound input and prompt size; the underlying cause is not recorded.",
+    "cli_failure": "The review CLI reported a failure. Check the CLI installation, authentication and model configuration; the provider cause is not established.",
+    "output_missing": "The executor returned no review output. Check the CLI execution and its output configuration; the cause is not established.",
+    "output_validation": "The review output failed validation. Check the executor output schema and evidence references; the cause is not established.",
+    "timeout": "An executor attempt timed out. Check its configured time limit and health; the provider cause is unknown.",
+    "cancelled": "An executor attempt was cancelled. Check the host's recorded cancellation reason; the underlying cause is unknown.",
+    "profile_timeout": "A profile exceeded its time limit. Check the profile timeout and executor health before retrying; the provider cause is unknown.",
+    "run_timeout": "The overall review exceeded its time limit. Check the run timeout and execution progress before retrying; the provider cause is unknown.",
+    "retry_exhausted": "The profile failed after all permitted retry attempts. Check the executor and any recorded failure stage before retrying; the underlying cause is unknown.",
+    "executor_error": "The profile executor failed. Check its configuration and available diagnostics; the underlying cause is unknown.",
+    "wrong_profile": "The executor returned a report for a different profile. Check the executor's profile binding.",
+    "profile_report_limit": "The profile report exceeded a validation or size limit. Check the report and reduce its size before retrying.",
+    "checkpoint_write_failed": "The checkpoint could not be saved. Check the checkpoint store path, permissions and available space; the underlying cause is unknown.",
+    "checkpoint_read_failed": "The checkpoint could not be read. Check the checkpoint store path, permissions and integrity; the underlying cause is unknown.",
+    "checkpoint_invalid": "A loaded checkpoint did not match the bound review. Check the checkpoint store and review input before retrying.",
+    "lease_error": "The session lease could not be renewed. Check the session state and availability before continuing.",
+    "transition_response_unavailable": "The session transition response was unavailable; it may have succeeded. Read the latest session before retrying.",
+    "report_or_assessment_error": "The reported profile result or risk assessment could not be accepted. Check the report and assessment against the bound review input.",
+    "session_revision_conflict": "The session changed concurrently. Read its latest state before continuing.",
+    "session_stop_failed": "The partial stop could not be recorded. Read the latest session before continuing.",
+    "session_unavailable": "The latest session could not be read. Its current state is unknown; restore access and inspect it before retrying.",
+    "missing_review_context": "The bound review context is missing. Prepare the review input before starting profiles.",
+    "profile_setup_failed": "Failed while preparing the profile route. Check the selected profile and orchestration configuration; the underlying cause is unknown.",
+}
+
+
+def _failure_hints(reason: str | None) -> list[str]:
+    """Explain only known host codes; free-text reasons are not evidence of a cause."""
+    if not reason:
+        return []
+    import re
+
+    codes = []
+    unknown = False
+    for entry in reason.split("; "):
+        match = re.fullmatch(r"(?:host|[a-z_]+): ([a-z_]+)(?: \[([a-z_]+)\])?", entry)
+        if match:
+            for code in (match.group(1), match.group(2)):
+                if code in _FAILURE_EXPLANATIONS and code not in codes:
+                    codes.append(code)
+                elif code is not None and code not in _FAILURE_EXPLANATIONS:
+                    unknown = True
+    hints = [_FAILURE_EXPLANATIONS[code] for code in codes]
+    if unknown:
+        hints.append("A failure code is not recognized; the underlying cause is unknown. Check the host's safe diagnostics and the latest session state.")
+    return hints
+
+
+def render_execution_summary(result) -> str:
+    """Render the host's current execution observations without inferring model work."""
+    session = result.session
+    elapsed = (result.completed_at - result.started_at).total_seconds()
+    lines = ["# Review execution", "", f"- Run: {_code(session.run_id)}",
+             (f"- Session status (host-reported): {_text(session.status.value)}; "
+              f"stage: {_text(session.current_step.value)}"),
+             f"- Session snapshot: {'current' if result.session_snapshot_fresh else 'stale; current status unknown'}",
+             f"- Adapter duration: {elapsed:.2f}s",
+             f"- Checkpoints reused: {len(result.reused_profiles)}",
+             "- Profile completion is host-reported; it does not prove the review occurred.",
+             "", "## Profiles", ""]
+    for profile in session.review_profiles:
+        attempts = [a for a in result.execution_attempts if a.profile == profile]
+        reused = profile in result.reused_profiles
+        state = "checkpoint reused" if reused else (
+            "reported complete" if profile in session.completed_profiles else "not reported complete"
+        )
+        lines.append(f"- {_code(profile.value)}: {state}; fresh attempts: {len(attempts)}")
+        for attempt in attempts:
+            input_tokens = str(attempt.input_tokens) if attempt.input_tokens is not None else "unknown"
+            output_tokens = str(attempt.output_tokens) if attempt.output_tokens is not None else "unknown"
+            lines.append(
+                f"  - Attempt {attempt.attempt}: {_text(attempt.outcome)}; "
+                f"execution {attempt.executor_seconds:.2f}s; queue {attempt.queue_seconds:.2f}s; "
+                f"tokens in/out {input_tokens}/{output_tokens}"
+            )
+    if not session.review_profiles:
+        lines.append("- No profiles recorded.")
+    lines.extend(("", "## Limitations", ""))
+    if result.failures:
+        for failure in result.failures:
+            name = failure.profile.value if failure.profile else "host"
+            lines.append(f"- {_text(name)}: {_text(failure.reason)}")
+    if result.unsaved_reports:
+        lines.append(f"- {len(result.unsaved_reports)} completed report(s) not saved to the session.")
+    if session.stop_reason:
+        lines.append(f"- Stop reason (host-reported): {_text(session.stop_reason)}")
+        lines.extend(f"  - {_text(hint)}" for hint in _failure_hints(session.stop_reason))
+    if session.review_execution_blocker:
+        lines.append(f"- Execution blocker (host-reported): {_text(session.review_execution_blocker)}")
+    context = session.review_context
+    if context is None or context.input_manifest is None:
+        lines.append("- Input completeness: unknown; source manifest unavailable.")
+    else:
+        completeness = input_manifest_completeness(context)
+        lines.append(f"- Input completeness (host-reported): {_text(completeness['status'])} — {_text(completeness['status_reason'])}")
+    if not result.failures and not result.unsaved_reports and not session.stop_reason:
+        lines.append("- No execution failures reported; review and verification may still be incomplete.")
+    return "\n".join(lines) + "\n"
+
+
 def render_session_status(session) -> str:
     """Summarize recorded state without asserting that reported work occurred."""
     context = session.review_context
@@ -1026,8 +1128,28 @@ def render_session_status(session) -> str:
     if session.status.value in {"partial", "blocked"}:
         reason = _text(session.stop_reason) if session.stop_reason else "not recorded"
         lines.append(f"- Stop reason (host-reported): {reason}")
+        lines.extend(f"  - {_text(hint)}" for hint in _failure_hints(session.stop_reason))
         if session.review_execution_blocker:
             lines.append("- Review execution blocker (host-reported): " + _text(session.review_execution_blocker))
+    if session.review_profiles:
+        lines.extend(("", "## Profile progress (host-reported)", ""))
+        reports = {report.profile: report for report in session.profile_reports}
+        for profile in session.review_profiles:
+            state = "reported complete" if profile in session.completed_profiles else "not reported complete"
+            report = reports.get(profile)
+            metrics = report.execution_metrics if report is not None else None
+            if metrics is None:
+                details = "execution metrics: unknown"
+            else:
+                elapsed = (metrics.completed_at - metrics.started_at).total_seconds()
+                input_tokens = str(metrics.input_tokens) if metrics.input_tokens is not None else "unknown"
+                output_tokens = str(metrics.output_tokens) if metrics.output_tokens is not None else "unknown"
+                details = (f"reported duration {elapsed:.2f}s; attempts {metrics.attempt_count}; "
+                           f"tokens in/out {input_tokens}/{output_tokens}")
+            lines.append(f"- {_code(profile.value)}: {state}; {details}")
+        lines.append("- Checkpoint reuse and unsuccessful attempts outside retained reports are not retained in the session; unknown here.")
+        lines.append("- Completion and metrics are host-reported and do not prove model inspection.")
+        lines.append("")
     if context is None:
         lines.append("- Review input: not recorded")
     else:
@@ -1058,6 +1180,7 @@ def render_brief_report(report: FinalReviewReport, *, context: ReviewContext | N
              "Reported profiles: " + ", ".join(_code(profile.value) for profile in report.profiles_reviewed)]
     if outcome in {"partial", "blocked"}:
         lines.append("Stop reason (host-reported): " + (_text(stop_reason) if stop_reason else "not supplied"))
+        lines.extend(f"- {_text(hint)}" for hint in _failure_hints(stop_reason))
         if review_execution_blocker:
             lines.append("Review execution blocker (host-reported): " + _text(review_execution_blocker))
     lines.extend(("", "## Confirmed findings", ""))
