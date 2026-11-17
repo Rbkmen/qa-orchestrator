@@ -1991,3 +1991,67 @@ def test_manual_check_cannot_be_empty_or_unfounded():
         "manual_checks": [{"action": " ", "expected_result": "Visible", "evidence_refs": []}]}
     with pytest.raises(ValueError):
         FinalReviewReport.model_validate(payload)
+
+
+def test_session_status_reports_profiles_and_limits_of_retained_metrics(tmp_path, bound_review_context):
+    from qa_orchestrator.contracts import ProfileReviewReport
+    from qa_orchestrator.report import render_session_status
+    from qa_orchestrator.service import OrchestratorService
+
+    session = OrchestratorService.from_settings(data_dir=tmp_path).start_qa_orchestration(
+        "ordinary_review", bound_review_context
+    ).model_copy(update={
+        "review_profiles": [ReviewAgent.CODE_REVIEWER, ReviewAgent.PYTHON_REVIEWER],
+        "completed_profiles": [ReviewAgent.CODE_REVIEWER],
+        "profile_reports": [ProfileReviewReport(profile=ReviewAgent.CODE_REVIEWER, scope="Reviewed")],
+    })
+    summary = render_session_status(session)
+    assert "code_reviewer" in summary and "python_reviewer" in summary
+    assert "reported complete" in summary and "not reported complete" in summary
+    assert "execution metrics: unknown" in summary
+    assert "checkpoint reuse" in summary.lower()
+    assert "not retained" in summary.lower()
+
+
+def test_session_status_displays_only_reported_execution_metrics(tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    from qa_orchestrator.contracts import ProfileExecutionMetrics, ProfileReviewReport
+    from qa_orchestrator.orchestration import QaOrchestrator
+    from qa_orchestrator.report import render_session_status
+
+    now = datetime.now(UTC)
+    metrics = ProfileExecutionMetrics(
+        started_at=now, completed_at=now + timedelta(seconds=2),
+        input_tokens=123, output_tokens=None, attempt_count=2,
+    )
+    session = QaOrchestrator(ttl_seconds=60, max_sessions=5).start("other").model_copy(update={
+        "review_profiles": [ReviewAgent.CODE_REVIEWER],
+        "completed_profiles": [ReviewAgent.CODE_REVIEWER],
+        "profile_reports": [ProfileReviewReport(
+            profile=ReviewAgent.CODE_REVIEWER, scope="Reviewed", execution_metrics=metrics,
+        )],
+    })
+    summary = render_session_status(session)
+    assert "reported duration 2.00s; attempts 2; tokens in/out 123/unknown" in summary
+
+
+def test_final_reports_explain_known_stop_codes_without_guessing_unknowns():
+    from qa_orchestrator.report import render_brief_report, render_final_report
+
+    report = FinalReviewReport(summary="Review stopped", profiles_reviewed=(ReviewAgent.CODE_REVIEWER,))
+    for renderer in (render_brief_report, render_final_report):
+        known = renderer(report, outcome="partial", stop_reason="host: run_timeout")
+        assert "overall review exceeded its time limit" in known
+        assert "provider cause is unknown" in known
+        unknown = renderer(report, outcome="partial", stop_reason="host: unrelated")
+        assert "provider cause" not in unknown
+
+
+def test_unknown_failure_code_reports_uncertainty_without_exposing_cause():
+    from qa_orchestrator.report import render_brief_report
+
+    report = FinalReviewReport(summary="Review stopped", profiles_reviewed=(ReviewAgent.CODE_REVIEWER,))
+    summary = render_brief_report(report, outcome="partial", stop_reason="host: new_failure_code")
+    assert "failure code is not recognized" in summary
+    assert "underlying cause is unknown" in summary

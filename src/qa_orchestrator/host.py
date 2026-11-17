@@ -145,6 +145,12 @@ class HostExecutionResult:
     session_snapshot_fresh: bool = True
     retained_cycles: tuple[RetainedReviewCycle, ...] = field(default=(), repr=False)
 
+    def summary_markdown(self) -> str:
+        """Render observations for this adapter invocation, not a persisted run history."""
+        from qa_orchestrator.report import render_execution_summary
+
+        return render_execution_summary(self)
+
 
 class SynthesisReplayInputs(BaseModel):
     """Fixed upstream review results for an in-memory synthesis prompt experiment."""
@@ -274,7 +280,10 @@ class HostReviewAdapter:
         async with semaphore:
             queue_seconds = perf_counter() - queued
             started_at = datetime.now(UTC)
-            route = self.service.prepare_review_route(profile)
+            try:
+                route = self.service.prepare_review_route(profile)
+            except Exception:  # noqa: BLE001 -- report the stage without private details
+                return HostProfileFailure(profile, "profile_setup_failed")
             key = None
             if self.checkpoint_store:
                 key = checkpoint_key(
@@ -287,14 +296,20 @@ class HostReviewAdapter:
                     previous_report_projection=previous_report_projection,
                     review_profiles=session.review_profiles,
                 )
-                cached = self.checkpoint_store.load(key)
+                try:
+                    cached = self.checkpoint_store.load(key)
+                except Exception:  # noqa: BLE001 -- do not expose storage errors
+                    return HostProfileFailure(profile, "checkpoint_read_failed")
                 if cached is not None and (
                     not cycle_enabled or self._cycle_checkpoint_eligible(context, cached)
                 ):
                     cached = self._with_changed_path_coverage_gaps(
                         session.review_context, cached
                     )
-                    self._validate_report(session.review_context, profile, cached)
+                    try:
+                        self._validate_report(session.review_context, profile, cached)
+                    except ValueError:
+                        return HostProfileFailure(profile, "checkpoint_invalid")
                     reused.append(profile)
                     return cached
             attempts = []
@@ -625,9 +640,17 @@ class HostReviewAdapter:
         session_snapshot_fresh = True
         if failures:
             try:
+                def stop_entry(failure: HostProfileFailure) -> str:
+                    name = failure.profile.value if failure.profile else "host"
+                    entry = f"{name}: {failure.reason}"
+                    if failure.profile and failure.reason in {"executor_error", "retry_exhausted"}:
+                        last = next((a for a in reversed(ledger) if a.profile == failure.profile), None)
+                        if last and last.failure_kind and last.failure_kind != "executor_error":
+                            entry += f" [{last.failure_kind}]"
+                    return entry
+
                 session = self._stop_partial(run_id, session.revision, "; ".join(
-                    f"{failure.profile.value if failure.profile else 'host'}: {failure.reason}"
-                    for failure in failures
+                    stop_entry(failure) for failure in failures
                 ))
             except Exception as exc:  # noqa: BLE001 -- preserve outputs without leaking error bodies
                 reason = (

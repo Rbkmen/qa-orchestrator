@@ -30,6 +30,18 @@ and packet bytes; preflight checks their declared metadata, not their contents.
 
 The adapter measures UTC start/completion time around actual executor calls. Its fresh `execution_attempts` ledger retains failed, cancelled and successful calls, semaphore wait and executor duration, bound to the review head and diff hashes. The Codex executor also records the exact prepared prompt hash, source/selected packet hashes, included refs and source paths, and whether writing the prompt to CLI stdin completed. This confirms only the local handoff attempt; it does not prove provider receipt or model reasoning. The final report shows callback outcome, context delivery, and executor-attested reviewed paths as separate facts. Token totals are available only when every attempt supplies the counter; otherwise they remain unknown. Executors can update `job.observation` before a failure so already observed usage is retained. Reused checkpoint reports remain separately identified and never become fresh attempt records. See [per-attempt observations](REVIEW_UPGRADES.md#6-per-attempt-observations).
 
+After `run_primary_review` returns, `result.summary_markdown()` renders a compact
+host execution summary: session status, adapter duration, each scheduled profile,
+fresh attempts, queue and executor time, known token counts, checkpoint reuse,
+and reported failures. Missing usage is shown as unknown. A stale snapshot is
+labelled explicitly. Completion is host-reported, not proof of model inspection;
+this covers primary profile execution, not the final QA decision. The attempt
+ledger is available on the returned result and is not reconstructed from a saved
+session. The host may display or explicitly save the Markdown while it has the result.
+For MCP clients, `get_qa_orchestration_status` shows selected profiles and the
+metrics available in retained reports. Its view cannot recover checkpoint reuse
+or failed attempts that are absent from those reports; it labels these unknown.
+
 For the built-in Codex cycle, each attempt also carries `review_cycle_stages`: the
 stage name, return/failure/cancellation outcome, elapsed time, and any observed
 token counts and prompt handoff metadata. An unfinished stage can have unknown
@@ -163,6 +175,14 @@ The built-in review cycle caches and reuses a profile only when its complete inp
 
 
 When available, `failure_kind` categorizes input preparation, CLI failure, missing output, output validation, timeout, cancellation, or other executor errors. It records the observed failure stage, not an inferred provider root cause. Error text remains sanitized, and legacy records without the field remain supported.
+
+For a stopped run the adapter includes a known observed failure kind alongside
+the stable failure code when one was recorded. The MCP status, execution summary,
+and final Markdown report explain recognized codes and suggest a next check.
+Unknown codes and arbitrary host text are not classified. These descriptions do
+not establish the provider's root cause; no raw exception text is persisted.
+The server cannot report an error when it is unreachable, and the host is
+responsible for surfacing such failures and reconciling session state.
 
 ## Multiple review inputs
 
